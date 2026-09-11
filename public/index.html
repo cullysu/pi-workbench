@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pi Workbench</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d0d0d'/%3E%3Ctext x='16' y='22' font-size='17' font-family='Georgia' text-anchor='middle' fill='%23ffffff'%3E%CF%80%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/vendor/hljs-dark.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topnav">
+    <div class="tn-brand"><span class="brand-mark">π</span><span class="brand-name">Pi Workbench</span></div>
+    <nav class="tn-views">
+      <button class="tn-view active" data-view="workbench">工作台</button>
+      <button class="tn-view" data-view="config">配置</button>
+      <button class="tn-view" data-view="advanced">高级</button>
+    </nav>
+    <div class="tn-search">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="M11 11l3 3"/></svg>
+      <input id="global-search" placeholder="搜索会话 / 文件…">
+      <span class="tn-kbd">Ctrl K</span>
+    </div>
+    <div class="tn-right">
+      <div class="chip-pop" id="today-wrap">
+        <button id="today-chip" class="chip" type="button">今日 —</button>
+        <div id="today-pop" class="pop-card hidden"></div>
+      </div>
+      <button id="btn-theme" class="icon-btn" title="切换主题">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="shell">
+    <aside id="rail">
+      <div class="rail-view" id="rail-workbench">
+        <button id="btn-new-session" class="rail-new"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg>新建对话</button>
+        <div class="rail-head">
+          <span class="rail-title">项目</span>
+          <button id="btn-add-project" class="pa-btn" title="添加项目"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
+        <div id="project-tree" class="session-list"></div>
+      </div>
+      <div class="rail-view hidden" id="rail-config">
+        <div class="rail-title">§021 · 配置</div>
+        <button class="rail-item active" data-panel="models">模型</button>
+        <button class="rail-item" data-panel="routing">路由</button>
+        <button class="rail-item" data-panel="skills">技能</button>
+        <button class="rail-item" data-panel="console">终端</button>
+        <div class="rail-title">§023 · 备份与恢复</div>
+        <button class="rail-item" data-panel="backup">备份恢复</button>
+        <button class="rail-item" data-panel="migration">配置迁移</button>
+        <button class="rail-item" data-panel="import">导入</button>
+      </div>
+      <div class="rail-view hidden" id="rail-advanced">
+        <button class="rail-item active" data-panel="health">健康检查</button>
+        <button class="rail-item" data-panel="usage">数据分析</button>
+        <button class="rail-item" data-panel="logs">日志</button>
+        <button class="rail-item" data-panel="kernel">内核</button>
+        <button class="rail-item" data-panel="env">环境</button>
+        <button class="rail-item" data-panel="settings">常规</button>
+      </div>
+    </aside>
+
+    <main id="main">
+      <section id="view-workbench" class="view">
+        <div id="topbar" class="hidden">
+          <div id="tb-left"><span id="proj-title" class="proj-title">—</span></div>
+          <div id="tb-right">
+            <button id="btn-goal" class="chip" title="目标模式">目标</button>
+            <button id="btn-logs" class="chip" title="实时事件日志">日志</button>
+            <button id="btn-files" class="chip" title="项目文件浏览">文件</button>
+            <button id="btn-tree" class="chip" title="会话分支树">分支</button>
+            <button id="btn-diff" class="chip" title="查看代码改动">改动</button>
+            <span id="stats-chip" title="本轮对话统计（点击查看明细）"></span>
+            <span id="conn-dot" class="dot off" title="连接"></span>
+          </div>
+        </div>
+        <div id="home-hero" class="hidden">
+          <div class="hero-greet" id="hero-greet">你好</div>
+          <div class="hero-meta"><span id="hero-no">NO. 001</span> 工作台 · <span id="hero-date"></span> · <span id="hero-counts"></span></div>
+        </div>
+        <div id="timeline"><div class="tl-inner"></div></div>
+        <div id="diff-panel" class="hidden">
+          <div class="diff-head"><span>Git 改动</span><button id="btn-diff-close" class="icon-btn">✕</button></div>
+          <pre id="diff-body" class="diff-body"></pre>
+        </div>
+        <div id="files-panel" class="hidden">
+          <div class="diff-head"><span>项目文件</span><button id="btn-files-close" class="icon-btn">✕</button></div>
+          <div id="files-crumbs" class="files-crumbs"></div>
+          <div id="files-list" class="files-list"></div>
+          <pre id="file-view" class="hidden"></pre>
+        </div>
+        <div id="log-drawer" class="hidden">
+          <div class="log-head"><span>实时事件日志</span>
+            <button id="btn-log-clear" class="mini-btn">清空</button>
+            <button id="btn-log-close" class="mini-btn">关闭</button>
+          </div>
+          <div id="log-rows"></div>
+        </div>
+        <div id="goal-banner" class="hidden">
+          <span class="gb-label">目标</span>
+          <span id="goal-text-view" class="gb-text"></span>
+          <button id="btn-goal-stop" class="mini-btn hidden" title="停止自动续跑">停止续跑</button>
+        </div>
+        <footer id="composer">
+          <div class="composer-center">
+            <div id="drop-hint" class="hidden"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>拖放图片到此处</div>
+            <div class="composer-row">
+              <textarea id="input" rows="1" placeholder="向 pi 提问，输入 / 选择技能"></textarea>
+              <div class="composer-actions">
+                <button id="btn-attach" class="ca-btn" title="添加图片"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 3v10M3 8h10"/></svg></button>
+                <button id="model-chip" title="模型">—</button>
+                <button id="think-chip" title="思考等级">思考 · 中</button>
+                <span id="status-inline" class="muted small"></span>
+                <button id="btn-send" class="send-btn" title="发送"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg></button>
+                <button id="btn-stop" class="send-btn stop hidden" title="停止"><svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="4" width="8" height="8" rx="1.5"/></svg></button>
+              </div>
+            </div>
+            <div class="suggest-row" id="suggest-row"></div>
+            <div id="statusline"></div>
+          </div>
+        </footer>
+      </section>
+
+      <section id="view-config" class="view hidden">
+        <div id="panel-models" class="cfg-panel">
+          <div class="cfg-title">模型</div>
+          <div id="cur-cfg" class="cur-cfg"></div>
+          <div class="models-actions">
+            <select id="prov-select"></select>
+            <button id="btn-prov-add" class="mini-btn">添加</button>
+          </div>
+          <div id="prov-form">
+            <label class="pf-label">预设（一键填地址）</label>
+            <select id="pf-preset">
+              <option value="">— 选择常见供应商预设 —</option>
+              <option value="glm">GLM 智谱（open.bigmodel.cn）</option>
+              <option value="xai">xAI Grok（api.x.ai）</option>
+              <option value="openai">OpenAI（api.openai.com）</option>
+              <option value="anthropic">Anthropic Claude（api.anthropic.com）</option>
+              <option value="custom">自定义 / 其他中转</option>
+            </select>
+            <label class="pf-label">API 地址</label>
+            <input id="pf-url" placeholder="https://api.example.com/v1" spellcheck="false">
+            <label class="pf-label">API 类型</label>
+            <select id="pf-api">
+              <option value="openai-responses">openai-responses（GPT / 聚合中转）</option>
+              <option value="openai-completions">openai-completions</option>
+              <option value="anthropic-messages">anthropic-messages（Claude）</option>
+              <option value="google-generative-ai">google-generative-ai（Gemini）</option>
+            </select>
+            <label class="pf-label">API Key</label>
+            <input id="pf-key" type="password" autocomplete="off" placeholder="sk-…" spellcheck="false">
+            <div class="models-actions" style="padding:8px 0 2px">
+              <button id="btn-discover" class="mini-btn">获取模型列表</button>
+              <span id="discover-status" class="muted small"></span>
+            </div>
+            <div id="pf-models"></div>
+            <div class="models-actions" style="padding:8px 0 2px">
+              <button id="btn-prov-save" class="mini-btn primary">保存</button>
+              <button id="btn-prov-del" class="mini-btn">删除</button>
+              <button id="btn-advanced" class="mini-btn">高级 JSON</button>
+            </div>
+            <span id="models-status" class="muted small"></span>
+          </div>
+          <textarea id="models-editor" class="hidden" spellcheck="false" placeholder='{"providers":{...}}'></textarea>
+          <div class="models-actions hidden" id="advanced-actions">
+            <button id="btn-models-save" class="mini-btn primary">保存 JSON</button>
+          </div>
+        </div>
+        <div id="panel-routing" class="cfg-panel hidden">
+          <div class="cfg-title">路由</div>
+          <div class="models-actions">
+            <span class="muted small" style="align-self:center">开关即时生效；回退链按顺序尝试</span>
+            <span id="routing-status" class="muted small"></span>
+            <button id="btn-routing-save" class="mini-btn primary" style="margin-left:auto">保存回退链</button>
+          </div>
+          <div id="routing-providers"></div>
+          <div class="muted small" style="padding:8px 4px 4px">回退链（JSON 数组，模型按顺序尝试）</div>
+          <textarea id="routing-chains" spellcheck="false" placeholder='[["provider-a/model-a","provider-a/model-b"]]'></textarea>
+        </div>
+        <div id="panel-skills" class="cfg-panel hidden">
+          <div class="cfg-title">技能</div>
+          <div class="muted small" style="padding:0 0 10px">扫描 ~/.pi/agent/skills、~/.agents/skills 以及当前项目。开关写入工作台配置，下次开会话生效。没有技能市场。</div>
+          <div id="skills-layout" class="split-layout">
+            <div id="skills-list" class="split-list"></div>
+            <div id="skills-detail" class="split-detail"><div class="muted small">选择左侧技能查看 SKILL.md</div></div>
+          </div>
+        </div>
+        <div id="panel-console" class="cfg-panel hidden">
+          <div class="cfg-title">终端</div>
+          <div class="hero-card">
+            <div class="hero-card-title">直接操作项目目录，不必离开桌面。</div>
+            <div class="muted small">命令在当前工作空间执行。需要完整交互式 shell 时，点「在外部终端打开」。</div>
+            <div class="models-actions" style="padding:10px 0 0">
+              <button id="btn-term-external" class="mini-btn">在外部终端打开</button>
+            </div>
+          </div>
+          <div id="term-cwd" class="muted small" style="padding:8px 0"></div>
+          <pre id="term-out" class="term-out"></pre>
+          <form id="term-form" class="term-form">
+            <input id="term-cmd" placeholder="输入命令，回车执行" spellcheck="false" autocomplete="off">
+            <button class="mini-btn primary" type="submit">运行</button>
+          </form>
+        </div>
+        <div id="panel-backup" class="cfg-panel hidden">
+          <div class="cfg-title">备份恢复</div>
+          <div class="hero-card">
+            <div class="hero-card-title">导出或导入当前工作台配置压缩包</div>
+            <div class="muted small">包含 config.json、routing.json、models.json、settings.json。不含会话正文，也不含 API Key 以外的密钥文件。</div>
+            <div class="warn-bar">备份 zip 可能含 API Key。只保存在本机可信位置，不要发给别人。</div>
+            <div class="models-actions" style="padding:10px 0 0">
+              <button id="btn-backup-export" class="mini-btn primary">导出当前备份</button>
+              <button id="btn-backup-import" class="mini-btn">导入备份压缩包</button>
+            </div>
+            <div id="backup-status" class="muted small" style="padding-top:8px"></div>
+          </div>
+        </div>
+        <div id="panel-migration" class="cfg-panel hidden">
+          <div class="cfg-title">配置迁移</div>
+          <div class="hero-card">
+            <div class="hero-card-title">把已有编码工具配置接到当前工作台</div>
+            <div class="muted small">先检查本机来源，再决定导入。不会在未确认时覆盖文件。</div>
+            <div class="models-actions" style="padding:10px 0 0">
+              <button id="btn-migrate-scan" class="mini-btn primary">检查来源</button>
+            </div>
+          </div>
+          <div id="migrate-box"></div>
+        </div>
+        <div id="panel-import" class="cfg-panel hidden">
+          <div class="cfg-title">导入</div>
+          <div class="import-head">
+            <button class="chip active" data-src="codex">Codex</button>
+            <button class="chip" data-src="claude">Claude</button>
+            <button class="chip" data-src="zcode">ZCode</button>
+            <button class="chip" data-src="opencode">OpenCode</button>
+            <button class="chip" data-src="omp">OMP</button>
+            <button class="chip" data-src="gemini">Gemini</button>
+            <button class="chip" data-src="grok">Grok CLI</button>
+            <button class="chip" data-src="aider">Aider</button>
+          </div>
+          <div id="import-list" class="session-list"></div>
+        </div>
+      </section>
+
+      <section id="view-advanced" class="view hidden">
+        <div id="panel-health" class="cfg-panel">
+          <div class="cfg-title">健康检查</div>
+          <div id="health-box"><div class="muted small" style="padding:10px">加载中…</div></div>
+        </div>
+        <div id="panel-usage" class="cfg-panel hidden">
+          <div class="cfg-title">数据分析</div>
+          <div id="usage-box"></div>
+        </div>
+        <div id="panel-logs" class="cfg-panel hidden">
+          <div class="cfg-title">日志</div>
+          <div class="models-actions"><button id="btn-log-export" class="mini-btn">导出 JSON</button><button id="btn-log-page-clear" class="mini-btn">清空</button></div>
+          <div id="log-page-rows" class="log-page-rows"><div class="muted small">尚无事件</div></div>
+        </div>
+        <div id="panel-kernel" class="cfg-panel hidden">
+          <div class="cfg-title">内核</div>
+          <div id="kernel-box"><div class="muted small" style="padding:10px">加载中…</div></div>
+        </div>
+        <div id="panel-env" class="cfg-panel hidden">
+          <div class="cfg-title">环境</div>
+          <div id="env-box"><div class="muted small" style="padding:10px">加载中…</div></div>
+        </div>
+        <div id="panel-settings" class="cfg-panel hidden">
+          <div class="cfg-title">常规</div>
+          <div class="settings-box">
+            <label>主题</label>
+            <div class="seg">
+              <button data-theme-set="light">浅色</button>
+              <button data-theme-set="dark">深色</button>
+            </div>
+            <label>语言</label>
+            <div class="seg">
+              <button data-lang-set="zh">中文</button>
+              <button data-lang-set="en">EN</button>
+            </div>
+            <label>150 中转密钥</label>
+            <div id="sec150" class="muted small">—</div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer id="statusbar">
+    <span id="sb-gw" class="sb-item">网关 32123</span>
+    <span id="sb-model" class="sb-item">模型 —</span>
+    <span id="sb-ctx" class="sb-item">上下文 —</span>
+    <span class="sb-flex"></span>
+    <span id="sb-kernel" class="sb-item"></span>
+    <span id="sb-today" class="sb-item">今日 0</span>
+  </footer>
+
+  <div id="modal-backdrop" class="hidden">
+    <div id="modal">
+      <div id="modal-title"></div>
+      <div id="modal-body"></div>
+      <div id="modal-actions"></div>
+    </div>
+  </div>
+</div>
+<script src="/vendor/marked.umd.js"></script>
+<script src="/vendor/highlight.min.js"></script>
+<script src="/app.js"></script>
+<script src="/dropdowns.js"></script>
+</body>
+</html>

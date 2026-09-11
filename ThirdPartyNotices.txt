@@ -1,0 +1,44 @@
+Third-party notices for Pi Workbench
+====================================
+
+This distribution bundles the following third-party components:
+
+1. pi coding agent (@earendil-works/pi-coding-agent)
+   Homepage: https://github.com/earendil-works/pi
+   License: MIT
+   Copyright (c) Mario Zechner and earendil-works contributors
+
+   Permission is hereby granted, free of charge, to any person obtaining a copy
+   of this software and associated documentation files (the "Software"), to deal
+   in the Software without restriction, including without limitation the rights
+   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+   copies of the Software, and to permit persons to whom the Software is
+   furnished to do so, subject to the following conditions:
+
+   The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+2. PySide6 / Qt 6 (bundled by PyInstaller)
+   License: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only (used under LGPL-3.0)
+   https://www.qt.io/licensing/ — Qt is used via dynamic linking; users may
+   replace or relink the Qt libraries per the LGPL-3.0 terms.
+
+3. python-markdown
+   License: BSD-3-Clause — https://github.com/Python-Markdown/markdown
+
+4. Pygments
+   License: BSD-2-Clause — https://pygments.org/
+
+5. marked / ws (browser-mode optional dependencies)
+   License: MIT — https://github.com/markedjs/marked , https://github.com/websockets/ws
+
+Routing/health design for the multi-provider failover feature is adapted with
+attribution from the juhe-ai project: https://github.com/huanmin123/juhe-ai

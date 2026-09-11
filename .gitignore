@@ -1,0 +1,42 @@
+# --- Node ---
+node_modules/
+runtime/node_modules/
+
+# --- Python ---
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec.bak
+
+# --- PyInstaller (spec is tracked; outputs are not) ---
+PiWorkbench.spec
+
+# --- secrets & local data (must never be committed) ---
+*.env
+.env*
+secrets*.json
+pi-workbench.secrets.json
+
+# --- logs / temp ---
+*.log
+/tmp/
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+installer/*.exe
+installer/installer/
+installer/upgrade*.ps1
+installer/upgrade-log.txt
+pkg-build/
+dist_electron/
+pkg-runtime.zip
+assets/*.png
+
+# --- local extras (never committed) ---
+pkg/
+tools/
+tauri/
+RELEASE-NOTES.md
+installer/install02.ps1

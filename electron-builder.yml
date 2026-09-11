@@ -1,0 +1,32 @@
+appId: com.cullysu.piworkbench
+productName: Pi Workbench
+copyright: Copyright © 2026 cullysu
+directories:
+  output: dist_electron
+  buildResources: assets
+files:
+  - electron-main.cjs
+  - package.json
+  - "!**/node_modules/**"
+extraResources:
+  - from: pkg-runtime.zip
+    to: runtime.zip
+electronDist: node_modules/electron/dist
+icon: assets/app.ico
+compression: maximum
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Pi Workbench
+  installerLanguages:
+    - zh_CN
+    - en_US
+  deleteAppDataOnUninstall: false
+  artifactName: PiWorkbench-Setup-${version}.${ext}

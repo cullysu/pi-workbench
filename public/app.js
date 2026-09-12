@@ -1137,10 +1137,8 @@ async function renderProjectTree(useCache = false) {
         d.className = 'session-item conv-item' + (state.sessionFile === s.file ? ' active' : '');
         d.dataset.title = (cleanTitle(s.preview) || s.id).toLowerCase();
         d.innerHTML = `<div class="conv-line">
-          <div style="min-width:0;flex:1">
-            <div class="s-name">${esc(cleanTitle(s.preview) || s.name || s.id.slice(0, 8))}</div>
-            <div class="s-preview">${relTime(s.mtime)}</div>
-          </div>
+          <span class="s-name">${esc(cleanTitle(s.preview) || s.name || s.id.slice(0, 8))}</span>
+          <span class="s-time">${relTime(s.mtime)}</span>
           <span class="conv-acts">
             <button class="pa-btn" data-act="del" title="删除对话">${TRASH_ICON}</button>
           </span>

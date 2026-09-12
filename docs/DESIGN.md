@@ -1,4 +1,4 @@
-# Pi Workbench 设计规范（v1）
+# Pi Workbench 设计规范（v1.1）
 
 依据：Apple HIG 的层级哲学、Microsoft Fluent 2 字阶、GitHub Primer 语义色与交互态、4px/8px 间距栅格。
 适用范围：pi-workbench 全部界面。改任何样式先对照本文件；与本文件冲突的旧样式一律以本文件为准。
@@ -22,7 +22,7 @@
 
 规则（来源：西文在前中文在后、per-glyph 回退）：
 - 西文/数字走 Segoe UI Variable，中文回落雅黑 UI（紧凑度标），必须**英文写法**字体名。
-- serif 只用于工作台问候语一处：`Georgia, "Noto Serif SC", "SimSun", serif`。
+- 衬线栈仅保留备用（`--font-serif`），默认 UI 不使用——中文衬线无内置字体会回落宋体，是廉价感第一来源。
 
 ## 3. 字阶（Fluent 2 ramp，px/行高）
 
@@ -34,7 +34,8 @@
 | --text-body-lg | 14/22 | 正文、消息气泡 |
 | --text-subtitle | 16/24 | 面板标题 |
 | --text-title | 20/28 | 页标题（cfg-title） |
-| --text-display | 40/48 | 工作台问候语（衬线） |
+| --text-message | 15/26 | 消息正文（对话可读性优先） |
+| --text-display | 40/48 | 工作台问候语（无衬线，weight 600） |
 
 字重：400 常规、600 semibold（标题/强调）、700 禁用（视觉过重）。
 正文对比度 ≥ 4.5:1；辅助文本用 --text-tertiary（仍需 ≥ 3:1）。
@@ -99,3 +100,12 @@ token：`--space-1=4 --space-2=8 --space-3=12 --space-4=16 --space-5=20 --space-
 - 图表色 #4c8dff/#30a46c/#9a6700 未走 token —— 收编为 --chart-1/2/3。
 - 焦点环缺失（focus-visible）—— 全局补齐。
 - 品牌蓝 --link 与 --accent 两套并存 —— 合并为 --accent。
+
+## v1.1 增补（截图体检结论）
+
+- **深色模式变量继承陷阱**：在 :root 定义 `--bg: var(--canvas)` 这类别名，会在 html 层求值，body.dark 翻转原始 token 后别名不会跟随——**所有别名必须在 body.dark 内重新声明一遍**。
+- **去框化**：卡片/表格/步骤卡不再用边框盒子，改为 surface 底色 + 无边框；表格只保留行间发丝线。框线泛滥 = 廉价感第二来源。
+- **问候语无衬线**：40px weight 600 的 --font，负字距在中文上禁用。
+- **侧栏单行**：会话/对话行 = 标题 + 右侧灰色时间，双行堆叠造成拥挤感。
+- **消息正文 15/26**，composer 圆角 24 + shadow-2，浮动元素才用阴影。
+- **滚动条** 6px、12% 灰、圆角 pill。

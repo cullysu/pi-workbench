@@ -33,15 +33,18 @@ const serverJs = path.join(appRoot, 'server.mjs');
 function ensureRuntime() {
   if (!runtimeZip) return Promise.resolve();
   const stamp = path.join(appRoot, '.version');
-  const ver = app.getVersion();
-  const valid = fs.existsSync(path.join(appRoot, 'server.mjs')) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8').trim() === ver;
+  // signature = app version + runtime zip identity, so a rebuilt installer with the
+  // same version still re-extracts (the old version-only stamp skipped stale runtimes)
+  let sig = app.getVersion();
+  try { const st = fs.statSync(runtimeZip); sig += `|${st.size}|${Math.floor(st.mtimeMs)}`; } catch {}
+  const valid = fs.existsSync(path.join(appRoot, 'server.mjs')) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8').trim() === sig;
   if (valid) return Promise.resolve();
   try { fs.rmSync(appRoot, { recursive: true, force: true }); } catch {}
   fs.mkdirSync(appRoot, { recursive: true });
   return new Promise((resolve, reject) => {
     const p = spawn(path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'tar.exe'), ['-xf', runtimeZip, '-C', appRoot], { windowsHide: true });
     p.on('exit', (code) => {
-      if (code === 0) { try { fs.writeFileSync(stamp, ver); } catch {} resolve(); }
+      if (code === 0) { try { fs.writeFileSync(stamp, sig); } catch {} resolve(); }
       else reject(new Error('runtime extract failed: ' + code));
     });
     p.on('error', reject);

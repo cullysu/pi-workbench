@@ -63,23 +63,30 @@ function openDropdown(anchor, buildItems) {
   return menu;
 }
 
-// model chip → model list only (thinking level lives on its own chip)
+// model chip → only models from the provider currently in use.
+// switching provider config happens in 配置→模型（设为默认）; failover also lands here.
 document.querySelector('#model-chip').onclick = () => {
-  openDropdown(document.querySelector('#model-chip'), () => [
-    { header: '模型' },
-    ...__wb.state.modelsAvailable.slice(0, 200).map((m) => {
-      const key = `${m.provider}/${m.id}`;
-      return {
-        label: friendlyModel(m.id),
-        checked: key === __wb.state.selModel,
-        cb: () => {
-          __wb.state.selModel = key;
-          __wb.updateModelChip();
-          __wb.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
-        },
-      };
-    }),
-  ]);
+  const st = __wb.state;
+  const curProv = (st.selModel || st.cfg?.defaultModel || '').split('/')[0]
+    || (st.modelsAvailable[0] || {}).provider || '';
+  const mine = st.modelsAvailable.filter((m) => m.provider === curProv).slice(0, 200);
+  const items = [{ header: `模型 · ${curProv || '未选择配置'}` }];
+  if (!mine.length) {
+    items.push({ label: '该配置没有已获取的模型 — 到 配置 → 模型 获取', cb: () => {} });
+  }
+  for (const m of mine) {
+    const key = `${m.provider}/${m.id}`;
+    items.push({
+      label: friendlyModel(m.id),
+      checked: key === st.selModel,
+      cb: () => {
+        st.selModel = key;
+        __wb.updateModelChip();
+        __wb.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
+      },
+    });
+  }
+  openDropdown(document.querySelector('#model-chip'), items);
 };
 
 // thinking chip → thinking levels only

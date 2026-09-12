@@ -37,7 +37,7 @@ assets/*.png
 # --- local extras (never committed) ---
 pkg/
 tools/
-tauri/
+tauri/target/
 RELEASE-NOTES.md
 installer/install02.ps1
 tauri/target/

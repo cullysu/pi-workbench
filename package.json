@@ -1,6 +1,6 @@
 {
   "name": "pi-workbench",
-  "version": "0.3.1",
+  "version": "0.4.1",
   "description": "Unified desktop-grade workbench for the pi coding agent",
   "main": "electron-main.cjs",
   "scripts": {

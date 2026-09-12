@@ -1540,6 +1540,9 @@ $('#btn-models-save').onclick = async () => {
 // ---------- usage panel (omp-stats inspired) ----------
 function fmtTok(n) { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
 function statCard(k, v) { return `<div class="ucard"><div class="u-k">${k}</div><div class="u-v">${v}</div></div>`; }
+function cssVar(name) {
+  return getComputedStyle(document.body).getPropertyValue(name).trim() || '#888';
+}
 async function loadUsage() {
   const box = $('#usage-box');
   box.innerHTML = `<div class="muted small" style="padding:20px 8px">${t('loading')}</div>`;
@@ -1595,8 +1598,8 @@ async function loadUsage() {
     const labels = chartDays.map(([d]) => d.slice(5));
     const series = (key) => chartDays.map(([, v]) => v[key] || 0);
     const css = getComputedStyle(document.body);
-    const axis = css.getPropertyValue('--text3').trim() || '#888';
-    const grid = css.getPropertyValue('--hairline').trim() || '#eee';
+    const axis = cssVar('--text3');
+    const grid = cssVar('--line-soft');
     try {
       if (state.usageChart) state.usageChart.destroy();
       const w = Math.max(320, $('#usage-chart').clientWidth || 560);
@@ -1605,9 +1608,9 @@ async function loadUsage() {
         scales: { x: { time: false } },
         series: [
           {},
-          { label: '输入', stroke: '#4c8dff', width: 2, points: { show: chartDays.length <= 7 } },
-          { label: '输出', stroke: '#30a46c', width: 2, points: { show: chartDays.length <= 7 } },
-          { label: '缓存读', stroke: '#9a6700', width: 2, dashed: true },
+          { label: '输入', stroke: cssVar('--chart-1'), width: 2, points: { show: chartDays.length <= 7 } },
+          { label: '输出', stroke: cssVar('--chart-2'), width: 2, points: { show: chartDays.length <= 7 } },
+          { label: '缓存读', stroke: cssVar('--chart-3'), width: 2, dashed: true },
         ],
         axes: [
           { stroke: axis, grid: { stroke: grid, width: 1 } },

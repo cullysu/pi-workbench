@@ -81,7 +81,7 @@ test.after(() => {
 test('kernel reports shape and uses scratch home', async () => {
   const { status, data } = await req('/api/kernel');
   assert.equal(status, 200);
-  assert.ok(data.pi, 'pi version present');
+  assert.ok('pi' in data, 'pi version field present'); // null when pi package not installed (CI)
   assert.ok(String(data.node).startsWith('v'));
   assert.equal(data.secrets.relay, false, 'no relaySecret configured in scratch home');
   assert.ok(data.paths.config.includes(path.basename(tmpHome)), 'config path inside scratch home');
@@ -98,9 +98,15 @@ test('config: defaults, post persists, projects dedupe case-insensitively', asyn
   r = await req('/api/projects/add', { path: tmpProj, name: 'proj' });
   assert.equal(r.status, 200);
   assert.equal(r.data.projects.length, 1);
-  const flipped = tmpProj.toLowerCase() === tmpProj ? tmpProj.toUpperCase() : tmpProj.toLowerCase();
-  r = await req('/api/projects/add', { path: flipped, name: 'proj2' });
-  assert.equal(r.data.projects.length, 1, 'case variant not duplicated');
+  if (fs.existsSync(tmpProj.toLowerCase() === tmpProj ? tmpProj.toUpperCase() : tmpProj.toLowerCase())) {
+    // case-insensitive filesystem (windows/mac): a case variant must not duplicate
+    const flipped = tmpProj.toLowerCase() === tmpProj ? tmpProj.toUpperCase() : tmpProj.toLowerCase();
+    r = await req('/api/projects/add', { path: flipped, name: 'proj2' });
+    assert.equal(r.data.projects.length, 1, 'case variant not duplicated');
+  } else {
+    r = await req('/api/projects/add', { path: tmpProj, name: 'proj-again' });
+    assert.equal(r.data.projects.length, 1, 'exact duplicate not added');
+  }
 
   r = await req('/api/projects/add', { path: path.join(tmpProj, 'no-such-dir'), name: 'x' });
   assert.equal(r.status, 400);

@@ -46,6 +46,7 @@ jobs:
         run: |
           npm install --prefix pkg-build @earendil-works/pi-coding-agent@0.85.0 ws@8.21.3 --omit=dev --no-fund --no-audit
           Copy-Item server.mjs pkg-build/server.mjs
+          Copy-Item zip.mjs pkg-build/zip.mjs
           Copy-Item electron-main.cjs pkg-build/electron-main.cjs
           Copy-Item extensions pkg-build/extensions -Recurse -Force
           robocopy public pkg-build/public /E /NFL /NDL /NJH /NJS /NP

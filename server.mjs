@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
+import { createZip, readZip } from './zip.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -1032,39 +1033,28 @@ function copyIfExists(src, dest) {
     return true;
   } catch { return false; }
 }
-function runPs(command) {
-  return new Promise((resolve) => {
-    const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true });
-    let out = '', err = '';
-    p.stdout.on('data', (c) => { out += c; });
-    p.stderr.on('data', (c) => { err += c; });
-    p.on('error', (e) => resolve({ code: -1, out: '', err: e.message }));
-    p.on('close', (code) => resolve({ code, out, err }));
-  });
-}
-function psQuote(s) {
-  return "'" + String(s).replace(/'/g, "''") + "'";
-}
 async function exportBackupZip() {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-bak-'));
   const destDir = path.join(CFG_DIR, 'exports');
   fs.mkdirSync(destDir, { recursive: true });
   const zipPath = path.join(destDir, `pi-workbench-backup-${stamp}.zip`);
-  const packed = [];
-  if (copyIfExists(CFG_FILE, path.join(tmp, 'workbench', 'config.json'))) packed.push('workbench/config.json');
-  if (copyIfExists(ROUTING_FILE, path.join(tmp, 'workbench', 'routing.json'))) packed.push('workbench/routing.json');
-  if (copyIfExists(PI_MODELS, path.join(tmp, 'pi-agent', 'models.json'))) packed.push('pi-agent/models.json');
-  if (copyIfExists(PI_SETTINGS, path.join(tmp, 'pi-agent', 'settings.json'))) packed.push('pi-agent/settings.json');
-  const { skills } = listSkills(null);
-  fs.writeFileSync(path.join(tmp, 'manifest.json'), JSON.stringify({
-    app: 'pi-workbench', version: '0.2.0', at: new Date().toISOString(), packed, skills: skills.map((s) => s.name),
-  }, null, 2));
-  packed.push('manifest.json');
-  const r = await runPs(`Compress-Archive -Path ${psQuote(path.join(tmp, '*'))} -DestinationPath ${psQuote(zipPath)} -Force`);
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
-  if (r.code !== 0 || !fs.existsSync(zipPath)) throw new Error(r.err || r.out || 'zip failed');
-  return { path: zipPath, packed, size: fs.statSync(zipPath).size };
+  const entries = [];
+  const add = (name, src) => {
+    try {
+      if (fs.existsSync(src)) entries.push({ name, data: fs.readFileSync(src) });
+    } catch {}
+  };
+  add('workbench/config.json', CFG_FILE);
+  add('workbench/routing.json', ROUTING_FILE);
+  add('pi-agent/models.json', PI_MODELS);
+  add('pi-agent/settings.json', PI_SETTINGS);
+  entries.push({ name: 'manifest.json', data: Buffer.from(JSON.stringify({
+    app: 'pi-workbench', version: '0.3.0', at: new Date().toISOString(), packed: entries.map((e) => e.name),
+    skills: listSkills(null).skills.map((s) => s.name),
+  }, null, 2)) });
+  const zip = createZip(entries);
+  fs.writeFileSync(zipPath, zip);
+  return { path: zipPath, packed: entries.map((e) => e.name), size: zip.length };
 }
 async function importBackupZip(zipPath) {
   if (!zipPath || !fs.existsSync(zipPath) || !zipPath.toLowerCase().endsWith('.zip')) throw new Error('需要本地 .zip 路径');
@@ -1074,17 +1064,26 @@ async function importBackupZip(zipPath) {
   copyIfExists(ROUTING_FILE, path.join(pre, 'routing.json'));
   copyIfExists(PI_MODELS, path.join(pre, 'models.json'));
   copyIfExists(PI_SETTINGS, path.join(pre, 'settings.json'));
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-imp-'));
-  const r = await runPs(`Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(tmp)} -Force`);
-  if (r.code !== 0) throw new Error(r.err || r.out || 'unzip failed');
+  const entries = readZip(fs.readFileSync(zipPath));
+  const byName = new Map(entries.map((e) => [e.name.split('\\').join('/'), e.data]));
+  const targets = [
+    ['workbench/config.json', CFG_FILE, 'config.json'],
+    ['workbench/routing.json', ROUTING_FILE, 'routing.json'],
+    ['pi-agent/models.json', PI_MODELS, 'models.json'],
+    ['pi-agent/settings.json', PI_SETTINGS, 'settings.json'],
+  ];
   const restored = [];
-  if (copyIfExists(path.join(tmp, 'workbench', 'config.json'), CFG_FILE)) restored.push('config.json');
-  if (copyIfExists(path.join(tmp, 'workbench', 'routing.json'), ROUTING_FILE)) restored.push('routing.json');
-  if (copyIfExists(path.join(tmp, 'pi-agent', 'models.json'), PI_MODELS)) restored.push('models.json');
-  if (copyIfExists(path.join(tmp, 'pi-agent', 'settings.json'), PI_SETTINGS)) restored.push('settings.json');
-  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
+  for (const [name, dest, label] of targets) {
+    if (byName.has(name)) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, byName.get(name));
+      restored.push(label);
+    }
+  }
+  if (!restored.length) throw new Error('压缩包里没有可识别的备份文件');
   return { restored, backup: pre };
 }
+
 function countFiles(root, ext, max = 400) {
   let n = 0;
   const walk = (d, depth) => {
@@ -1119,8 +1118,11 @@ function openExternalTerm(cwd) {
 }
 function execInCwd(cwd, cmd) {
   const dir = cwd && fs.existsSync(cwd) ? cwd : HOME;
+  const isWin = process.platform === 'win32';
+  const exe = isWin ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
+  const args = isWin ? ['/d', '/s', '/c', cmd] : ['-c', cmd];
   return new Promise((resolve) => {
-    const p = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', cmd], { cwd: dir, windowsHide: true });
+    const p = spawn(exe, args, { cwd: dir, windowsHide: true });
     let out = '', err = '';
     p.stdout.on('data', (c) => { if (out.length < 200000) out += c; });
     p.stderr.on('data', (c) => { if (err.length < 40000) err += c; });

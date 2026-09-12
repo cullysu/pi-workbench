@@ -51,7 +51,7 @@ jobs:
           Copy-Item extensions pkg-build/extensions -Recurse -Force
           robocopy public pkg-build/public /E /NFL /NDL /NJH /NJS /NP
           if ($LASTEXITCODE -ge 8) { exit 1 }
-          Compress-Archive -Path pkg-build/* -DestinationPath pkg-runtime.zip -Force
+          node scripts/make-runtime.mjs
       - name: Build NSIS installer
         run: npx electron-builder --win nsis --x64
         env:

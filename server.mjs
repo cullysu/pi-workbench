@@ -943,6 +943,35 @@ const runGit = (cwd, args, max = 200000) => new Promise((resolve) => {
 
 const PI_SETTINGS = path.join(HOME, '.pi', 'agent', 'settings.json');
 const MCP_FILE = path.join(HOME, '.pi', 'agent', 'mcp.json');
+const MODEL_KB_FILE = path.join(__dirname, 'data', 'models-kb.json');
+const MODEL_META_FILE = path.join(CFG_DIR, 'model-meta.json');
+const MODEL_KB = readJson(MODEL_KB_FILE) || { models: {}, family: {} };
+
+// Look up a model id in the knowledge base. Exact id first (with common suffixes
+// stripped), then longest family-prefix match. Family matches carry structure
+// (context window / max output) but never invented pricing.
+function kbLookup(modelId) {
+  let id = String(modelId || '').toLowerCase();
+  if (id.includes('/')) id = id.slice(id.lastIndexOf('/') + 1);
+  id = id.replace(/:latest$/, '').replace(/:free$/, '').replace(/:beta$/, '');
+  const exact = MODEL_KB.models[id];
+  if (exact) return { ...exact, source: 'exact' };
+  const dated = id.replace(/-\d{8}$/, '');
+  if (dated !== id && MODEL_KB.models[dated]) return { ...MODEL_KB.models[dated], source: 'exact' };
+  let best = null;
+  for (const [prefix, meta] of Object.entries(MODEL_KB.family || {})) {
+    if (id.startsWith(prefix) && (!best || prefix.length > best._len)) best = { ...meta, _len: prefix.length };
+  }
+  if (best) return { ctx: best.ctx, max: best.max, price: best.price, source: 'family' };
+  return null;
+}
+function loadModelMeta() {
+  return readJson(MODEL_META_FILE) || {};
+}
+function saveModelMeta(meta) {
+  fs.mkdirSync(CFG_DIR, { recursive: true });
+  fs.writeFileSync(MODEL_META_FILE, JSON.stringify(meta, null, 2));
+}
 const PI_SKILLS = path.join(HOME, '.pi', 'agent', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
 
@@ -1181,10 +1210,11 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/models') {
       if (req.method === 'POST') {
         const body = await readBody(req);
+        const { meta: _ignored, ...doc } = body; // meta lives in model-meta.json, never in models.json
         fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
-        fs.writeFileSync(PI_MODELS, JSON.stringify(body, null, 2));
+        fs.writeFileSync(PI_MODELS, JSON.stringify(doc, null, 2));
       }
-      return json(res, 200, readJson(PI_MODELS) || { providers: {} });
+      return json(res, 200, { ...(readJson(PI_MODELS) || { providers: {} }), meta: loadModelMeta() });
     }
     if (p === '/api/models/available') {
       // short-lived rpc to enumerate models (uses pi's own catalog + models.json)
@@ -1229,10 +1259,46 @@ const server = http.createServer(async (req, res) => {
         if (!r.ok) return json(res, 200, { ok: false, status: r.status, ms: Date.now() - t0 });
         const j = await r.json().catch(() => ({}));
         const ids = (j.data || j.models || []).map((m) => m.id || m.name).filter(Boolean);
-        return json(res, 200, { ok: true, ms: Date.now() - t0, models: ids });
+        const kb = {};
+        for (const id of ids) {
+          const hit = kbLookup(id);
+          if (hit) kb[id] = hit;
+        }
+        return json(res, 200, { ok: true, ms: Date.now() - t0, models: ids, kb });
       } catch (e) {
         return json(res, 200, { ok: false, detail: String(e.message || e) });
       }
+    }
+    if (p === '/api/providers/kbfill' && req.method === 'POST') {
+      const { provider } = await readBody(req);
+      const doc = readJson(PI_MODELS) || { providers: {} };
+      const pv = doc.providers?.[provider];
+      if (!pv || !Array.isArray(pv.models)) return json(res, 400, { error: 'unknown provider or empty model list' });
+      const fills = {};
+      const pricing = {};
+      let n = 0;
+      for (const m of pv.models) {
+        const hit = kbLookup(m.id);
+        if (!hit) continue;
+        if ((!m.contextWindow || m.contextWindow === 128000) && hit.ctx) {
+          m.contextWindow = hit.ctx;
+          (fills[m.id] = fills[m.id] || {}).contextWindow = hit.ctx;
+        }
+        if ((!m.maxTokens || m.maxTokens === 4096) && hit.max) {
+          m.maxTokens = hit.max;
+          (fills[m.id] = fills[m.id] || {}).maxTokens = hit.max;
+        }
+        if (hit.price) {
+          pricing[m.id] = hit.price;
+          n++;
+        }
+      }
+      fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
+      fs.writeFileSync(PI_MODELS, JSON.stringify(doc, null, 2));
+      const meta = loadModelMeta();
+      for (const [id, price] of Object.entries(pricing)) meta[`${provider}|${id}`] = price;
+      saveModelMeta(meta);
+      return json(res, 200, { fills, pricing, priced: n });
     }
     if (p === '/api/providers/test' && req.method === 'POST') {
       const { model } = await readBody(req);

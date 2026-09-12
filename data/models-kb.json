@@ -1,0 +1,756 @@
+{
+  "version": "2026-09-13",
+  "note": "ctx=上下文窗口, max=最大输出, price.in/price.out=每 1M tokens 标准档（阶梯定价取首档）价格, cur=usd|cny。数据来自各厂商公开定价页（截至版本日期）。无公开资料的条目不填价格，不编造。",
+  "models": {
+    "gpt-5": {
+      "ctx": 400000,
+      "max": 128000,
+      "price": {
+        "in": 1.25,
+        "out": 10,
+        "cur": "usd"
+      }
+    },
+    "gpt-5-mini": {
+      "ctx": 400000,
+      "max": 128000,
+      "price": {
+        "in": 0.25,
+        "out": 2,
+        "cur": "usd"
+      }
+    },
+    "gpt-5-nano": {
+      "ctx": 400000,
+      "max": 128000,
+      "price": {
+        "in": 0.05,
+        "out": 0.4,
+        "cur": "usd"
+      }
+    },
+    "gpt-4.1": {
+      "ctx": 1047576,
+      "max": 32768,
+      "price": {
+        "in": 2,
+        "out": 8,
+        "cur": "usd"
+      }
+    },
+    "gpt-4.1-mini": {
+      "ctx": 1047576,
+      "max": 32768,
+      "price": {
+        "in": 0.4,
+        "out": 1.6,
+        "cur": "usd"
+      }
+    },
+    "gpt-4.1-nano": {
+      "ctx": 1047576,
+      "max": 32768,
+      "price": {
+        "in": 0.1,
+        "out": 0.4,
+        "cur": "usd"
+      }
+    },
+    "gpt-4o": {
+      "ctx": 128000,
+      "max": 16384,
+      "price": {
+        "in": 2.5,
+        "out": 10,
+        "cur": "usd"
+      }
+    },
+    "gpt-4o-mini": {
+      "ctx": 128000,
+      "max": 16384,
+      "price": {
+        "in": 0.15,
+        "out": 0.6,
+        "cur": "usd"
+      }
+    },
+    "chatgpt-4o-latest": {
+      "ctx": 128000,
+      "max": 16384,
+      "price": {
+        "in": 5,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "o1": {
+      "ctx": 200000,
+      "max": 100000,
+      "price": {
+        "in": 15,
+        "out": 60,
+        "cur": "usd"
+      }
+    },
+    "o1-mini": {
+      "ctx": 128000,
+      "max": 65536,
+      "price": {
+        "in": 1.1,
+        "out": 4.4,
+        "cur": "usd"
+      }
+    },
+    "o3": {
+      "ctx": 200000,
+      "max": 100000,
+      "price": {
+        "in": 2,
+        "out": 8,
+        "cur": "usd"
+      }
+    },
+    "o3-mini": {
+      "ctx": 200000,
+      "max": 100000,
+      "price": {
+        "in": 1.1,
+        "out": 4.4,
+        "cur": "usd"
+      }
+    },
+    "o4-mini": {
+      "ctx": 200000,
+      "max": 100000,
+      "price": {
+        "in": 1.1,
+        "out": 4.4,
+        "cur": "usd"
+      }
+    },
+    "gpt-4-turbo": {
+      "ctx": 128000,
+      "max": 4096,
+      "price": {
+        "in": 10,
+        "out": 30,
+        "cur": "usd"
+      }
+    },
+    "gpt-4": {
+      "ctx": 8192,
+      "max": 8192,
+      "price": {
+        "in": 30,
+        "out": 60,
+        "cur": "usd"
+      }
+    },
+    "gpt-3.5-turbo": {
+      "ctx": 16385,
+      "max": 4096,
+      "price": {
+        "in": 0.5,
+        "out": 1.5,
+        "cur": "usd"
+      }
+    },
+    "claude-opus-4-1": {
+      "ctx": 200000,
+      "max": 32000,
+      "price": {
+        "in": 15,
+        "out": 75,
+        "cur": "usd"
+      }
+    },
+    "claude-opus-4": {
+      "ctx": 200000,
+      "max": 32000,
+      "price": {
+        "in": 15,
+        "out": 75,
+        "cur": "usd"
+      }
+    },
+    "claude-sonnet-4-5": {
+      "ctx": 200000,
+      "max": 64000,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "claude-sonnet-4": {
+      "ctx": 200000,
+      "max": 64000,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "claude-3-7-sonnet": {
+      "ctx": 200000,
+      "max": 64000,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "claude-3-5-sonnet": {
+      "ctx": 200000,
+      "max": 8192,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "claude-3-5-haiku": {
+      "ctx": 200000,
+      "max": 8192,
+      "price": {
+        "in": 0.8,
+        "out": 4,
+        "cur": "usd"
+      }
+    },
+    "claude-3-opus": {
+      "ctx": 200000,
+      "max": 4096,
+      "price": {
+        "in": 15,
+        "out": 75,
+        "cur": "usd"
+      }
+    },
+    "claude-3-haiku": {
+      "ctx": 200000,
+      "max": 4096,
+      "price": {
+        "in": 0.25,
+        "out": 1.25,
+        "cur": "usd"
+      }
+    },
+    "gemini-2.5-pro": {
+      "ctx": 1048576,
+      "max": 65536,
+      "price": {
+        "in": 1.25,
+        "out": 10,
+        "cur": "usd"
+      }
+    },
+    "gemini-2.5-flash": {
+      "ctx": 1048576,
+      "max": 65536,
+      "price": {
+        "in": 0.3,
+        "out": 2.5,
+        "cur": "usd"
+      }
+    },
+    "gemini-2.5-flash-lite": {
+      "ctx": 1048576,
+      "max": 65536,
+      "price": {
+        "in": 0.1,
+        "out": 0.4,
+        "cur": "usd"
+      }
+    },
+    "gemini-2.0-flash": {
+      "ctx": 1048576,
+      "max": 8192,
+      "price": {
+        "in": 0.1,
+        "out": 0.4,
+        "cur": "usd"
+      }
+    },
+    "gemini-2.0-flash-lite": {
+      "ctx": 1048576,
+      "max": 8192,
+      "price": {
+        "in": 0.075,
+        "out": 0.3,
+        "cur": "usd"
+      }
+    },
+    "gemini-1.5-pro": {
+      "ctx": 2097152,
+      "max": 8192,
+      "price": {
+        "in": 1.25,
+        "out": 5,
+        "cur": "usd"
+      }
+    },
+    "gemini-1.5-flash": {
+      "ctx": 1048576,
+      "max": 8192,
+      "price": {
+        "in": 0.075,
+        "out": 0.3,
+        "cur": "usd"
+      }
+    },
+    "gemini-1.5-flash-8b": {
+      "ctx": 1048576,
+      "max": 8192,
+      "price": {
+        "in": 0.0375,
+        "out": 0.15,
+        "cur": "usd"
+      }
+    },
+    "grok-4": {
+      "ctx": 256000,
+      "max": 32768,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "grok-4-fast": {
+      "ctx": 2000000,
+      "max": 32768,
+      "price": {
+        "in": 0.2,
+        "out": 0.5,
+        "cur": "usd"
+      }
+    },
+    "grok-3": {
+      "ctx": 131072,
+      "max": 32768,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "grok-3-mini": {
+      "ctx": 131072,
+      "max": 32768,
+      "price": {
+        "in": 0.3,
+        "out": 0.5,
+        "cur": "usd"
+      }
+    },
+    "grok-2": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 2,
+        "out": 10,
+        "cur": "usd"
+      }
+    },
+    "grok-code-fast-1": {
+      "ctx": 256000,
+      "max": 32768,
+      "price": {
+        "in": 0.2,
+        "out": 1.5,
+        "cur": "usd"
+      }
+    },
+    "deepseek-chat": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 0.56,
+        "out": 1.68,
+        "cur": "usd"
+      }
+    },
+    "deepseek-reasoner": {
+      "ctx": 131072,
+      "max": 32768,
+      "price": {
+        "in": 0.68,
+        "out": 2.19,
+        "cur": "usd"
+      }
+    },
+    "deepseek-v3": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 0.56,
+        "out": 1.68,
+        "cur": "usd"
+      }
+    },
+    "deepseek-r1": {
+      "ctx": 131072,
+      "max": 32768,
+      "price": {
+        "in": 0.68,
+        "out": 2.19,
+        "cur": "usd"
+      }
+    },
+    "qwen-max": {
+      "ctx": 32768,
+      "max": 8192,
+      "price": {
+        "in": 1.6,
+        "out": 6.4,
+        "cur": "usd"
+      }
+    },
+    "qwen-plus": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 0.4,
+        "out": 1.2,
+        "cur": "usd"
+      }
+    },
+    "qwen-turbo": {
+      "ctx": 1000000,
+      "max": 8192,
+      "price": {
+        "in": 0.05,
+        "out": 0.2,
+        "cur": "usd"
+      }
+    },
+    "qwen3-235b-a22b": {
+      "ctx": 131072,
+      "max": 32768
+    },
+    "qwen2.5-72b-instruct": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "glm-4.6": {
+      "ctx": 204800,
+      "max": 131072,
+      "price": {
+        "in": 0.6,
+        "out": 2.2,
+        "cur": "usd"
+      }
+    },
+    "glm-4.5": {
+      "ctx": 131072,
+      "max": 98304,
+      "price": {
+        "in": 0.6,
+        "out": 2.2,
+        "cur": "usd"
+      }
+    },
+    "glm-4.5-air": {
+      "ctx": 131072,
+      "max": 98304,
+      "price": {
+        "in": 0.2,
+        "out": 1.1,
+        "cur": "usd"
+      }
+    },
+    "glm-4-plus": {
+      "ctx": 128000,
+      "max": 4096,
+      "price": {
+        "in": 7,
+        "out": 7,
+        "cur": "usd"
+      }
+    },
+    "glm-4-flash": {
+      "ctx": 128000,
+      "max": 4096,
+      "price": {
+        "in": 0,
+        "out": 0,
+        "cur": "cny"
+      }
+    },
+    "kimi-k2-0905-preview": {
+      "ctx": 262144,
+      "max": 16384,
+      "price": {
+        "in": 0.6,
+        "out": 2.5,
+        "cur": "usd"
+      }
+    },
+    "kimi-k2-turbo-preview": {
+      "ctx": 262144,
+      "max": 16384,
+      "price": {
+        "in": 2.5,
+        "out": 12.5,
+        "cur": "usd"
+      }
+    },
+    "kimi-latest": {
+      "ctx": 262144,
+      "max": 16384,
+      "price": {
+        "in": 0.6,
+        "out": 2.5,
+        "cur": "usd"
+      }
+    },
+    "llama-3.3-70b-instruct": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "llama-3.1-405b-instruct": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "llama-3.1-70b-instruct": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "llama-3.1-8b-instruct": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "llama-4-scout": {
+      "ctx": 10485760,
+      "max": 8192
+    },
+    "llama-4-maverick": {
+      "ctx": 1048576,
+      "max": 8192
+    },
+    "mistral-large-latest": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 2,
+        "out": 6,
+        "cur": "usd"
+      }
+    },
+    "mistral-small-latest": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 0.1,
+        "out": 0.3,
+        "cur": "usd"
+      }
+    },
+    "codestral-latest": {
+      "ctx": 262144,
+      "max": 8192,
+      "price": {
+        "in": 0.3,
+        "out": 0.9,
+        "cur": "usd"
+      }
+    },
+    "magistral-medium-latest": {
+      "ctx": 40960,
+      "max": 8192,
+      "price": {
+        "in": 2,
+        "out": 5,
+        "cur": "usd"
+      }
+    },
+    "pixtral-large-latest": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 2,
+        "out": 6,
+        "cur": "usd"
+      }
+    },
+    "minimax-m1": {
+      "ctx": 1000192,
+      "max": 40960
+    },
+    "doubao-1.5-pro-32k": {
+      "ctx": 32768,
+      "max": 12288,
+      "price": {
+        "in": 0.8,
+        "out": 2,
+        "cur": "cny"
+      }
+    }
+  },
+  "family": {
+    "grok-4": {
+      "ctx": 256000,
+      "max": 32768,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "grok-3": {
+      "ctx": 131072,
+      "max": 32768
+    },
+    "gpt-4o": {
+      "ctx": 128000,
+      "max": 16384,
+      "price": {
+        "in": 2.5,
+        "out": 10,
+        "cur": "usd"
+      }
+    },
+    "gpt-4.1": {
+      "ctx": 1047576,
+      "max": 32768,
+      "price": {
+        "in": 2,
+        "out": 8,
+        "cur": "usd"
+      }
+    },
+    "gpt-5": {
+      "ctx": 400000,
+      "max": 128000,
+      "price": {
+        "in": 1.25,
+        "out": 10,
+        "cur": "usd"
+      }
+    },
+    "o3": {
+      "ctx": 200000,
+      "max": 100000
+    },
+    "o1": {
+      "ctx": 200000,
+      "max": 100000
+    },
+    "claude-opus-4": {
+      "ctx": 200000,
+      "max": 32000,
+      "price": {
+        "in": 15,
+        "out": 75,
+        "cur": "usd"
+      }
+    },
+    "claude-sonnet-4": {
+      "ctx": 200000,
+      "max": 64000,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "claude-3-5-sonnet": {
+      "ctx": 200000,
+      "max": 8192,
+      "price": {
+        "in": 3,
+        "out": 15,
+        "cur": "usd"
+      }
+    },
+    "claude-3-5-haiku": {
+      "ctx": 200000,
+      "max": 8192
+    },
+    "gemini-2.5-pro": {
+      "ctx": 1048576,
+      "max": 65536
+    },
+    "gemini-2.5-flash": {
+      "ctx": 1048576,
+      "max": 65536
+    },
+    "gemini-2.0-flash": {
+      "ctx": 1048576,
+      "max": 8192
+    },
+    "deepseek-chat": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 0.56,
+        "out": 1.68,
+        "cur": "usd"
+      }
+    },
+    "deepseek-reasoner": {
+      "ctx": 131072,
+      "max": 32768
+    },
+    "deepseek-r1": {
+      "ctx": 131072,
+      "max": 32768
+    },
+    "deepseek-v3": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 0.56,
+        "out": 1.68,
+        "cur": "usd"
+      }
+    },
+    "qwen-plus": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "qwen-max": {
+      "ctx": 32768,
+      "max": 8192
+    },
+    "glm-4.6": {
+      "ctx": 204800,
+      "max": 131072,
+      "price": {
+        "in": 0.6,
+        "out": 2.2,
+        "cur": "usd"
+      }
+    },
+    "glm-4.5": {
+      "ctx": 131072,
+      "max": 98304
+    },
+    "kimi-k2": {
+      "ctx": 262144,
+      "max": 16384
+    },
+    "llama-3.3": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "llama-3.1": {
+      "ctx": 131072,
+      "max": 8192
+    },
+    "mistral-large": {
+      "ctx": 131072,
+      "max": 8192,
+      "price": {
+        "in": 2,
+        "out": 6,
+        "cur": "usd"
+      }
+    },
+    "mistral-small": {
+      "ctx": 131072,
+      "max": 8192
+    }
+  }
+}

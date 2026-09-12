@@ -1309,6 +1309,11 @@ async function openImported(src, file) {
 async function loadModelsEditor() {
   const m = await api.get('/api/models');
   state.modelsDoc = m;
+  state.kbPricing = state.kbPricing || {};
+  for (const [k, v] of Object.entries(m.meta || {})) {
+    const i = k.indexOf('|');
+    if (i > 0) (state.kbPricing[k.slice(0, i)] = state.kbPricing[k.slice(0, i)] || {})[k.slice(i + 1)] = v;
+  }
   state.routingMeta = await api.get('/api/routing').catch(() => ({ providers: [] }));
   state.cfg = await api.get('/api/config').catch(() => state.cfg);
   const names = Object.keys(m.providers || {});
@@ -1393,6 +1398,12 @@ function renderProvForm() {
   $('#discover-status').textContent = '';
   renderProvModels(p);
 }
+function priceLine(prov, id) {
+  const price = (state.kbPricing?.[prov] || {})[id];
+  if (!price || (!price.in && !price.out)) return '';
+  const cur = price.cur === 'cny' ? '¥' : '$';
+  return `<div class="pm-price">输入 ${cur}${price.in} / 输出 ${cur}${price.out} · 每 1M tokens（阶梯取首档）</div>`;
+}
 function renderProvModels(p) {
   const box = $('#pf-models');
   box.innerHTML = '';
@@ -1415,7 +1426,8 @@ function renderProvModels(p) {
         <input class="pm-ctx" type="number" value="${m.contextWindow || ''}" placeholder="128000">
         <span class="pm-lbl">输出</span>
         <input class="pm-max" type="number" value="${m.maxTokens || ''}" placeholder="4096">
-      </div>`;
+      </div>
+      ${priceLine(state.editProv, m.id)}`;
     row.querySelector('.pm-test').onclick = async () => {
       const btn = row.querySelector('.pm-test'); const out = row.querySelector('.pm-result');
       btn.textContent = '…'; btn.disabled = true; out.textContent = ''; out.className = 'pm-result muted small';
@@ -1469,10 +1481,35 @@ $('#btn-discover').onclick = async () => {
   const p = state.modelsDoc.providers[state.editProv] = state.modelsDoc.providers[state.editProv] || { baseUrl: '', api: 'openai-responses', models: [] };
   if (!$('#pf-url').value.trim() && p.baseUrl) $('#pf-url').value = p.baseUrl;
   const have = new Set((p.models || []).map((m) => m.id));
-  let added = 0;
-  for (const id of r.models) if (!have.has(id)) { p.models.push({ id, contextWindow: 128000, maxTokens: 4096 }); added++; }
-  out.textContent = `发现 ${r.models.length} 个模型` + (added ? `，新增 ${added}` : '');
+  let added = 0, kbHits = 0;
+  for (const id of r.models) {
+    if (have.has(id)) continue;
+    const kb = (r.kb || {})[id];
+    const entry = { id };
+    if (kb && kb.ctx) { entry.contextWindow = kb.ctx; kbHits++; }
+    if (kb && kb.max) entry.maxTokens = kb.max;
+    p.models.push(entry);
+    added++;
+  }
+  state.kbPricing = state.kbPricing || {};
+  for (const [id, hit] of Object.entries(r.kb || {})) {
+    if (hit.price) (state.kbPricing[state.editProv] = state.kbPricing[state.editProv] || {})[id] = hit.price;
+  }
+  out.textContent = `发现 ${r.models.length} 个模型` + (added ? `，新增 ${added}` : '') + (kbHits ? `，${kbHits} 个已按知识库配置` : '');
   renderProvModels(p);
+};
+$('#btn-kbfill').onclick = async () => {
+  if (!state.editProv) return;
+  const btn = $('#btn-kbfill'); const out = $('#discover-status');
+  btn.textContent = '补全中…'; btn.disabled = true;
+  const r = await api.post('/api/providers/kbfill', { provider: state.editProv }).catch((e) => ({ error: e.message }));
+  btn.textContent = '从知识库补全'; btn.disabled = false;
+  if (r.error) { out.textContent = '补全失败：' + r.error; return; }
+  const nf = Object.keys(r.fills || {}).length;
+  state.kbPricing = state.kbPricing || {};
+  state.kbPricing[state.editProv] = Object.assign(state.kbPricing[state.editProv] || {}, r.pricing || {});
+  await loadModelsEditor();
+  out.textContent = `已按知识库补全 ${nf} 个模型的参数` + (r.priced ? `，${r.priced} 个写入定价` : '');
 };
 $('#btn-prov-save').onclick = async () => {
   if (!state.modelsDoc || !state.editProv) return;

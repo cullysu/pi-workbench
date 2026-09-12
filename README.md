@@ -14,6 +14,7 @@
 - **用量与缓存**：今日 / 按供应商 / 按模型统计，缓存命中率；每轮回复显示输入 / 输出 / 缓存率
 - **导入**：Codex / Claude / ZCode / OpenCode / OMP / Gemini / Grok CLI / Aider 历史会话只读浏览
 - **周边**：目标模式自动续跑、实时事件日志、项目文件浏览、git diff、终端、备份恢复、配置迁移
+- **MCP**：内置桥接扩展，读取标准 `~/.pi/agent/mcp.json`（与 Claude/Cursor 同格式），把 MCP 工具注册为 pi 原生工具，惰性连接，配置页一键安装
 
 ## 安装
 
@@ -42,6 +43,8 @@ npm run electron       # 或: node_modules\.bin\electron .
 ```
 
 打包：`npx electron-builder --win nsis --x64`（产物在 `dist_electron/`，不随 git 提交）。
+
+测试：`npm test`（node:test，在隔离 HOME 里起真实服务端打全量 API）；CI：push 到 main 自动跑双平台测试并出 Windows 安装包 artifact。
 
 ## License
 

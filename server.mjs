@@ -941,6 +941,7 @@ const runGit = (cwd, args, max = 200000) => new Promise((resolve) => {
 });
 
 const PI_SETTINGS = path.join(HOME, '.pi', 'agent', 'settings.json');
+const MCP_FILE = path.join(HOME, '.pi', 'agent', 'mcp.json');
 const PI_SKILLS = path.join(HOME, '.pi', 'agent', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
 
@@ -1412,6 +1413,37 @@ const server = http.createServer(async (req, res) => {
         saveConfig(cfg);
       }
       return json(res, 200, listSkills(cwd));
+    }
+    if (p === '/api/mcp/config') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const servers = body.mcpServers;
+        if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return json(res, 400, { error: 'mcpServers object required' });
+        for (const [name, s] of Object.entries(servers)) {
+          if (!s || typeof s !== 'object' || !s.command) return json(res, 400, { error: `server "${name}" needs a command` });
+        }
+        fs.mkdirSync(path.dirname(MCP_FILE), { recursive: true });
+        fs.writeFileSync(MCP_FILE, JSON.stringify({ mcpServers: servers }, null, 2));
+      }
+      return json(res, 200, readJson(MCP_FILE) || { mcpServers: {} });
+    }
+    if (p === '/api/mcp/install' && req.method === 'POST') {
+      const srcDir = path.join(__dirname, 'extensions');
+      const bridge = path.join(srcDir, 'mcp-bridge.js');
+      if (!fs.existsSync(bridge)) return json(res, 404, { error: 'bridge file missing' });
+      const destDir = path.join(HOME, '.pi', 'agent', 'extensions', 'mcp-bridge');
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.copyFileSync(bridge, path.join(destDir, 'mcp-bridge.js'));
+      fs.copyFileSync(path.join(srcDir, 'package.json'), path.join(destDir, 'package.json'));
+      // typebox is resolved from the extension's own node_modules (pi documents this flow)
+      const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
+      if (!hasDep) {
+        const r = await execInCwd(destDir, 'npm install --omit=dev --no-fund --no-audit');
+        if (r.code !== 0 || !fs.existsSync(path.join(destDir, 'node_modules', 'typebox'))) {
+          return json(res, 500, { error: 'npm install typebox failed', detail: (r.err || r.out || '').slice(-800) });
+        }
+      }
+      return json(res, 200, { ok: true, dest: destDir });
     }
     if (p === '/api/backup/export' && req.method === 'POST') {
       try { return json(res, 200, await exportBackupZip()); }

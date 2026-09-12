@@ -93,7 +93,7 @@ async function startServer() {
     // give it a grace period, then auto-restart twice before bothering the user
     await sleep(1500);
     if (quitting || (await portOpen(PORT))) return;
-    if (mainWindow && serverRestarts < 2) {
+    if (serverRestarts < 2) {
       serverRestarts++;
       appendLog(`auto-restarting server (attempt ${serverRestarts})`);
       try { await startServer(); return; } catch (e) { appendLog('restart failed: ' + e.message); }

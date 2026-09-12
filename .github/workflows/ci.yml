@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev
+      - name: Syntax check
+        run: |
+          node --check server.mjs
+          node --check electron-main.cjs
+          node --check public/app.js
+          node --check public/dropdowns.js
+          node --check extensions/mcp-bridge.js
+      - name: API tests
+        run: npm test
+
+  build:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install build deps
+        run: npm ci
+      - name: Assemble runtime (pi + server + public)
+        shell: pwsh
+        run: |
+          npm install --prefix pkg-build @earendil-works/pi-coding-agent@0.85.0 ws@8.21.3 --omit=dev --no-fund --no-audit
+          Copy-Item server.mjs pkg-build/server.mjs
+          Copy-Item electron-main.cjs pkg-build/electron-main.cjs
+          Copy-Item extensions pkg-build/extensions -Recurse -Force
+          robocopy public pkg-build/public /E /NFL /NDL /NJH /NJS /NP
+          if ($LASTEXITCODE -ge 8) { exit 1 }
+          Compress-Archive -Path pkg-build/* -DestinationPath pkg-runtime.zip -Force
+      - name: Build NSIS installer
+        run: npx electron-builder --win nsis --x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer
+          path: dist_electron/*.exe
+          retention-days: 7

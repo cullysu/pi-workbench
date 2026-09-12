@@ -1576,6 +1576,8 @@ async function loadUsage() {
       ${statCard(t('u_cr'), fmtTok(u.cacheRead))}
     </div>
     ${todayHead}
+    <div class="usage-sec">14 天趋势（输入 / 输出 / 缓存读）</div>
+    <div id="usage-chart" class="usage-chart"></div>
     <div class="usage-sec">${t('u_by_prov')}</div>
     <table class="usage-table"><thead><tr><th>${t('u_provider')}</th><th>${t('u_replies')}</th><th>${t('u_in')}</th><th>${t('u_out')}</th><th>${t('u_hit')}</th><th>${t('u_cost')}</th></tr></thead>
     <tbody>${todayRow(today?.providers)}</tbody></table>
@@ -1588,6 +1590,37 @@ async function loadUsage() {
       const r = cacheRate(v.input, v.cacheRead);
       return `<tr><td>${esc(m)}</td><td>${v.ok}</td><td>${fmtTok(v.input)}</td><td>${fmtTok(v.output)}</td><td>${r === null ? '—' : r + '%'}</td><td>$${(v.cost || 0).toFixed(4)}</td></tr>`;
     }).join('') || '<tr><td colspan="6" class="muted">暂无数据</td></tr>'}</tbody></table>`;
+  const chartDays = days;
+  if (chartDays.length && window.uPlot) {
+    const labels = chartDays.map(([d]) => d.slice(5));
+    const series = (key) => chartDays.map(([, v]) => v[key] || 0);
+    const css = getComputedStyle(document.body);
+    const axis = css.getPropertyValue('--text3').trim() || '#888';
+    const grid = css.getPropertyValue('--hairline').trim() || '#eee';
+    try {
+      if (state.usageChart) state.usageChart.destroy();
+      const w = Math.max(320, $('#usage-chart').clientWidth || 560);
+      const opts = {
+        width: w, height: 180,
+        scales: { x: { time: false } },
+        series: [
+          {},
+          { label: '输入', stroke: '#4c8dff', width: 2, points: { show: chartDays.length <= 7 } },
+          { label: '输出', stroke: '#30a46c', width: 2, points: { show: chartDays.length <= 7 } },
+          { label: '缓存读', stroke: '#9a6700', width: 2, dashed: true },
+        ],
+        axes: [
+          { stroke: axis, grid: { stroke: grid, width: 1 } },
+          { stroke: axis, grid: { stroke: grid, width: 1 }, values: (u, vals) => vals.map((v) => fmtTok(v)) },
+        ],
+        legend: { show: true },
+      };
+      state.usageChart = new uPlot(opts, [labels, series('input'), series('output'), series('cacheRead')], $('#usage-chart'));
+    } catch (e) { $('#usage-chart').innerHTML = '<div class="muted small">图表渲染失败: ' + esc(String(e)) + '</div>'; }
+  } else if ($('#usage-chart')) {
+    $('#usage-chart').innerHTML = '<div class="muted small">近 14 天还没有用量</div>';
+  }
+
 }
 
 // ---------- routing panel ----------
@@ -1822,6 +1855,25 @@ async function loadSkills() {
 async function loadBackup() {
   $('#backup-status').textContent = '';
 }
+async function loadMcp() {
+  const r = await api.get('/api/mcp/config').catch(() => ({ mcpServers: {} }));
+  $('#mcp-editor').value = JSON.stringify(r, null, 2);
+  $('#mcp-status').textContent = '';
+}
+$('#btn-mcp-save').onclick = async () => {
+  let body;
+  try { body = JSON.parse($('#mcp-editor').value); } catch { $('#mcp-status').textContent = 'JSON 解析失败'; return; }
+  const r = await api.post('/api/mcp/config', body).catch((e) => ({ error: e.message }));
+  if (r.error) { $('#mcp-status').textContent = '保存失败：' + r.error; return; }
+  $('#mcp-editor').value = JSON.stringify(r, null, 2);
+  $('#mcp-status').textContent = '已保存（新会话生效）';
+};
+$('#btn-mcp-install').onclick = async () => {
+  $('#mcp-status').textContent = '正在安装（含 npm install typebox，约几秒到一分钟）…';
+  const r = await api.post('/api/mcp/install', {}).catch((e) => ({ error: e.message }));
+  if (r.error) { $('#mcp-status').textContent = '安装失败：' + r.error + (r.detail ? ' · ' + String(r.detail).slice(-200) : ''); return; }
+  $('#mcp-status').textContent = '已安装到 ' + r.dest + '，新开会话生效';
+};
 async function loadMigration() {
   $('#migrate-box').innerHTML = '<div class="muted small" style="padding:8px 0">点「检查来源」扫描本机 Codex / Claude / ZCode / 模型文件。</div>';
 }
@@ -1839,6 +1891,7 @@ const PANEL_LOADERS = {
   routing: loadRoutingUI,
   import: loadImportList,
   skills: loadSkills,
+  mcp: loadMcp,
   console: loadConsole,
   backup: loadBackup,
   migration: loadMigration,

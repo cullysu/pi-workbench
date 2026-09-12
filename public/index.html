@@ -6,6 +6,7 @@
 <title>Pi Workbench</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d0d0d'/%3E%3Ctext x='16' y='22' font-size='17' font-family='Georgia' text-anchor='middle' fill='%23ffffff'%3E%CF%80%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/vendor/hljs-dark.css">
+<link rel="stylesheet" href="/vendor/uPlot.min.css">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -48,6 +49,7 @@
         <button class="rail-item active" data-panel="models">模型</button>
         <button class="rail-item" data-panel="routing">路由</button>
         <button class="rail-item" data-panel="skills">技能</button>
+        <button class="rail-item" data-panel="mcp">MCP</button>
         <button class="rail-item" data-panel="console">终端</button>
         <div class="rail-title">§023 · 备份与恢复</div>
         <button class="rail-item" data-panel="backup">备份恢复</button>
@@ -190,6 +192,21 @@
             <div id="skills-detail" class="split-detail"><div class="muted small">选择左侧技能查看 SKILL.md</div></div>
           </div>
         </div>
+        <div id="panel-mcp" class="cfg-panel hidden">
+          <div class="cfg-title">MCP</div>
+          <div class="hero-card">
+            <div class="hero-card-title">通过桥接扩展接入 MCP 服务器</div>
+            <div class="muted small">pi 本体不做 MCP；这里维护标准的 mcpServers 配置（~/.pi/agent/mcp.json，与 Claude/Cursor 同格式），桥接扩展把其中每个工具注册成 pi 工具（mcp_服务器_工具）。连接是惰性的：第一次调用工具时才拉起对应服务器。</div>
+            <div class="models-actions" style="padding:10px 0 0">
+              <button id="btn-mcp-install" class="mini-btn primary">安装 / 更新桥接扩展</button>
+              <button id="btn-mcp-save" class="mini-btn primary">保存 mcpServers</button>
+              <span id="mcp-status" class="muted small"></span>
+            </div>
+          </div>
+          <div class="pf-label">~/.pi/agent/mcp.json</div>
+          <textarea id="mcp-editor" spellcheck="false" style="height:220px" placeholder='{"mcpServers":{"filesystem":{"command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","."]}}}'></textarea>
+          <div class="muted small" style="padding:8px 4px">保存后新开的会话生效（pi 启动时由扩展注册工具）。</div>
+        </div>
         <div id="panel-console" class="cfg-panel hidden">
           <div class="cfg-title">终端</div>
           <div class="hero-card">
@@ -306,6 +323,7 @@
     </div>
   </div>
 </div>
+<script src="/vendor/uPlot.iife.min.js"></script>
 <script src="/vendor/marked.umd.js"></script>
 <script src="/vendor/highlight.min.js"></script>
 <script src="/app.js"></script>

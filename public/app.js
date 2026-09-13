@@ -453,7 +453,9 @@ function scrollBottom() {
 function clearTimeline(withPlaceholder) {
   $('#timeline').innerHTML = `<div class="tl-inner"></div>`;
   if (withPlaceholder) {
-    $('.tl-inner').innerHTML = `<div class="placeholder"><div class="big">π</div><div>${t('empty_title')}</div><div class="muted small" style="margin-top:6px">${t('empty_sub')}</div></div>`;
+    const g = state.heroGreet || '';
+    const meta = state.heroMeta || '';
+    $('.tl-inner').innerHTML = emptyStateHtml(g, meta);
   }
 }
 
@@ -2012,17 +2014,27 @@ $('#global-search').addEventListener('keydown', (e) => {
 });
 
 // workbench home hero (time-aware greeting + counters)
+function emptyStateHtml(g, meta) {
+  return `<div class="placeholder">
+      <div class="ph-mark">π</div>
+      ${g ? `<div class="ph-greet">${esc(g)}</div>` : ''}
+      ${meta ? `<div class="ph-meta">${meta}</div>` : `<div class="muted small" style="margin-top:6px">${t('empty_sub')}</div>`}
+    </div>`;
+}
 function renderHomeHero() {
   const hasChat = document.querySelectorAll('#timeline .msg').length > 0;
-  $('#home-hero').classList.toggle('hidden', hasChat);
-  if (hasChat) return;
+  if (hasChat) { state.heroGreet = ''; state.heroMeta = ''; return; }
   const h = new Date().getHours();
-  const greet = h < 6 ? '夜深了，休息一下？' : h < 11 ? '早上好，准备开工' : h < 13 ? '中午好，歇一歇' : h < 18 ? '下午好，继续推进' : '晚上好，今天收尾如何';
-  $('#hero-greet').textContent = greet;
+  state.heroGreet = h < 6 ? '夜深了，休息一下？' : h < 11 ? '早上好，准备开工' : h < 13 ? '中午好，歇一歇' : h < 18 ? '下午好，继续推进' : '晚上好，今天收尾如何';
   const d = new Date();
-  $('#hero-date').textContent = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' · 周' + '日一二三四五六'[d.getDay()];
+  const dateStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' · 周' + '日一二三四五六'[d.getDay()];
   const g = currentGoal();
-  $('#hero-counts').textContent = (state.streaming ? 1 : 0) + ' 个任务进行中 · ' + (g && g.text ? '目标进行中' : '未设目标');
+  state.heroMeta = '<span>NO. 001</span> 工作台 · ' + dateStr + ' · ' + (state.streaming ? 1 : 0) + ' 个任务进行中 · ' + (g && g.text ? '目标进行中' : '未设目标');
+  // the placeholder was already rendered before the hero state was ready — redraw it
+  if (!document.querySelector('#timeline .msg')) {
+    const tl = document.querySelector('#timeline .tl-inner');
+    if (tl && !tl.querySelector('.msg')) tl.innerHTML = emptyStateHtml(state.heroGreet, state.heroMeta);
+  }
 }
 
 async function loadSecStatus() {
@@ -2032,6 +2044,9 @@ async function loadSecStatus() {
 }
 
 // ---------- boot ----------
+window.__bootErrors = [];
+window.addEventListener('error', (e) => { window.__bootErrors.push(String(e.message || e).slice(0, 200)); });
+window.addEventListener('unhandledrejection', (e) => { window.__bootErrors.push('rejection: ' + String(e.reason && e.reason.stack || e.reason).slice(0, 200)); });
 (async function boot() {
   marked.setOptions({ breaks: true, gfm: true });
   await loadProjects();

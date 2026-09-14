@@ -1892,6 +1892,95 @@ async function loadSkills() {
   });
   show(0);
 }
+let cronJobs = [];
+async function loadCron() {
+  const r = await api.get('/api/cron').catch(() => ({ jobs: [] }));
+  cronJobs = r.jobs || [];
+  try {
+    const av = (await api.get('/api/models/available')).models || [];
+    const sel = $('#cron-model');
+    if (sel) {
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">（留空用默认模型）</option>' +
+        [...new Set(av.map((m) => m.provider + '/' + m.id))].map((k) => `<option value="${k}">${k}</option>`).join('');
+      sel.value = cur;
+    }
+  } catch {}
+  renderCronJobs();
+}
+function renderCronJobs() {
+  const box = $('#cron-jobs');
+  if (!box) return;
+  if (!cronJobs.length) {
+    box.innerHTML = '<div class="muted small" style="padding:12px 0">还没有定时任务。用上面表单新建一个。</div>';
+    return;
+  }
+  box.innerHTML = cronJobs.map((j) => {
+    const kind = j.kind === 'daily' ? ('每天 ' + (j.time || '')) : ('每 ' + (j.everyMin || '?') + ' 分钟');
+    const status = j.running ? '运行中' : (j.lastStatus ? ('上次: ' + esc(j.lastStatus)) : '未运行');
+    const model = j.model ? (' · ' + esc(j.model)) : '';
+    return '<div class="cron-job" data-id="' + esc(j.id) + '">' +
+      '<div class="cron-job-head">' +
+        '<label class="cron-en"><input type="checkbox" class="cron-en-sw" data-id="' + esc(j.id) + '" ' + (j.enabled !== false ? 'checked' : '') + '> 启用</label>' +
+        '<span class="cron-job-name">' + esc(j.name) + '</span>' +
+        '<span class="muted small">' + kind + model + '</span>' +
+        '<span style="flex:1"></span>' +
+        '<button class="mini-btn cron-run" data-id="' + esc(j.id) + '">立即运行</button>' +
+        '<button class="mini-btn cron-del" data-id="' + esc(j.id) + '">删除</button>' +
+      '</div>' +
+      '<div class="muted small" style="padding:2px 4px 0">' + esc((j.prompt || '').slice(0, 80)) + ((j.prompt || '').length > 80 ? '…' : '') + '</div>' +
+      '<div class="muted small" style="padding:2px 4px 0">' + status + (j.lastRun ? ' · ' + esc(j.lastRun.replace('T', ' ').slice(0, 16)) : '') + (j.lastOutput ? ' · ' + esc(j.lastOutput.slice(0, 60)) : '') + '</div>' +
+    '</div>';
+  }).join('');
+  box.querySelectorAll('.cron-en-sw').forEach((sw) => {
+    sw.onchange = async () => {
+      const job = cronJobs.find((x) => x.id === sw.dataset.id);
+      if (job) { job.enabled = sw.checked; await api.post('/api/cron', { jobs: cronJobs }); }
+    };
+  });
+  box.querySelectorAll('.cron-run').forEach((b) => {
+    b.onclick = async () => {
+      b.textContent = '运行中…'; b.disabled = true;
+      await api.post('/api/cron/run-now', { id: b.dataset.id });
+      b.textContent = '立即运行'; b.disabled = false;
+      loadCron();
+    };
+  });
+  box.querySelectorAll('.cron-del').forEach((b) => {
+    b.onclick = async () => {
+      await api.post('/api/cron/delete', { id: b.dataset.id });
+      cronJobs = cronJobs.filter((x) => x.id !== b.dataset.id);
+      renderCronJobs();
+    };
+  });
+}
+$('#btn-cron-save').onclick = async () => {
+  const name = $('#cron-name').value.trim();
+  const kind = $('#cron-kind').value;
+  const prompt = $('#cron-prompt').value.trim();
+  if (!name || !prompt) { $('#cron-status').textContent = '名称和提示词必填'; return; }
+  const job = { id: 'job-' + Date.now().toString(36), name, kind, prompt, enabled: $('#cron-enabled').checked, model: $('#cron-model').value.trim() || undefined };
+  if (kind === 'daily') {
+    job.time = $('#cron-time').value.trim();
+    if (!/^\d{2}:\d{2}$/.test(job.time)) { $('#cron-status').textContent = '时间格式 HH:MM'; return; }
+  } else {
+    job.everyMin = Number($('#cron-every').value);
+    if (!(job.everyMin > 0)) { $('#cron-status').textContent = '间隔分钟数无效'; return; }
+  }
+  cronJobs.push(job);
+  const r = await api.post('/api/cron', { jobs: cronJobs }).catch((e) => ({ error: e.message }));
+  if (r.error) { $('#cron-status').textContent = '保存失败：' + r.error; return; }
+  cronJobs = r.jobs;
+  $('#cron-status').textContent = '已保存';
+  $('#cron-name').value = ''; $('#cron-prompt').value = ''; $('#cron-model').value = '';
+  renderCronJobs();
+};
+$('#cron-kind').onchange = () => {
+  const daily = $('#cron-kind').value === 'daily';
+  $('#cron-time').style.display = daily ? 'none' : '';
+  $('#cron-every').style.display = daily ? 'none' : '';
+};
+$('#cron-kind').onchange();
 async function loadBackup() {
   $('#backup-status').textContent = '';
 }
@@ -1933,6 +2022,7 @@ const PANEL_LOADERS = {
   skills: loadSkills,
   mcp: loadMcp,
   console: loadConsole,
+  cron: loadCron,
   backup: loadBackup,
   migration: loadMigration,
   health: loadHealth,
@@ -1942,6 +2032,7 @@ const PANEL_LOADERS = {
   env: loadEnv,
   settings: loadSecStatus,
 };
+$('#btn-update-check');
 $$('.rail-item[data-panel]').forEach((b) => {
   b.onclick = () => {
     $$('.rail-item[data-panel]').forEach((x) => x.classList.remove('active'));
@@ -2021,6 +2112,16 @@ function emptyStateHtml(g, meta) {
       ${meta ? `<div class="ph-meta">${meta}</div>` : `<div class="muted small" style="margin-top:6px">${t('empty_sub')}</div>`}
     </div>`;
 }
+// greeting must follow the system clock — an app left open overnight would
+// otherwise keep saying 早上好 at midnight
+setInterval(() => {
+  if (document.hidden) return;
+  if (state.view === 'workbench' && !document.querySelector('#timeline .msg')) renderHomeHero();
+}, 60000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.view === 'workbench' && !document.querySelector('#timeline .msg')) renderHomeHero();
+});
+
 function renderHomeHero() {
   const hasChat = document.querySelectorAll('#timeline .msg').length > 0;
   if (hasChat) { state.heroGreet = ''; state.heroMeta = ''; return; }
@@ -2042,6 +2143,18 @@ async function loadSecStatus() {
   const ok = !!(k && k.secrets && k.secrets.relay);
   $('#sec150').textContent = ok ? t('sec_ok') : t('sec_no');
 }
+$('#btn-update-check').onclick = async () => {
+  const st = $('#update-status');
+  st.textContent = '检查中…';
+  const k = await api.get('/api/kernel').catch(() => null);
+  const cur = 'v' + (k ? (k.pi ? '' : '') : '') ;
+  const r = await api.get('/api/update/check').catch(() => ({ error: '网络失败' }));
+  if (r.latest) {
+    st.innerHTML = '最新版 ' + r.latest + ' — <a href="' + r.url + '" target="_blank" style="color:var(--accent)">前往下载</a>';
+  } else {
+    st.textContent = '暂无法获取（GitHub 不可达或无发布版本）';
+  }
+};
 
 // ---------- boot ----------
 window.__bootErrors = [];

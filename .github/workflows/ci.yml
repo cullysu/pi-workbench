@@ -58,6 +58,17 @@ jobs:
         run: npx electron-builder --win nsis --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Build Tauri app
+        shell: pwsh
+        run: |
+          cargo --version
+          cd tauri
+          npx tauri build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tauri-installer
+          path: tauri/target/release/bundle/nsis/*.exe
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: installer

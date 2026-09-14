@@ -234,9 +234,11 @@ test('mcp bridge install: copies extension into scratch extensions dir', async (
   assert.equal(fs.readFileSync(dest, 'utf8'), src);
 });
 
-test('removed placeholder endpoints stay gone', async () => {
+test('cron is a real endpoint now, mcp stays gone', async () => {
+  const cron = await req('/api/cron');
+  assert.equal(cron.status, 200);
+  assert.ok(Array.isArray(cron.data.jobs), 'jobs array');
   assert.equal((await req('/api/mcp')).status, 404);
-  assert.equal((await req('/api/cron')).status, 404);
 });
 
 test('static assets and 404', async () => {

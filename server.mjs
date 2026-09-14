@@ -138,6 +138,105 @@ function loadRouting() {
   if (!r.chains.length) r.chains = [];
   return r;
 }
+const saveJson = (file, obj) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+  return obj;
+};
+// ---------- cron: scheduled pi prompt runs (built-in, no external scheduler) ----------
+const CRON_FILE = path.join(CFG_DIR, 'cron.json');
+const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
+function todayStr(d = new Date()) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function jobDue(job, now = new Date()) {
+  if (job.kind === 'daily') {
+    const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+    return hhmm === job.time && job.lastRunDay !== todayStr(now);
+  }
+  if (job.kind === 'interval') {
+    const last = job.lastRunMs || 0;
+    return Date.now() - last >= Number(job.everyMin) * 60000;
+  }
+  return false;
+}
+function runCronJob(job, reason = 'schedule') {
+  if (job.running) return;
+  job.running = true;
+  const cwd = job.cwd && fs.existsSync(job.cwd) ? job.cwd : HOME;
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const runDir = path.join(CRON_RUNS_DIR, job.id);
+  fs.mkdirSync(runDir, { recursive: true });
+  const logFile = path.join(runDir, ts + '.log');
+  const args = [PI_CLI, '-p', String(job.prompt).slice(0, 8000)];
+  if (job.model) args.push('--model', job.model);
+  const logFd = fs.openSync(logFile, 'w');
+  const proc = spawn(process.execPath, [PI_CLI, ...args], {
+    cwd,
+    env: { ...process.env, ...SECRET_ENV },
+    windowsHide: true,
+    stdio: ['ignore', logFd, logFd],
+  });
+  fs.closeSync(logFd);
+  const killer = setTimeout(() => { try { proc.kill(); } catch {} }, 15 * 60000);
+  proc.on('error', (e) => {
+    clearTimeout(killer);
+    job.running = false;
+    job.lastStatus = 'spawn error';
+    job.lastOutput = '[spawn error] ' + e.message;
+    try { fs.appendFileSync(logFile, '\\\\n' + '[spawn error] ' + e.message + '\\\\n'); } catch {}
+  });
+  let finished = false;
+  proc.on('close', (code) => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(killer);
+    job.running = false;
+    job.lastRun = new Date().toISOString();
+    job.lastRunMs = Date.now();
+    job.lastStatus = code === 0 ? 'ok' : 'exit ' + code;
+    try { job.lastOutput = fs.readFileSync(logFile, 'utf8').slice(-400); } catch { job.lastOutput = ''; }
+    try { broadcast({ type: 'cron-run', id: job.id, name: job.name, ok: code === 0 }); } catch {}
+    try { saveJson(CRON_FILE, { jobs: (readJson(CRON_FILE) || { jobs: [] }).jobs.map((j) => (j.id === job.id ? { ...j, lastRun: job.lastRun, lastRunMs: job.lastRunMs, lastStatus: job.lastStatus, lastOutput: job.lastOutput, running: false } : j)) }); } catch {}
+  });
+  job.lastStatus = 'running';
+}
+let cronBootResetDone = false;
+function cronBootReset(d) {
+  let changed = false;
+  for (const j of d.jobs || []) { if (j.running) { j.running = false; changed = true; } }
+  return changed;
+}
+function cronTick() {
+  let d = readJson(CRON_FILE);
+  if (!d || !Array.isArray(d.jobs) || !d.jobs.length) return;
+  const now = new Date();
+  let dirty = false;
+  if (!cronBootResetDone) {
+    // a server restart orphans running flags — clear them once at startup
+    cronBootResetDone = true;
+    if (cronBootReset(d)) dirty = true;
+  }
+  for (const job of d.jobs) {
+    if (job.enabled === false || job.running) {
+      // 30-min zombie timeout: a running flag with no progress for 30 min is stale
+      if (job.running && job.lastRunMs && Date.now() - job.lastRunMs > 30 * 60000) {
+        job.running = false;
+        job.lastStatus = 'stale-timeout';
+        dirty = true;
+      }
+      continue;
+    }
+    if (jobDue(job, now)) {
+      job.lastRunDay = todayStr(now);
+      job.lastRunMs = Date.now();
+      dirty = true;
+      runCronJob(job, 'schedule');
+    }
+  }
+  if (dirty) saveJson(CRON_FILE, d);
+}
+setInterval(cronTick, 20000);
 function saveRouting(r) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
   fs.writeFileSync(ROUTING_FILE, JSON.stringify(r, null, 2));
@@ -1361,6 +1460,54 @@ const server = http.createServer(async (req, res) => {
       const { model } = await readBody(req);
       if (model) clearCool(model);
       return json(res, 200, { ok: true });
+    }
+    if (p === '/api/cron') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const jobs = body.jobs;
+        if (!Array.isArray(jobs)) return json(res, 400, { error: 'jobs array required' });
+        for (const j of jobs) {
+          if (!j.name || !j.prompt) return json(res, 400, { error: '每个任务需要 name 和 prompt' });
+          if (j.kind === 'daily' && !/^\d{2}:\d{2}$/.test(j.time || '')) return json(res, 400, { error: 'daily 任务需要 HH:MM 时间' });
+          if (j.kind === 'interval' && (!(Number(j.everyMin) > 0))) return json(res, 400, { error: 'interval 任务需要正的 everyMin 分钟数' });
+        }
+        const prev = readJson(CRON_FILE) || { jobs: [] };
+        for (const j of jobs) {
+          const old = prev.jobs.find((x) => x.id === j.id);
+          if (old) { j.lastRun = old.lastRun; j.lastStatus = old.lastStatus; j.lastOutput = old.lastOutput; }
+          if (!j.id) j.id = 'job-' + crypto.randomBytes(4).toString('hex');
+          if (typeof j.enabled !== 'boolean') j.enabled = true;
+        }
+        saveJson(CRON_FILE, { jobs });
+      }
+      const d = readJson(CRON_FILE) || { jobs: [] };
+      if (cronBootReset(d)) saveJson(CRON_FILE, d);
+      return json(res, 200, d);
+    }
+    if (p === '/api/cron/delete' && req.method === 'POST') {
+      const { id } = await readBody(req);
+      const d = readJson(CRON_FILE) || { jobs: [] };
+      d.jobs = d.jobs.filter((j) => j.id !== id);
+      saveJson(CRON_FILE, d);
+      return json(res, 200, d);
+    }
+    if (p === '/api/update/check') {
+      try {
+        const r = await fetch('https://api.github.com/repos/cullysu/pi-workbench/releases/latest', { signal: AbortSignal.timeout(8000), headers: { 'user-agent': 'pi-workbench' } });
+        const j = await r.json();
+        return json(res, 200, { latest: j.tag_name || null, url: j.html_url || null });
+      } catch (e) {
+        return json(res, 200, { latest: null, error: String(e.message || e).slice(0, 100) });
+      }
+    }
+    if (p === '/api/cron/run-now' && req.method === 'POST') {
+      const { id } = await readBody(req);
+      const d = readJson(CRON_FILE) || { jobs: [] };
+      const job = d.jobs.find((j) => j.id === id);
+      if (!job) return json(res, 404, { error: 'job not found' });
+      runCronJob(job);
+      saveJson(CRON_FILE, d);
+      return json(res, 200, { ok: true, lastStatus: job.lastStatus });
     }
     if (p === '/api/usage') {
       return json(res, 200, usageSummary());

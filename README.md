@@ -1,5 +1,7 @@
 # pi-workbench
 
+[English](README.en.md)
+
 **pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows 桌面应用（Electron + NSIS 安装器），中文界面。
 
 不 fork、不改 pi。工作台以子进程运行 `pi --mode rpc`（stdin/stdout JSONL）驱动 pi 本体：会话文件是 pi 原生格式（`~/.pi/agent/sessions`），自定义模型在 `~/.pi/agent/models.json`，与 pi CLI 完全互通。

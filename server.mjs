@@ -1629,6 +1629,28 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, listSkills(cwd));
     }
+    if (p === '/api/templates') {
+      const out = [];
+      const q = u.searchParams.get('cwd') || '';
+      const dirs = [[path.join(HOME, '.pi', 'agent', 'prompts'), 'global']];
+      if (q) dirs.push([path.join(q, '.pi', 'prompts'), 'project']);
+      for (const [dir, source] of dirs) {
+        let ents = [];
+        try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch {}
+        for (const e of ents) {
+          if (!e.isFile() || !e.name.toLowerCase().endsWith('.md')) continue;
+          const full = path.join(dir, e.name);
+          let raw = '';
+          try { raw = fs.readFileSync(full, 'utf8'); } catch { continue; }
+          let desc = '';
+          const di = raw.indexOf('description:');
+          if (di >= 0) desc = raw.slice(di + 12, raw.indexOf(String.fromCharCode(10), di)).trim().slice(0, 120);
+          if (!desc) desc = raw.replace(/^---/, '').trim().split(String.fromCharCode(10))[0].slice(0, 120);
+          out.push({ name: e.name.replace(/.md$/i, ''), path: full, source, description: desc, body: raw.slice(0, 20000) });
+        }
+      }
+      return json(res, 200, { templates: out });
+    }
     if (p === '/api/mcp/config') {
       if (req.method === 'POST') {
         const body = await readBody(req);

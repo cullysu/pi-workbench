@@ -505,11 +505,30 @@ const origHandle = handlePiEvent;
 handlePiEvent = function (ev) {
   if (ev.type === 'response' && ev.command === 'get_entries' && ev.success && ev.data?.entries) {
     renderReplay(ev.data.entries);
+    if (state.pendingAfterReplay) { const f = state.pendingAfterReplay; state.pendingAfterReplay = null; setTimeout(f, 60); }
     return;
   }
   if (ev.type === 'response' && ev.command === 'get_available_models' && ev.success) {
     state.modelsAvailable = ev.data?.models || [];
     updateModelChip();
+    return;
+  }
+  if (ev.type === 'response' && ev.command === 'get_fork_messages' && ev.success) {
+    state.forkMsgs = ev.data?.messages || [];
+    if (state.pendingForkResolve) { const r = state.pendingForkResolve; state.pendingForkResolve = null; r(state.forkMsgs); }
+    return;
+  }
+  if (ev.type === 'response' && ev.command === 'fork' && ev.success) {
+    const text = state.pendingRegenText || '';
+    state.pendingRegenText = '';
+    clearTimeline(false);
+    rpcTo({ id: 'replay2', type: 'get_entries' });
+    const mode = state.pendingForkMode || 'send';
+    if (mode === 'edit') {
+      state.pendingAfterReplay = () => { $('#input').value = text; $('#input').focus(); };
+    } else {
+      state.pendingAfterReplay = text ? () => submitPrompt(text, { resend: true }) : null;
+    }
     return;
   }
   origHandle(ev);
@@ -1981,6 +2000,30 @@ $('#cron-kind').onchange = () => {
   $('#cron-every').style.display = daily ? 'none' : '';
 };
 $('#cron-kind').onchange();
+async function loadTemplates() {
+  const cwd = state.project?.path || '';
+  const r = await api.get('/api/templates' + (cwd ? ('?cwd=' + encodeURIComponent(cwd)) : '')).catch(() => ({ templates: [] }));
+  const list = $('#templates-list');
+  const tpls = r.templates || [];
+  if (!tpls.length) {
+    list.innerHTML = '<div class="muted small" style="padding:12px 0">还没有模板。把 .md 文件放进 ~/.pi/agent/prompts 或项目的 .pi/prompts。</div>';
+    return;
+  }
+  list.innerHTML = tpls.map((tp, i) => `<div class="tpl-row" data-i="${i}">
+      <div style="min-width:0;flex:1">
+        <div class="s-name">/${esc(tp.name)}</div>
+        <div class="muted small">${esc(tp.description || '')}</div>
+      </div>
+      <button class="mini-btn tpl-ins" data-i="${i}">插入</button>
+    </div>`).join('');
+  list.querySelectorAll('.tpl-ins').forEach((b) => {
+    b.onclick = () => {
+      const tp = tpls[Number(b.dataset.i)];
+      $('#input').value = tp.body;
+      $('#input').focus();
+    };
+  });
+}
 async function loadBackup() {
   $('#backup-status').textContent = '';
 }
@@ -2023,6 +2066,7 @@ const PANEL_LOADERS = {
   mcp: loadMcp,
   console: loadConsole,
   cron: loadCron,
+  templates: loadTemplates,
   backup: loadBackup,
   migration: loadMigration,
   health: loadHealth,
@@ -2112,6 +2156,19 @@ function emptyStateHtml(g, meta) {
       ${meta ? `<div class="ph-meta">${meta}</div>` : `<div class="muted small" style="margin-top:6px">${t('empty_sub')}</div>`}
     </div>`;
 }
+// user-message hover actions: regenerate / edit-and-resend (pi tree fork)
+const __tl = $('#timeline');
+__tl.addEventListener('mouseover', (e) => {
+  const bubble = e.target.closest('.msg.user');
+  if (!bubble || bubble.querySelector('.um-actions')) return;
+  const bar = document.createElement('span');
+  bar.className = 'um-actions';
+  bar.innerHTML = '<button class="um-btn" data-a="regen" title="从这条重新生成">⟳</button><button class="um-btn" data-a="edit" title="编辑这条后重发">✎</button>';
+  bubble.appendChild(bar);
+  bar.querySelector('[data-a="regen"]').onclick = (ev) => { ev.stopPropagation(); forkToUserBubble(bubble, 'send'); };
+  bar.querySelector('[data-a="edit"]').onclick = (ev) => { ev.stopPropagation(); forkToUserBubble(bubble, 'edit'); };
+});
+
 // greeting must follow the system clock — an app left open overnight would
 // otherwise keep saying 早上好 at midnight
 setInterval(() => {
@@ -2122,6 +2179,31 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && state.view === 'workbench' && !document.querySelector('#timeline .msg')) renderHomeHero();
 });
 
+function getForkMsgs() {
+  return new Promise((resolve) => {
+    state.pendingForkResolve = resolve;
+    rpcTo({ type: 'get_fork_messages' });
+    setTimeout(() => { if (state.pendingForkResolve) { const r = state.pendingForkResolve; state.pendingForkResolve = null; r(null); } }, 6000);
+  });
+}
+function userBubbleIndex(el) {
+  let k = -1, n = el;
+  while (n) {
+    if (n.classList && n.classList.contains('msg') && n.classList.contains('user')) k++;
+    n = n.previousElementSibling;
+  }
+  return k;
+}
+async function forkToUserBubble(bubble, mode) {
+  if (state.streaming) { rpcTo({ type: 'abort' }); await new Promise((r) => setTimeout(r, 400)); }
+  const k = userBubbleIndex(bubble);
+  const msgs = state.forkMsgs || (await getForkMsgs()) || [];
+  const fm = msgs[k];
+  if (!fm) { $('#statusline').textContent = '找不到该消息的分叉点'; return; }
+  state.pendingRegenText = fm.text;
+  state.pendingForkMode = mode;
+  rpcTo({ type: 'fork', entryId: fm.entryId });
+}
 function renderHomeHero() {
   const hasChat = document.querySelectorAll('#timeline .msg').length > 0;
   if (hasChat) { state.heroGreet = ''; state.heroMeta = ''; return; }

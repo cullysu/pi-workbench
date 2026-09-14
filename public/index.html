@@ -49,6 +49,7 @@
         <button class="rail-item active" data-panel="models">模型</button>
         <button class="rail-item" data-panel="routing">路由</button>
         <button class="rail-item" data-panel="skills">技能</button>
+        <button class="rail-item" data-panel="templates">模板</button>
         <button class="rail-item" data-panel="mcp">MCP</button>
         <button class="rail-item" data-panel="console">终端</button>
         <div class="rail-title">§023 · 备份与恢复</div>
@@ -189,6 +190,11 @@
             <div id="skills-list" class="split-list"></div>
             <div id="skills-detail" class="split-detail"><div class="muted small">选择左侧技能查看 SKILL.md</div></div>
           </div>
+        </div>
+        <div id="panel-templates" class="cfg-panel hidden">
+          <div class="cfg-title">模板</div>
+          <div class="muted small" style="padding:0 0 10px">pi 的 Prompt Templates（~/.pi/agent/prompts/*.md 与项目 .pi/prompts/*.md）。点「插入」把模板放进输入框，编辑后发送。</div>
+          <div id="templates-list"></div>
         </div>
         <div id="panel-mcp" class="cfg-panel hidden">
           <div class="cfg-title">MCP</div>
@@ -406,6 +412,7 @@
         <button class="rail-item active" data-panel="models">模型</button>
         <button class="rail-item" data-panel="routing">路由</button>
         <button class="rail-item" data-panel="skills">技能</button>
+        <button class="rail-item" data-panel="templates">模板</button>
         <button class="rail-item" data-panel="mcp">MCP</button>
         <button class="rail-item" data-panel="console">终端</button>
         <div class="rail-title">§023 · 备份与恢复</div>

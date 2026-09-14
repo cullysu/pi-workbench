@@ -829,3 +829,6 @@ button { font-family: var(--font); }
   background: var(--card);
 }
 .step-card b { display: block; margin-bottom: 4px; }
+
+.tpl-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-sm); }
+.tpl-row:hover { background: var(--hover); }

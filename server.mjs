@@ -520,12 +520,17 @@ function usageFromFile(f) {
   let st; try { st = fs.statSync(f); } catch { return null; }
   const cached = usageCache.get(f);
   if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) return cached.agg;
-  const agg = { ok: 0, err: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: {}, providers: {}, days: {} };
+  const agg = { ok: 0, err: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costEst: 0, models: {}, providers: {}, days: {} };
   let buf; try { buf = fs.readFileSync(f, 'utf8'); } catch { usageCache.set(f, { mtime: st.mtimeMs, size: st.size, agg }); return agg; }
   let curProv = null;
   const bump = (store, u, mk) => {
-    const t = store[mk] = store[mk] || { ok: 0, input: 0, output: 0, cacheRead: 0, cost: 0 };
+    const t = store[mk] = store[mk] || { ok: 0, input: 0, output: 0, cacheRead: 0, cost: 0, costEst: 0 };
     t.ok++; t.input += u.input || 0; t.output += u.output || 0; t.cacheRead += u.cacheRead || 0; t.cost += u.cost?.total || 0;
+    // models that don't report cost: estimate from the built-in knowledge base (input+output, usd, first tier)
+    if (!u.cost?.total) {
+      const price = kbPrice(mk);
+      if (price) t.costEst += ((u.input || 0) * price.in + (u.output || 0) * price.out) / 1e6;
+    }
   };
   for (const line of buf.split('\n')) {
     if (!line) continue;
@@ -555,15 +560,15 @@ function usageSummary() {
   const files = listJsonFiles(PI_SESSIONS, 2);
   const items = files.map((f) => { try { return { f, mt: fs.statSync(f).mtimeMs }; } catch { return null; } })
     .filter(Boolean).sort((a, b) => b.mt - a.mt).slice(0, 300);
-  const total = { sessions: items.length, ok: 0, err: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, models: {}, providers: {}, days: {} };
+  const total = { sessions: items.length, ok: 0, err: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, costEst: 0, models: {}, providers: {}, days: {} };
   for (const { f } of items) {
     const a = usageFromFile(f);
     if (!a) continue;
     total.ok += a.ok; total.err += a.err; total.input += a.input; total.output += a.output;
-    total.cacheRead += a.cacheRead; total.cacheWrite += a.cacheWrite; total.cost += a.cost;
+    total.cacheRead += a.cacheRead; total.cacheWrite += a.cacheWrite; total.cost += a.cost; total.costEst += a.costEst || 0;
     for (const [mk, m] of Object.entries(a.models)) {
-      const t = total.models[mk] = total.models[mk] || { ok: 0, input: 0, output: 0, cacheRead: 0, cost: 0 };
-      t.ok += m.ok; t.input += m.input; t.output += m.output; t.cacheRead += m.cacheRead; t.cost += m.cost;
+      const t = total.models[mk] = total.models[mk] || { ok: 0, input: 0, output: 0, cacheRead: 0, cost: 0, costEst: 0 };
+      t.ok += m.ok; t.input += m.input; t.output += m.output; t.cacheRead += m.cacheRead; t.cost += m.cost; t.costEst += m.costEst || 0;
     }
     for (const [pk, m] of Object.entries(a.providers || {})) {
       const t = total.providers[pk] = total.providers[pk] || { ok: 0, input: 0, output: 0, cacheRead: 0, cost: 0 };
@@ -580,6 +585,7 @@ function usageSummary() {
   }
   total.cacheHit = total.input + total.cacheRead > 0 ? total.cacheRead / (total.input + total.cacheRead) : 0;
   total.cost = +total.cost.toFixed(4);
+  total.costEstimated = +total.costEst.toFixed(4);
   return total;
 }
 
@@ -1064,6 +1070,11 @@ function kbLookup(modelId) {
   if (best) return { ctx: best.ctx, max: best.max, price: best.price, source: 'family' };
   return null;
 }
+function kbPrice(modelId) {
+  const hit = kbLookup(modelId);
+  if (hit && hit.price && hit.price.cur === 'usd') return hit.price;
+  return null;
+}
 function loadModelMeta() {
   return readJson(MODEL_META_FILE) || {};
 }
@@ -1175,6 +1186,8 @@ async function exportBackupZip() {
   add('workbench/config.json', CFG_FILE);
   add('workbench/routing.json', ROUTING_FILE);
   add('pi-agent/models.json', PI_MODELS);
+  add('workbench/cron.json', CRON_FILE);
+  add('workbench/model-meta.json', MODEL_META_FILE);
   add('pi-agent/settings.json', PI_SETTINGS);
   entries.push({ name: 'manifest.json', data: Buffer.from(JSON.stringify({
     app: 'pi-workbench', version: '0.3.0', at: new Date().toISOString(), packed: entries.map((e) => e.name),
@@ -1197,6 +1210,8 @@ async function importBackupZip(zipPath) {
   const targets = [
     ['workbench/config.json', CFG_FILE, 'config.json'],
     ['workbench/routing.json', ROUTING_FILE, 'routing.json'],
+    ['workbench/cron.json', CRON_FILE, 'cron.json'],
+    ['workbench/model-meta.json', MODEL_META_FILE, 'model-meta.json'],
     ['pi-agent/models.json', PI_MODELS, 'models.json'],
     ['pi-agent/settings.json', PI_SETTINGS, 'settings.json'],
   ];
@@ -1500,6 +1515,60 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { latest: null, error: String(e.message || e).slice(0, 100) });
       }
     }
+    if (p === '/api/cron/logs' && req.method === 'POST') {
+      const { id } = await readBody(req);
+      const dir = path.join(CRON_RUNS_DIR, id);
+      let runs = [];
+      try {
+        runs = fs.readdirSync(dir).filter((f) => f.endsWith('.log')).sort().reverse().map((f) => {
+          const full = path.join(dir, f);
+          return { file: f, size: fs.statSync(full).size, mtime: fs.statSync(full).mtimeMs };
+        });
+      } catch {}
+      return json(res, 200, { runs });
+    }
+    if (p === '/api/cron/lastlog' && req.method === 'POST') {
+      const { id } = await readBody(req);
+      const dir = path.join(CRON_RUNS_DIR, id);
+      let latest = null, mtime = 0;
+      try {
+        for (const f of fs.readdirSync(dir)) {
+          if (!f.endsWith('.log')) continue;
+          const full = path.join(dir, f);
+          const m = fs.statSync(full).mtimeMs;
+          if (m > mtime) { mtime = m; latest = full; }
+        }
+      } catch {}
+      if (!latest) return json(res, 200, { content: '(no runs yet)' });
+      return json(res, 200, { content: fs.readFileSync(latest, 'utf8').slice(-4000), file: latest });
+    }
+    if (p === '/api/session/export' && req.method === 'GET') {
+      const root = path.resolve(PI_SESSIONS);
+      const abs = path.resolve(u.searchParams.get('path') || '');
+      if (!abs.startsWith(root + path.sep) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
+      res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
+      const NL = '\\n';
+      for (const line of fs.readFileSync(abs, 'utf8').split(NL)) {
+        if (!line) continue;
+        let j; try { j = JSON.parse(line); } catch { continue; }
+        if (j.type !== 'message' || !j.message) continue;
+        const m = j.message;
+        if (m.role !== 'user' && m.role !== 'assistant') continue;
+        const c = m.content;
+        let text = '';
+        if (typeof c === 'string') text = c;
+        else if (Array.isArray(c)) text = c.map((b) => {
+          if (b.type === 'text') return b.text;
+          if (b.type === 'toolCall') return '[' + (b.name || 'tool') + ']';
+          if (b.type === 'thinking') return '[thinking]';
+          return '';
+        }).filter(Boolean).join(NL);
+        if (!text.trim()) continue;
+        res.write((m.role === 'user' ? '## User' + NL + NL : '## Assistant' + NL + NL) + text.trim() + NL + NL + '---' + NL);
+      }
+      return res.end();
+    }
+        res.write((m.role === 'user' ? '## User' + NLQ_STR : '## Assistant' + NLQ_STR) + text.trim() + NLQ_STR);
     if (p === '/api/cron/run-now' && req.method === 'POST') {
       const { id } = await readBody(req);
       const d = readJson(CRON_FILE) || { jobs: [] };

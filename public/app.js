@@ -1158,7 +1158,7 @@ async function renderProjectTree(useCache = false) {
         d.className = 'session-item conv-item' + (state.sessionFile === s.file ? ' active' : '');
         d.dataset.title = (cleanTitle(s.preview) || s.id).toLowerCase();
         d.innerHTML = `<div class="conv-line">
-          <span class="s-name">${esc(cleanTitle(s.preview) || s.name || s.id.slice(0, 8))}</span>
+          <span class="s-name" title="${esc(cleanTitle(s.preview) || s.name || s.id.slice(0, 8))}">${esc(cleanTitle(s.preview) || s.name || s.id.slice(0, 8))}</span>
           <span class="s-time">${relTime(s.mtime)}</span>
           <span class="conv-acts">
             <button class="pa-btn" data-act="del" title="删除对话">${TRASH_ICON}</button>
@@ -2156,6 +2156,38 @@ function emptyStateHtml(g, meta) {
       ${meta ? `<div class="ph-meta">${meta}</div>` : `<div class="muted small" style="margin-top:6px">${t('empty_sub')}</div>`}
     </div>`;
 }
+// sidebar width drag: pull the right edge to widen so long names stay readable
+(function () {
+  const handle = $('#sb-resize');
+  const rail = $('#rail');
+  if (!handle || !rail) return;
+  const saved = Number(localStorage.getItem('railW'));
+  if (saved >= 180 && saved <= 480) {
+    rail.style.width = saved + 'px';
+    rail.style.setProperty('--rail-w', saved + 'px');
+  }
+  rail.style.setProperty('width', (saved >= 180 ? saved : 220) + 'px');
+  let dragging = false, startX = 0, startW = 220;
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true; startX = e.clientX; startW = rail.getBoundingClientRect().width;
+    document.body.classList.add('rail-dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const w = Math.min(480, Math.max(180, startW + e.clientX - startX));
+    rail.style.width = w + 'px';
+    rail.style.setProperty('--rail-w', w + 'px');
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    const w = Math.round(rail.getBoundingClientRect().width);
+    localStorage.setItem('railW', String(w));
+    document.body.classList.remove('rail-dragging');
+  });
+})();
+
 // user-message hover actions: regenerate / edit-and-resend (pi tree fork)
 const __tl = $('#timeline');
 __tl.addEventListener('mouseover', (e) => {

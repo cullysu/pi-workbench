@@ -652,9 +652,10 @@ button { font-family: var(--font); }
 
 #shell { flex: 1; display: flex; min-height: 0; }
 #rail {
-  width: 220px; min-width: 220px; background: var(--side);
-  border-right: 1px solid var(--hairline); overflow-y: auto;
-  display: flex; flex-direction: column; padding: 12px 12px; gap: 4px;
+  width: var(--rail-w, 220px); min-width: var(--rail-w, 220px); max-width: 480px;
+  background: var(--side); border-right: 1px solid var(--hairline);
+  overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column;
+  padding: 12px 12px; gap: 4px;
 }
 .rail-view {
   display: flex;
@@ -832,3 +833,7 @@ button { font-family: var(--font); }
 
 .tpl-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-sm); }
 .tpl-row:hover { background: var(--hover); }
+
+#sb-resize { width: 5px; cursor: col-resize; flex-shrink: 0; background: transparent; transition: background 0.15s; }
+#sb-resize:hover, #sb-resize.dragging { background: var(--accent); }
+body.rail-dragging { cursor: col-resize; user-select: none; }

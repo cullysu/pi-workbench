@@ -1673,7 +1673,8 @@ async function loadUsage() {
     }).join('') || '<tr><td colspan="6" class="muted">暂无数据</td></tr>'}</tbody></table>`;
   const chartDays = days;
   if (chartDays.length && window.uPlot) {
-    const labels = chartDays.map(([d]) => d.slice(5));
+    // uPlot requires numeric x (time:false turns strings into NaN — nothing draws)
+    const labels = chartDays.map((_, i) => i);
     const series = (key) => chartDays.map(([, v]) => v[key] || 0);
     const css = getComputedStyle(document.body);
     const axis = cssVar('--text3');
@@ -1691,8 +1692,8 @@ async function loadUsage() {
           { label: '缓存读', stroke: cssVar('--chart-3'), width: 2, dashed: true },
         ],
         axes: [
-          { stroke: axis, grid: { stroke: grid, width: 1 } },
-          { stroke: axis, grid: { stroke: grid, width: 1 }, values: (u, vals) => vals.map((v) => fmtTok(v)) },
+          { stroke: axis, grid: { stroke: grid, width: 1 }, values: (up, vals) => vals.map((v) => (chartDays[v] ? chartDays[v][0].slice(5) : '')) },
+          { stroke: axis, grid: { stroke: grid, width: 1 }, values: (up, vals) => vals.map((v) => fmtTok(v)) },
         ],
         legend: { show: true },
       };

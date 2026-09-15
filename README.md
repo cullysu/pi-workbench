@@ -2,9 +2,14 @@
 
 [English](README.en.md)
 
-**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows 桌面应用（Electron + NSIS 安装器），中文界面。
+**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows 桌面应用（Tauri 壳，安装包约 10MB），中文界面。
 
 不 fork、不改 pi。工作台以子进程运行 `pi --mode rpc`（stdin/stdout JSONL）驱动 pi 本体：会话文件是 pi 原生格式（`~/.pi/agent/sessions`），自定义模型在 `~/.pi/agent/models.json`，与 pi CLI 完全互通。
+
+| | |
+|---|---|
+| ![工作台](docs/screenshots/01-hero.png) | ![定时任务](docs/screenshots/02-cron.png) |
+| ![模型配置](docs/screenshots/03-models.png) | |
 
 ## 功能
 
@@ -15,12 +20,13 @@
 - **技能**：扫描 pi 的 Agent Skills（全局 + 项目），开关直接控制下次会话是否加载
 - **用量与缓存**：今日 / 按供应商 / 按模型统计，缓存命中率；每轮回复显示输入 / 输出 / 缓存率
 - **导入**：Codex / Claude / ZCode / OpenCode / OMP / Gemini / Grok CLI / Aider 历史会话只读浏览
-- **周边**：目标模式自动续跑、实时事件日志、项目文件浏览、git diff、终端、备份恢复、配置迁移
+- **周边**：定时任务（每天定时 / 间隔分钟，到点无头运行提示词并逐次落日志）、Prompt 模板、目标模式自动续跑、实时事件日志、项目文件浏览、git diff、终端、会话导出 Markdown、备份恢复、配置迁移
+- **安全**：本地服务只绑 127.0.0.1，每次启动生成随机 token，HTTP API 与 WebSocket 均校验，其它本地进程无法未授权调用
 - **MCP**：内置桥接扩展，读取标准 `~/.pi/agent/mcp.json`（与 Claude/Cursor 同格式），把 MCP 工具注册为 pi 原生工具，惰性连接，配置页一键安装
 
 ## 安装
 
-从 [GitHub Releases](../../releases) 下载 `PiWorkbench-Setup-x.y.z.exe`：
+从 [GitHub Releases](../../releases) 下载最新版安装包（如 `PiWorkbench-1.0.0-x64-setup.exe`，约 10MB）：
 
 - 跟随系统语言（中文 / English），可选安装路径，桌面 + 开始菜单快捷方式
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`

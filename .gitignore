@@ -41,3 +41,8 @@ tauri/target/
 RELEASE-NOTES.md
 installer/install02.ps1
 tauri/target/
+
+# local promo drafts (personal posting material)
+promo/
+
+.release-tmp/

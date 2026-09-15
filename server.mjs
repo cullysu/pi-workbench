@@ -1568,7 +1568,6 @@ const server = http.createServer(async (req, res) => {
       }
       return res.end();
     }
-        res.write((m.role === 'user' ? '## User' + NLQ_STR : '## Assistant' + NLQ_STR) + text.trim() + NLQ_STR);
     if (p === '/api/cron/run-now' && req.method === 'POST') {
       const { id } = await readBody(req);
       const d = readJson(CRON_FILE) || { jobs: [] };
@@ -1786,7 +1785,7 @@ const server = http.createServer(async (req, res) => {
     }
     json(res, 404, { error: 'not found' });
   } catch (e) {
-    json(res, 500, { error: e.message });
+    console.error(String(e.stack)); json(res, 500, { error: e.message });
   }
 });
 

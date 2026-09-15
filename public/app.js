@@ -612,6 +612,7 @@ handlePiEvent = function (ev) {
     const hit = cacheRate(tk.input, tk.cacheRead);
     $('#stats-chip').textContent = `本轮 ${fmtTok(tot)}` + (hit === null ? '' : ` · 缓存率 ${hit}%`) + ` · ${(s.cost || 0).toFixed(4)}`;
     const pct = s.contextUsage ? Number(s.contextUsage.percent || 0).toFixed(1) : null;
+  if (pct !== null) updateContextBar(Number(pct));
     const sbc = document.querySelector('#sb-ctx');
     if (sbc) sbc.textContent = '上下文 ' + (pct === null ? '—' : pct + '%');
     return;
@@ -1836,10 +1837,20 @@ function applyThemeBtns() {
   $$('[data-theme-set]').forEach((b) => b.classList.toggle('active', b.dataset.themeSet === state.cfg.theme));
   $$('[data-lang-set]').forEach((b) => b.classList.toggle('active', b.dataset.langSet === state.cfg.lang));
 }
+$$('[data-theme-auto]').forEach((b) => b.onclick = async () => {
+  state.cfg.themeAuto = b.dataset.themeAuto === 'on';
+  await api.post('/api/config', { themeAuto: state.cfg.themeAuto });
+  applySystemTheme();
+});
 $$('[data-theme-set]').forEach((b) => b.onclick = async () => {
   state.cfg.theme = b.dataset.themeSet;
   applyI18n(); applyThemeBtns();
   await api.post('/api/config', { theme: state.cfg.theme });
+});
+$$('[data-theme-auto]').forEach((b) => b.onclick = async () => {
+  state.cfg.themeAuto = b.dataset.themeAuto === 'on';
+  await api.post('/api/config', { themeAuto: state.cfg.themeAuto });
+  applySystemTheme();
 });
 $$('[data-lang-set]').forEach((b) => b.onclick = async () => {
   state.cfg.lang = b.dataset.langSet;
@@ -1911,6 +1922,42 @@ async function loadSkills() {
   });
   show(0);
 }
+// ---- system theme auto-follow ----
+const mediaDark = window.matchMedia('(prefers-color-scheme: dark)');
+function applySystemTheme() {
+  if (state.cfg.themeAuto !== true) return;
+  const dark = mediaDark.matches;
+  state.cfg.theme = dark ? 'dark' : 'light';
+  applyI18n();
+}
+mediaDark.addEventListener('change', () => { if (state.cfg.themeAuto) applySystemTheme(); });
+
+// ---- keyboard shortcuts ----
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && !e.shiftKey && !e.altKey) {
+    if (e.key === 'n' || e.key === 'N') { e.preventDefault(); $('#btn-new-session').click(); }
+    else if (e.key === '1') { setView('workbench'); }
+    else if (e.key === '2') { setView('config'); }
+    else if (e.key === '3') { setView('advanced'); }
+  }
+});
+
+// ---- context usage visualization ----
+function updateContextBar(pct) {
+  let bar = $('#ctx-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'ctx-bar';
+    bar.style.cssText = 'position:fixed;bottom:26px;right:0;width:120px;height:3px;background:var(--line);z-index:5;';
+    document.body.appendChild(bar);
+  }
+  let fill = bar.querySelector('.ctx-fill');
+  if (!fill) { fill = document.createElement('div'); fill.className = 'ctx-fill'; fill.style.cssText = 'height:100%;transition:width 0.5s;'; bar.appendChild(fill); }
+  const p = Math.min(100, Math.max(0, pct));
+  fill.style.width = p + '%';
+  fill.style.background = p > 85 ? 'var(--err)' : p > 60 ? 'var(--warn)' : 'var(--accent)';
+}
+
 let cronJobs = [];
 async function loadCron() {
   const r = await api.get('/api/cron').catch(() => ({ jobs: [] }));

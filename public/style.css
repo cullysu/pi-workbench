@@ -841,3 +841,15 @@ select { color-scheme: light dark; }
 body.rail-dragging { cursor: col-resize; user-select: none; }
 
 select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 8px center; padding-right: 28px; }
+
+.um-actions { display: none; position: absolute; top: 6px; right: 8px; gap: 2px; }
+.msg.user:hover .um-actions { display: flex; }
+.um-btn { background: transparent; border: none; color: var(--text3); cursor: pointer; padding: 2px; font-size: 13px; }
+.um-btn:hover { color: var(--text); }
+.cron-en { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text2); cursor: pointer; }
+.cron-en input { accent-color: var(--accent); }
+.cron-job { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 8px; }
+.cron-job-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cron-job-name { font-weight: 600; font-size: 14px; }
+.tpl-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-sm); }
+.tpl-row:hover { background: var(--hover); }

@@ -111,14 +111,26 @@ function applyI18n() {
 }
 
 // ---------- api ----------
+// token auth: server injects a per-boot random token into the page; every /api
+// request must echo it or the server answers 403 (blocks other local processes)
 const api = {
-  get: (p) => fetch(p).then((r) => r.json()),
-  post: (p, body) => fetch(p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }).then((r) => r.json()),
+  get: (p) => fetch(p, { headers: apiHeaders() }).then((r) => apiOn403(r)).then((r) => r.json()),
+  post: (p, body) => fetch(p, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body || {}) }).then((r) => apiOn403(r)).then((r) => r.json()),
 };
+function apiHeaders() { return Object.assign({ 'content-type': 'application/json' }, window.__API_TOKEN ? { 'x-api-token': window.__API_TOKEN } : {}); }
+// stale page (token from a previous boot) → every call 403s; reload once to pick up the fresh token
+function apiOn403(r) {
+  if (r.status === 403 && !sessionStorage.getItem('pw403')) {
+    try { sessionStorage.setItem('pw403', '1'); } catch {}
+    location.reload();
+  }
+  return r;
+}
+sessionStorage.removeItem('pw403');
 
 // ---------- websocket ----------
 function wsConnect() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  const ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(window.__API_TOKEN || '')}`);
   state.ws = ws;
   ws.onopen = () => {
     state.wsReady = true; $('#conn-dot').className = 'dot on';
@@ -463,6 +475,8 @@ function clearTimeline(withPlaceholder) {
     const meta = state.heroMeta || '';
     $('.tl-inner').innerHTML = emptyStateHtml(g, meta);
   }
+  // hero empty state hides the topbar; an open session brings the tools back
+  $('#topbar').classList.toggle('hidden', !!withPlaceholder);
 }
 
 // ---------- session lifecycle ----------

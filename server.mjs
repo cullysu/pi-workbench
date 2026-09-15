@@ -1278,6 +1278,10 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const p = u.pathname;
   try {
+    if (p.startsWith('/api/') && p !== '/api/token') {
+      const token = req.headers['x-api-token'];
+      if (token !== API_TOKEN) { res.writeHead(403); return res.end('forbidden'); }
+    }
     if (p === '/api/config') {
       if (req.method === 'POST') {
         const body = await readBody(req);
@@ -1774,10 +1778,17 @@ const server = http.createServer(async (req, res) => {
       f = path.join(PUBLIC_DIR, path.normalize(f).replace(/^([.][.][/\\])+/, ''));
       if (!f.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end(); }
       try {
-        const data = fs.readFileSync(f);
+        let data = fs.readFileSync(f);
         const ext = path.extname(f);
+        if (ext === '.html' || p === '/') {
+          data = Buffer.from(data.toString('utf8').replace(
+            '</head>',
+            '<script>window.__API_TOKEN = ' + JSON.stringify(API_TOKEN) + '</scr' + 'ipt></head>'
+          ));
+        }
         const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' }[ext] || 'application/octet-stream';
-        res.writeHead(200, { 'content-type': mime });
+        // index.html embeds a per-boot token — a cached stale page would 403 itself dead
+        res.writeHead(200, { 'content-type': mime, 'cache-control': (ext === '.html' || p === '/') ? 'no-store' : 'no-cache' });
         return res.end(data);
       } catch { res.writeHead(404); return res.end('not found'); }
     }
@@ -1788,12 +1799,19 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.on('upgrade', (req, socket, head) => {
-  const { pathname } = new URL(req.url, 'http://x');
-  if (pathname === '/ws') wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  const { pathname, searchParams } = new URL(req.url, 'http://x');
+  // WS can't carry custom headers — token rides the ?t= query param instead
+  if (pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   else socket.destroy();
 });
 
 resolveSecrets();
+
+// HTTP token auth: any local process can hit 32123 without this — generate random
+// token per startup, embed in HTML, require in X-Api-Token header for /api/* routes
+const API_TOKEN = crypto.randomBytes(24).toString('hex');
+globalThis.API_TOKEN = API_TOKEN;
+
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`pi-workbench listening on http://127.0.0.1:${PORT}`);
   // warm the codex list cache in the background so the first UI click is instant

@@ -18,11 +18,13 @@ let tmpHome = '';
 let tmpProj = '';
 let backupZip = '';
 
-const get = (p, timeout = 15000) => fetch(BASE + p, { signal: AbortSignal.timeout(timeout) });
+let TOKEN = '';
+const hdrs = () => (TOKEN ? { 'x-api-token': TOKEN } : {});
+const get = (p, timeout = 15000) => fetch(BASE + p, { headers: hdrs(), signal: AbortSignal.timeout(timeout) });
 const req = async (p, body, method = body === undefined ? 'GET' : 'POST', timeout = 20000) => {
-  const opts = { method, signal: AbortSignal.timeout(timeout) };
+  const opts = { method, signal: AbortSignal.timeout(timeout), headers: hdrs() };
   if (method === 'POST') {
-    opts.headers = { 'content-type': 'application/json' };
+    opts.headers = { 'content-type': 'application/json', ...hdrs() };
     opts.body = JSON.stringify(body ?? {});
   }
   const r = await fetch(BASE + p, opts);
@@ -69,6 +71,11 @@ test.before(async () => {
   });
   child.stderr.on('data', (c) => process.env.PIWB_TEST_DEBUG && process.stderr.write(c));
   await waitPort(PORT);
+  // scrape the per-boot token out of the served index.html
+  const page = await fetch(BASE + '/').then((r) => r.text());
+  const m = page.match(/__API_TOKEN = "([0-9a-f]+)"/);
+  assert.ok(m, 'token embedded in served html');
+  TOKEN = m[1];
 });
 
 test.after(() => {
@@ -85,6 +92,36 @@ test('kernel reports shape and uses scratch home', async () => {
   assert.ok(String(data.node).startsWith('v'));
   assert.equal(data.secrets.relay, false, 'no relaySecret configured in scratch home');
   assert.ok(data.paths.config.includes(path.basename(tmpHome)), 'config path inside scratch home');
+});
+
+test('token auth: /api without or with wrong token is rejected, valid token passes', async () => {
+  const anon = await fetch(BASE + '/api/kernel').then((r) => r.status);
+  assert.equal(anon, 403, 'missing token rejected');
+  const bad = await fetch(BASE + '/api/kernel', { headers: { 'x-api-token': 'deadbeef' } }).then((r) => r.status);
+  assert.equal(bad, 403, 'wrong token rejected');
+  const good = await req('/api/kernel');
+  assert.equal(good.status, 200, 'correct token accepted');
+  const page = await fetch(BASE + '/').then((r) => r.status);
+  assert.equal(page, 200, 'static page stays reachable (it carries the fresh token)');
+});
+
+test('ws upgrade without token is destroyed', async () => {
+  const upgraded = await new Promise((resolve) => {
+    const s = net.connect(PORT, '127.0.0.1');
+    const reqText = [
+      'GET /ws HTTP/1.1',
+      'Host: x',
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+      '',
+      '',
+    ].join('\r\n');
+    s.on('data', (d) => { resolve(d.toString().includes('101')); s.destroy(); });
+    s.on('error', () => resolve(false));
+    s.on('connect', () => s.write(reqText));
+    setTimeout(() => { try { s.destroy(); } catch {} resolve(false); }, 3000);
+  });
+  assert.equal(upgraded, false, 'bare ws upgrade must not complete');
 });
 
 test('config: defaults, post persists, projects dedupe case-insensitively', async () => {

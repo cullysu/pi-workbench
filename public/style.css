@@ -848,6 +848,9 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
 .um-btn:hover { color: var(--text); }
 .cron-en { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text2); cursor: pointer; }
 .cron-en input { accent-color: var(--accent); }
+.cron-inp { background: var(--canvas); border: 1px solid var(--card-border); border-radius: var(--radius-sm); color: var(--text); font-size: 13px; padding: 7px 10px; outline: none; transition: border-color 0.15s; }
+.cron-inp:focus { border-color: var(--accent); }
+.cron-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .cron-job { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 8px; }
 .cron-job-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cron-job-name { font-weight: 600; font-size: 14px; }

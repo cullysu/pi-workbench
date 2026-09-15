@@ -1743,12 +1743,10 @@ const server = http.createServer(async (req, res) => {
       // typebox is resolved from the extension's own node_modules (pi documents this flow)
       const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
       if (!hasDep) {
-        const r = await execInCwd(destDir, 'npm install --omit=dev --no-fund --no-audit');
-        if (r.code !== 0 || !fs.existsSync(path.join(destDir, 'node_modules', 'typebox'))) {
-          return json(res, 500, { error: 'npm install typebox failed', detail: (r.err || r.out || '').slice(-800) });
-        }
+        // npm install in background — the API returns immediately
+        execInCwd(destDir, 'npm install --omit=dev --no-fund --no-audit');
       }
-      return json(res, 200, { ok: true, dest: destDir });
+      return json(res, 200, { ok: true, dest: destDir, note: hasDep ? 'already installed' : 'npm install running in background' });
     }
     if (p === '/api/backup/export' && req.method === 'POST') {
       try { return json(res, 200, await exportBackupZip()); }

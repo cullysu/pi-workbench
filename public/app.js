@@ -230,9 +230,15 @@ function onMessageUpdate(ae) {
   if (ae.type === 'text_start' || ae.type === 'text_delta' || ae.type === 'text_end') {
     const b = blockEl(cur, ae.contentIndex, 'text');
     b.text = (b.text || '') + (ae.delta || ae.content || '');
-    b.el.innerHTML = mdRender(b.text);
-    b.el.classList.add('cursor');
-    scrollBottom();
+    // throttle mdRender: batch DOM updates to one per animation frame
+    if (!b.raf) {
+      b.raf = requestAnimationFrame(() => {
+        b.raf = null;
+        b.el.innerHTML = mdRender(b.text || '');
+        b.el.classList.add('cursor');
+        scrollBottom();
+      });
+    }
   } else if (ae.type === 'thinking_start' || ae.type === 'thinking_delta' || ae.type === 'thinking_end') {
     const b = blockEl(cur, ae.contentIndex, 'thinking');
     b.body.textContent = (b.body.textContent || '') + (ae.delta || ae.content || '');
@@ -1632,6 +1638,7 @@ async function loadUsage() {
       ${statCard(t('u_out'), fmtTok(u.output))}
       ${statCard(t('u_hit'), hit + '%')}
       ${statCard(t('u_cost'), '$' + (u.cost || 0).toFixed(2))}
+      ${u.costEstimated > 0 ? statCard('估算', '$' + (u.costEstimated || 0).toFixed(2)) : ''}
       ${statCard(t('u_cw'), fmtTok(u.cacheWrite))}
       ${statCard(t('u_cr'), fmtTok(u.cacheRead))}
     </div>
@@ -1992,6 +1999,7 @@ function renderCronJobs() {
         '<span class="muted small">' + kind + model + '</span>' +
         '<span style="flex:1"></span>' +
         '<button class="mini-btn cron-run" data-id="' + esc(j.id) + '">立即运行</button>' +
+        '<button class="mini-btn cron-log" data-id="' + esc(j.id) + '">日志</button>' +
         '<button class="mini-btn cron-del" data-id="' + esc(j.id) + '">删除</button>' +
       '</div>' +
       '<div class="muted small" style="padding:2px 4px 0">' + esc((j.prompt || '').slice(0, 80)) + ((j.prompt || '').length > 80 ? '…' : '') + '</div>' +
@@ -2010,6 +2018,16 @@ function renderCronJobs() {
       await api.post('/api/cron/run-now', { id: b.dataset.id });
       b.textContent = '立即运行'; b.disabled = false;
       loadCron();
+    };
+  });
+  box.querySelectorAll('.cron-log').forEach((b) => {
+    b.onclick = async () => {
+      b.textContent = '…'; b.disabled = true;
+      try {
+        const r = await api.post('/api/cron/lastlog', { id: b.dataset.id });
+        modal(r.content || '(no output)', [{ label: '关闭', primary: true }]);
+      } catch { modal('(failed to load log)', [{ label: '关闭', primary: true }]); }
+      b.textContent = '日志'; b.disabled = false;
     };
   });
   box.querySelectorAll('.cron-del').forEach((b) => {
@@ -2066,8 +2084,11 @@ async function loadTemplates() {
   list.querySelectorAll('.tpl-ins').forEach((b) => {
     b.onclick = () => {
       const tp = tpls[Number(b.dataset.i)];
-      $('#input').value = tp.body;
-      $('#input').focus();
+      const inp = $('#input');
+      const pos = inp.selectionStart || inp.value.length;
+      inp.value = inp.value.slice(0, pos) + tp.body + inp.value.slice(inp.selectionEnd || pos);
+      inp.selectionStart = inp.selectionEnd = pos + tp.body.length;
+      inp.focus();
     };
   });
 }
@@ -2242,10 +2263,21 @@ __tl.addEventListener('mouseover', (e) => {
   if (!bubble || bubble.querySelector('.um-actions')) return;
   const bar = document.createElement('span');
   bar.className = 'um-actions';
-  bar.innerHTML = '<button class="um-btn" data-a="regen" title="从这条重新生成">⟳</button><button class="um-btn" data-a="edit" title="编辑这条后重发">✎</button>';
+  bar.innerHTML = '<button class="um-btn" data-a="regen" title="从这条重新生成">⟳</button><button class="um-btn" data-a="edit" title="编辑这条后重发">✎</button><button class="um-btn" data-a="export" title="导出 Markdown">⤓</button>';
   bubble.appendChild(bar);
   bar.querySelector('[data-a="regen"]').onclick = (ev) => { ev.stopPropagation(); forkToUserBubble(bubble, 'send'); };
   bar.querySelector('[data-a="edit"]').onclick = (ev) => { ev.stopPropagation(); forkToUserBubble(bubble, 'edit'); };
+  bar.querySelector('[data-a="export"]').onclick = (ev) => {
+    ev.stopPropagation();
+    const k = userBubbleIndex(bubble);
+    const msgs = state.forkMsgs || [];
+    const fm = msgs[k];
+    if (!fm || !state.sessionFile) return;
+    const a = document.createElement('a');
+    a.href = '/api/session/export?path=' + encodeURIComponent(state.sessionFile);
+    a.download = 'session-export.md';
+    a.click();
+  };
 });
 
 // greeting must follow the system clock — an app left open overnight would

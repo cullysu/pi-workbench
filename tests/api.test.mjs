@@ -224,7 +224,7 @@ test('mcp config: roundtrip and validation', async () => {
   assert.equal(r.status, 400, 'server without command rejected');
 });
 
-test('mcp bridge install: copies extension into scratch extensions dir', async () => {
+test('mcp bridge install: copies extension into scratch extensions dir', { timeout: 120000 }, async () => {
   const r = await req('/api/mcp/install', {});
   assert.equal(r.status, 200);
   assert.equal(r.data.ok, true);

@@ -2076,7 +2076,7 @@ $('#btn-cron-save').onclick = async () => {
 };
 $('#cron-kind').onchange = () => {
   const daily = $('#cron-kind').value === 'daily';
-  $('#cron-time').style.display = daily ? 'none' : '';
+  $('#cron-time').style.display = daily ? '' : 'none';
   $('#cron-every').style.display = daily ? 'none' : '';
 };
 $('#cron-kind').onchange();

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import {ledger} from './ledger.mjs';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -160,6 +161,13 @@ function jobDue(job, now = new Date()) {
   }
   return false;
 }
+function cronPiArgs(job) {
+  // Must be flags only. spawn() already prepends PI_CLI; putting it here makes
+  // argv `node cli.js cli.js -p ...` and pi treats the extra path as the prompt.
+  const args = ['-p', String(job.prompt).slice(0, 8000)];
+  if (job.model) args.push('--model', job.model);
+  return args;
+}
 function runCronJob(job, reason = 'schedule') {
   if (job.running) return;
   job.running = true;
@@ -168,8 +176,7 @@ function runCronJob(job, reason = 'schedule') {
   const runDir = path.join(CRON_RUNS_DIR, job.id);
   fs.mkdirSync(runDir, { recursive: true });
   const logFile = path.join(runDir, ts + '.log');
-  const args = [PI_CLI, '-p', String(job.prompt).slice(0, 8000)];
-  if (job.model) args.push('--model', job.model);
+  const args = cronPiArgs(job);
   const logFd = fs.openSync(logFile, 'w');
   const proc = spawn(process.execPath, [PI_CLI, ...args], {
     cwd,
@@ -1282,6 +1289,48 @@ const server = http.createServer(async (req, res) => {
       const token = req.headers['x-api-token'];
       if (token !== API_TOKEN) { res.writeHead(403); return res.end('forbidden'); }
     }
+    if (p === '/api/ledger') {
+      const q = new URL(req.url, 'http://x').searchParams;
+      const days = Math.min(365, Math.max(1, Number(q.get('days') || 30)));
+      return json(res, 200, ledger({days}));
+    }
+    if (p === '/api/engines' && req.method === 'GET') {
+      const {execSync} = await import('node:child_process');
+      const engines = {};
+      for (const e of ['codex', 'zcode', 'claude']) {
+        try { engines[e] = {ok: true, ver: execSync(`${e} --version 2>nul`, {encoding: 'utf8', timeout: 8000}).trim().slice(0, 60)}; }
+        catch { engines[e] = {ok: false}; }
+      }
+      return json(res, 200, engines);
+    }
+    if (p === '/api/engines/run' && req.method === 'POST') {
+      const {engine, prompt, cwd} = await readBody(req);
+      if (!['codex', 'zcode', 'claude'].includes(engine) || !prompt) return json(res, 400, {error: 'bad engine/prompt'});
+      const args = engine === 'codex' ? ['exec', prompt, '--json', '--skip-git-repo-check', '-C', cwd || '.']
+                 : engine === 'zcode' ? ['-p', prompt, '--output-format', 'json']
+                 : ['-p', prompt, '--output-format', 'json'];
+      const {spawn} = await import('node:child_process');
+      const child = spawn(engine, args, {cwd: cwd || '.', shell: process.platform === 'win32', windowsHide: true});
+      let out = '', err = '';
+      const kill = setTimeout(() => { try { child.kill(); } catch {} }, 600000);
+      child.stdout.on('data', (c) => { out += c; if (out.length > 2e6) out = out.slice(-1e6); });
+      child.stderr.on('data', (c) => { err += c; if (err.length > 2e5) err = err.slice(-1e5); });
+      child.on('error', (e) => { clearTimeout(kill); return json(res, 500, {error: String(e)}); });
+      child.on('close', (code) => {
+        clearTimeout(kill);
+        let usage = null, last = '';
+        for (const line of out.split('\n')) {
+          let j = null; try { j = JSON.parse(line); } catch { continue; }
+          const u = j.usage ?? j.info?.total_token_usage ?? null;
+          if (u) usage = u;
+          if (j.type === 'item.completed' && j.item?.text) last = j.item.text;
+          if (j.result) last = typeof j.result === 'string' ? j.result : last;
+          if (j.is_error) err = String(j.result ?? err);
+        }
+        return json(res, 200, {code, usage, last: last.slice(0, 4000), err: err.slice(-800)});
+      });
+      return;
+    }
     if (p === '/api/config') {
       if (req.method === 'POST') {
         const body = await readBody(req);
@@ -1551,7 +1600,7 @@ const server = http.createServer(async (req, res) => {
       const abs = path.resolve(u.searchParams.get('path') || '');
       if (!abs.startsWith(root + path.sep) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
-      const NL = '\\n';
+      const NL = '\n';  // 之前那行是字面反斜杠+n：按它切会把每行 JSON 从转义处切碎，导出恒为空
       for (const line of fs.readFileSync(abs, 'utf8').split(NL)) {
         if (!line) continue;
         let j; try { j = JSON.parse(line); } catch { continue; }

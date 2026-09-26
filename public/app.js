@@ -499,8 +499,11 @@ function openPiSession({ sessionPath = null, isNew = false }) {
       model: state.selModel || null,
     });
     $('#conn-dot').className = 'dot busy';
-    $('#statusline').textContent = t('loading');
-    if (!isNew && sessionPath) rpcTo({ id: 'replay', type: 'get_entries' });
+    // statusline 只在 setBusy(false) 时清空，而新会话不会触发 setBusy，
+    // 于是空会话上一直挂着"加载中…"。只有真要 replay 历史时才有得加载。
+    const replaying = !isNew && !!sessionPath;
+    $('#statusline').textContent = replaying ? t('loading') : '';
+    if (replaying) rpcTo({ id: 'replay', type: 'get_entries' });
     rpcTo({ type: 'get_available_models' });
     rpcTo({ id: 'st-' + Date.now(), type: 'get_state' });
     setTimeout(refreshStats, 800);
@@ -881,6 +884,8 @@ $('#btn-goal').onclick = () => {
     await api.post('/api/config', { goals });
     renderGoalBanner();
   });
+  // modal()/modalWithInput() 都会自己 unhide，这里是手搭的内容区，漏了就永远看不见
+  $('#modal-backdrop').classList.remove('hidden');
 };
 $('#btn-goal-stop').onclick = () => { state.goalStop = true; $('#statusline').textContent = '已停止自动续跑'; renderGoalBanner(); };
 const GOAL_CONTINUE_PROMPT = '继续推进目标；若目标已完全完成，请在回复末尾单独一行输出 GOAL_DONE。';
@@ -1620,6 +1625,29 @@ function statCard(k, v) { return `<div class="ucard"><div class="u-k">${k}</div>
 function cssVar(name) {
   return getComputedStyle(document.body).getPropertyValue(name).trim() || '#888';
 }
+
+async function loadCLedger() {
+  const box = $('#cledger-box');
+  if (!box || box.dataset.loaded) return;
+  box.dataset.loaded = '1';
+  box.innerHTML = `<button id="btn-cledger" class="mini-btn primary">扫描最近 30 天</button>`;
+  $('#btn-cledger').onclick = async () => {
+    box.innerHTML = '<div class="muted small">扫描中…</div>';
+    const d = await api.get('/api/ledger?days=30').catch((e) => ({error: String(e)}));
+    if (d.error) { box.innerHTML = '加载失败: ' + d.error; return; }
+    const fmt = (o) => Object.entries(o).map(([k, v]) =>
+      `<tr><td>${k}</td><td>${v.calls}</td><td>${(v.input/1e6).toFixed(1)}M</td><td>${(v.cached/1e6).toFixed(1)}M</td><td>${(v.output/1e3).toFixed(1)}K</td><td>${v.input ? Math.round(v.cached/v.input*100) : 0}%</td></tr>`).join('');
+    box.innerHTML = `
+      <div class="usage-sec">按引擎（30 天）</div>
+      <table class="usage-table"><thead><tr><th>引擎</th><th>调用</th><th>输入(M)</th><th>缓存读(M)</th><th>输出(K)</th><th>缓存率</th></tr></thead>
+      <tbody>${fmt(d.byEngine)}</tbody></table>
+      <div class="usage-sec">按模型</div>
+      <table class="usage-table"><thead><tr><th>模型</th><th>调用</th><th>输入(M)</th><th>缓存读(M)</th><th>输出(K)</th><th>缓存率</th></tr></thead>
+      <tbody>${fmt(d.byModel) || '<tr><td colspan=6 class=muted>无数据</td></tr>'}</tbody></table>`;
+  };
+  $('#btn-cledger').click();
+}
+
 async function loadUsage() {
   const box = $('#usage-box');
   box.innerHTML = `<div class="muted small" style="padding:20px 8px">${t('loading')}</div>`;
@@ -2076,8 +2104,12 @@ $('#btn-cron-save').onclick = async () => {
 };
 $('#cron-kind').onchange = () => {
   const daily = $('#cron-kind').value === 'daily';
+  // 只切 display 的话，HTML 上带 disabled 的 #cron-every 永远编辑不了，
+  // everyMin 取到空串 → Number('')=0 → 保存被"间隔分钟数无效"挡死。
   $('#cron-time').style.display = daily ? '' : 'none';
+  $('#cron-time').disabled = !daily;
   $('#cron-every').style.display = daily ? 'none' : '';
+  $('#cron-every').disabled = daily;
 };
 $('#cron-kind').onchange();
 async function loadTemplates() {
@@ -2154,6 +2186,7 @@ const PANEL_LOADERS = {
   migration: loadMigration,
   health: loadHealth,
   usage: loadUsage,
+  cledger: loadCLedger,
   logs: renderLogPage,
   kernel: loadKernel,
   env: loadEnv,

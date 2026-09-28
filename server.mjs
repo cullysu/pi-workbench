@@ -9,6 +9,8 @@ import crypto from 'node:crypto';
 import {ledger} from './ledger.mjs';
 import {pathToFileURL} from 'node:url';
 import {cronPiArgs} from './lib/cron-args.mjs';
+import {createCron} from './lib/cron.mjs';
+import {createFailover} from './lib/failover.mjs';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -146,231 +148,17 @@ const saveJson = (file, obj) => {
   fs.writeFileSync(file, JSON.stringify(obj, null, 2));
   return obj;
 };
-// ---------- cron: scheduled pi prompt runs (built-in, no external scheduler) ----------
+const failover = createFailover({ SECRET_ENV, readJson, saveJson, logErr, loadRouting, saveRouting, PI_MODELS });
+const { splitModel, keyEnvsFor, hasLiteralKey, keyValue, providerHasKey, pickKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
 const CRON_FILE = path.join(CFG_DIR, 'cron.json');
 const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
-function todayStr(d = new Date()) {
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-}
-function jobDue(job, now = new Date()) {
-  if (job.kind === 'daily') {
-    const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-    return hhmm === job.time && job.lastRunDay !== todayStr(now);
-  }
-  if (job.kind === 'interval') {
-    const last = job.lastRunMs || 0;
-    return Date.now() - last >= Number(job.everyMin) * 60000;
-  }
-  return false;
-}
-function runCronJob(job, reason = 'schedule') {
-  if (job.running) return;
-  job.running = true;
-  const cwd = job.cwd && fs.existsSync(job.cwd) ? job.cwd : HOME;
-  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const runDir = path.join(CRON_RUNS_DIR, job.id);
-  fs.mkdirSync(runDir, { recursive: true });
-  const logFile = path.join(runDir, ts + '.log');
-  const args = cronPiArgs(job);
-  const logFd = fs.openSync(logFile, 'w');
-  const proc = spawn(process.execPath, [PI_CLI, ...args], {
-    cwd,
-    env: { ...process.env, ...SECRET_ENV },
-    windowsHide: true,
-    stdio: ['ignore', logFd, logFd],
-  });
-  fs.closeSync(logFd);
-  const killer = setTimeout(() => { try { proc.kill(); } catch {} }, 15 * 60000);
-  proc.on('error', (e) => {
-    clearTimeout(killer);
-    job.running = false;
-    job.lastStatus = 'spawn error';
-    job.lastOutput = '[spawn error] ' + e.message;
-    try { fs.appendFileSync(logFile, '\n' + '[spawn error] ' + e.message + '\n'); } catch {}
-  });
-  let finished = false;
-  proc.on('close', (code) => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(killer);
-    job.running = false;
-    job.lastRun = new Date().toISOString();
-    job.lastRunMs = Date.now();
-    job.lastStatus = code === 0 ? 'ok' : 'exit ' + code;
-    try { job.lastOutput = fs.readFileSync(logFile, 'utf8').slice(-400); } catch { job.lastOutput = ''; }
-    try { broadcast({ type: 'cron-run', id: job.id, name: job.name, ok: code === 0 }); } catch {}
-    try { saveJson(CRON_FILE, { jobs: (readJson(CRON_FILE) || { jobs: [] }).jobs.map((j) => (j.id === job.id ? { ...j, lastRun: job.lastRun, lastRunMs: job.lastRunMs, lastStatus: job.lastStatus, lastOutput: job.lastOutput, running: false } : j)) }); } catch {}
-  });
-  job.lastStatus = 'running';
-}
-let cronBootResetDone = false;
-function cronBootReset(d) {
-  let changed = false;
-  for (const j of d.jobs || []) { if (j.running) { j.running = false; changed = true; } }
-  return changed;
-}
-function cronTick() {
-  let d = readJson(CRON_FILE);
-  if (!d || !Array.isArray(d.jobs) || !d.jobs.length) return;
-  const now = new Date();
-  let dirty = false;
-  if (!cronBootResetDone) {
-    // a server restart orphans running flags — clear them once at startup
-    cronBootResetDone = true;
-    if (cronBootReset(d)) dirty = true;
-  }
-  for (const job of d.jobs) {
-    if (job.enabled === false || job.running) {
-      // 30-min zombie timeout: a running flag with no progress for 30 min is stale
-      if (job.running && job.lastRunMs && Date.now() - job.lastRunMs > 30 * 60000) {
-        job.running = false;
-        job.lastStatus = 'stale-timeout';
-        dirty = true;
-      }
-      continue;
-    }
-    if (jobDue(job, now)) {
-      job.lastRunDay = todayStr(now);
-      job.lastRunMs = Date.now();
-      dirty = true;
-      runCronJob(job, 'schedule');
-    }
-  }
-  if (dirty) saveJson(CRON_FILE, d);
-}
-setInterval(cronTick, 20000);
+const cron = createCron({ CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, cronPiArgs, broadcast, readJson, saveJson, spawn });
+setInterval(() => cron.tick(), 20000);
 function saveRouting(r) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
   fs.writeFileSync(ROUTING_FILE, JSON.stringify(r, null, 2));
   return r;
 }
-const splitModel = (m) => { const i = (m || '').indexOf('/'); return i === -1 ? [null, m] : [m.slice(0, i), m.slice(i + 1)]; };
-function keyEnvsFor(provider) {
-  const models = readJson(PI_MODELS) || { providers: {} };
-  const routing = loadRouting();
-  const envs = new Set();
-  const ak = models.providers?.[provider]?.apiKey;
-  if (typeof ak === 'string' && ak.startsWith('$')) envs.add(ak.slice(1));
-  for (const e of routing.providers?.[provider]?.keyEnvs || []) envs.add(String(e).startsWith('$') ? e.slice(1) : String(e));
-  return [...envs];
-}
-function hasLiteralKey(provider) {
-  const models = readJson(PI_MODELS) || { providers: {} };
-  const ak = models.providers?.[provider]?.apiKey;
-  return typeof ak === 'string' && ak.length > 0 && !ak.startsWith('$');
-}
-function keyValue(env) {
-  return SECRET_ENV[env] || process.env[env] || null;
-}
-function providerHasKey(provider) {
-  // pickKey respects per-key cooldowns — a cooled key set means "no usable key"
-  return pickKey(provider) !== null || hasLiteralKey(provider);
-}
-function pickKey(provider) {
-  const cds = loadRouting().state.cooldowns;
-  const envs = keyEnvsFor(provider);
-  for (let i = 0; i < envs.length; i++) {
-    const cd = cds[`${provider}#key${i}`];
-    if (cd && cd.until > Date.now()) continue;
-    if (!keyValue(envs[i])) continue;
-    return { idx: i, env: envs[i], value: keyValue(envs[i]) };
-  }
-  return null;
-}
-function coolModel(modelId, err, seconds) {
-  const routing = loadRouting();
-  routing.state.cooldowns[`model:${modelId}`] = { until: Date.now() + seconds * 1000, error: String(err || '').slice(0, 200) };
-  saveRouting(routing);
-}
-function coolKey(provider, idx, err, seconds) {
-  if (idx === null || idx === undefined) return;
-  const routing = loadRouting();
-  routing.state.cooldowns[`${provider}#key${idx}`] = { until: Date.now() + seconds * 1000, error: String(err || '').slice(0, 200) };
-  saveRouting(routing);
-}
-function clearCool(modelId) {
-  const [prov] = splitModel(modelId);
-  const routing = loadRouting();
-  const cds = routing.state.cooldowns;
-  let changed = false;
-  for (const k of Object.keys(cds)) {
-    if (k === `model:${modelId}` || k === prov || k.startsWith(prov + '#key')) { delete cds[k]; changed = true; }
-  }
-  if (changed) saveRouting(routing);
-}
-function modelCooled(modelId) {
-  const cd = loadRouting().state.cooldowns[`model:${modelId}`];
-  return cd && cd.until > Date.now() ? cd : null;
-}
-function providerCooled(provider) {
-  const models = readJson(PI_MODELS) || { providers: {} };
-  const list = (models.providers?.[provider]?.models || []).map((m) => `${provider}/${m.id}`);
-  if (!list.length) return null;
-  const cds = loadRouting().state.cooldowns;
-  const cooled = list.map((m) => cds[`model:${m}`]).filter((c) => c && c.until > Date.now());
-  return cooled.length === list.length ? cooled.reduce((a, b) => (a.until > b.until ? a : b)) : null;
-}
-function envOverrideFor(provider) {
-  const pk = pickKey(provider);
-  if (!pk) return null;
-  const models = readJson(PI_MODELS) || { providers: {} };
-  const ak = models.providers?.[provider]?.apiKey;
-  if (typeof ak !== 'string' || !ak.startsWith('$')) return null;
-  return { __keyIdx: pk.idx, [ak.slice(1)]: pk.value };
-}
-function nextInChain(modelId) {
-  const routing = loadRouting();
-  for (const chain of routing.chains || []) {
-    const i = chain.indexOf(modelId);
-    if (i === -1) continue;
-    for (let j = i + 1; j < chain.length; j++) {
-      const cand = chain[j];
-      const [prov] = splitModel(cand);
-      if (routing.providers?.[prov]?.enabled === false) continue;
-      if (modelCooled(cand)) continue;
-      if (providerCooled(prov)) continue;
-      if (!providerHasKey(prov)) continue;
-      return cand;
-    }
-  }
-  return null;
-}
-async function probeModel(modelId) {
-  const [prov] = splitModel(modelId);
-  const models = readJson(PI_MODELS) || { providers: {} };
-  const p = models.providers?.[prov];
-  if (!p?.baseUrl) return { ok: false, detail: 'provider has no baseUrl' };
-  const ov = envOverrideFor(prov);
-  let key = ov ? Object.values(ov).find((v) => typeof v === 'string') : null;
-  if (!key && hasLiteralKey(prov)) key = p.apiKey;
-  const t0 = Date.now();
-  try {
-    const r = await fetch(p.baseUrl.replace(/\/$/, '') + '/models', {
-      headers: key ? { authorization: `Bearer ${key}` } : {},
-      signal: AbortSignal.timeout(8000),
-    });
-    const ms = Date.now() - t0;
-    if (!r.ok) return { ok: false, status: r.status, ms };
-    const j = await r.json().catch(() => ({}));
-    return { ok: true, ms, models: Array.isArray(j.data) ? j.data.length : null };
-  } catch (e) {
-    return { ok: false, detail: String(e.message || e), ms: Date.now() - t0 };
-  }
-}
-const listJsonFiles = (dir, depth = 2) => {
-  const out = [];
-  const walk = (d, lvl) => {
-    let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const p = path.join(d, e.name);
-      if (e.isDirectory()) { if (lvl < depth) walk(p, lvl + 1); }
-      else if (e.isFile() && e.name.endsWith('.jsonl')) out.push(p);
-    }
-  };
-  walk(dir, 0);
-  return out;
-};
 const firstLines = (p, bytes = 16384) => {
   let fd;
   try {
@@ -1561,7 +1349,7 @@ const server = http.createServer(async (req, res) => {
         saveJson(CRON_FILE, { jobs });
       }
       const d = readJson(CRON_FILE) || { jobs: [] };
-      if (cronBootReset(d)) saveJson(CRON_FILE, d);
+      if (cron.bootReset(d)) saveJson(CRON_FILE, d);
       return json(res, 200, d);
     }
     if (p === '/api/cron/delete' && req.method === 'POST') {

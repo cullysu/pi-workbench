@@ -148,17 +148,54 @@ const saveJson = (file, obj) => {
   fs.writeFileSync(file, JSON.stringify(obj, null, 2));
   return obj;
 };
-const failover = createFailover({ SECRET_ENV, readJson, saveJson, logErr, loadRouting, saveRouting, PI_MODELS });
-const { splitModel, keyEnvsFor, hasLiteralKey, keyValue, providerHasKey, pickKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
+// ---------- cron: scheduled pi prompt runs (lib/cron.mjs) ----------
 const CRON_FILE = path.join(CFG_DIR, 'cron.json');
 const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
 const cron = createCron({ CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, cronPiArgs, broadcast, readJson, saveJson, spawn });
-setInterval(() => cron.tick(), 20000);
 function saveRouting(r) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
   fs.writeFileSync(ROUTING_FILE, JSON.stringify(r, null, 2));
   return r;
 }
+const failover = createFailover({ SECRET_ENV, readJson, saveJson, logErr, loadRouting, saveRouting });
+const { splitModel, keyEnvsFor, hasLiteralKey, keyValue, providerHasKey, pickKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
+
+async function probeModel(modelId) {
+  const [prov] = splitModel(modelId);
+  const models = readJson(PI_MODELS) || { providers: {} };
+  const p = models.providers?.[prov];
+  if (!p?.baseUrl) return { ok: false, detail: 'provider has no baseUrl' };
+  const ov = envOverrideFor(prov);
+  let key = ov ? Object.values(ov).find((v) => typeof v === 'string') : null;
+  if (!key && hasLiteralKey(prov)) key = p.apiKey;
+  const t0 = Date.now();
+  try {
+    const r = await fetch(p.baseUrl.replace(/\/$/, '') + '/models', {
+      headers: key ? { authorization: `Bearer ${key}` } : {},
+      signal: AbortSignal.timeout(8000),
+    });
+    const ms = Date.now() - t0;
+    if (!r.ok) return { ok: false, status: r.status, ms };
+    const j = await r.json().catch(() => ({}));
+    return { ok: true, ms, models: Array.isArray(j.data) ? j.data.length : null };
+  } catch (e) {
+    return { ok: false, detail: String(e.message || e), ms: Date.now() - t0 };
+  }
+}
+const listJsonFiles = (dir, depth = 2) => {
+  const out = [];
+  const walk = (d, lvl) => {
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) { if (lvl < depth) walk(p, lvl + 1); }
+      else if (e.isFile() && e.name.endsWith('.jsonl')) out.push(p);
+    }
+  };
+  walk(dir, 0);
+  return out;
+};
 const firstLines = (p, bytes = 16384) => {
   let fd;
   try {
@@ -1426,7 +1463,7 @@ const server = http.createServer(async (req, res) => {
       const d = readJson(CRON_FILE) || { jobs: [] };
       const job = d.jobs.find((j) => j.id === id);
       if (!job) return json(res, 404, { error: 'job not found' });
-      runCronJob(job);
+      cron.runCronJob(job);
       saveJson(CRON_FILE, d);
       return json(res, 200, { ok: true, lastStatus: job.lastStatus });
     }

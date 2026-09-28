@@ -5,7 +5,7 @@ const nodeGlobals = {
   module: 'writable', __dirname: 'readonly', __filename: 'readonly',
   setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
   URL: 'readonly', URLSearchParams: 'readonly', globalThis: 'writable', performance: 'readonly',
-  fetch: 'readonly', AbortSignal: 'readonly', setImmediate: 'readonly', clearImmediate: 'readonly', queueMicrotask: 'readonly',
+  fetch: 'readonly', AbortSignal: 'readonly', setImmediate: 'readonly', clearTimeout: 'readonly', setTimeout: 'readonly', clearImmediate: 'readonly', queueMicrotask: 'readonly',
 };
 const browserGlobals = {
   window: 'readonly', document: 'readonly', localStorage: 'readonly', sessionStorage: 'readonly',
@@ -22,7 +22,7 @@ export default [
   { ignores: ['node_modules/**', 'public/vendor/**', 'remotion/**', 'promo/**', 'dist/**', 'build/**', 'pkg-build/**', 'pkg/**', 'stage/**', 'installer/**', 'tauri/target/**', 'docs/**'] },
   js.configs.recommended,
   {
-    files: ['server.mjs', 'zip.mjs', 'ledger.mjs', 'mcp-bridge.js', 'electron-main.cjs', 'extensions/**/*.js', 'tools/**/*.cjs', 'scripts/**'],
+    files: ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib/**/*.mjs', 'mcp-bridge.js', 'electron-main.cjs', 'extensions/**/*.js', 'tools/**/*.cjs', 'scripts/**'],
     languageOptions: {ecmaVersion: 2024, sourceType: 'module', globals: nodeGlobals},
     rules: {
       'no-empty': ['error', {allowEmptyCatch: true}],

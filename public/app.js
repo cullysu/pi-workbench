@@ -82,7 +82,8 @@ function relTime(ms) {
 function cleanTitle(raw, limit = 60) {
   if (!raw) return '';
   let s = String(raw).replace(/<[^>]{0,80}>/g, ' ').replace(/https?:\/\/\S+/g, ' ')
-    .replace(/[#*`_>~\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+    // eslint-disable-next-line no-useless-escape
+    .replace(/[#*\[`_>~\]]/g, ' ').replace(/\s+/g, ' ').trim();
   for (const seg of s.split(/[。！？.;；\n]/)) {
     const t = seg.trim();
     if (t.length >= 6) { s = t; break; }
@@ -101,8 +102,10 @@ function greeting() {
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function mdRender(text) {
   try {
-    return marked.parse(text, { breaks: true, gfm: true });
-  } catch { return `<p>${esc(text)}</p>`; }
+    const html = marked.parse(text, { breaks: true, gfm: true });
+    // 模型输出不可信：所有 markdown HTML 过白名单消毒（防 prompt-injection→XSS）
+    return window.DOMPurify ? DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }) : html;
+  } catch (e) { console.warn('mdRender failed:', e); return `<p>${esc(text)}</p>`; }
 }
 function applyI18n() {
   $$('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
@@ -1704,7 +1707,6 @@ async function loadUsage() {
     // uPlot requires numeric x (time:false turns strings into NaN — nothing draws)
     const labels = chartDays.map((_, i) => i);
     const series = (key) => chartDays.map(([, v]) => v[key] || 0);
-    const css = getComputedStyle(document.body);
     const axis = cssVar('--text3');
     const grid = cssVar('--line-soft');
     try {
@@ -2387,8 +2389,6 @@ async function loadSecStatus() {
 $('#btn-update-check').onclick = async () => {
   const st = $('#update-status');
   st.textContent = '检查中…';
-  const k = await api.get('/api/kernel').catch(() => null);
-  const cur = 'v' + (k ? (k.pi ? '' : '') : '') ;
   const r = await api.get('/api/update/check').catch(() => ({ error: '网络失败' }));
   if (r.latest) {
     st.innerHTML = '最新版 ' + r.latest + ' — <a href="' + r.url + '" target="_blank" style="color:var(--accent)">前往下载</a>';

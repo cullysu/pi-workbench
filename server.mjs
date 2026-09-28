@@ -7,6 +7,8 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import {ledger} from './ledger.mjs';
+import {pathToFileURL} from 'node:url';
+import {cronPiArgs} from './lib/cron-args.mjs';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -161,13 +163,6 @@ function jobDue(job, now = new Date()) {
   }
   return false;
 }
-function cronPiArgs(job) {
-  // Must be flags only. spawn() already prepends PI_CLI; putting it here makes
-  // argv `node cli.js cli.js -p ...` and pi treats the extra path as the prompt.
-  const args = ['-p', String(job.prompt).slice(0, 8000)];
-  if (job.model) args.push('--model', job.model);
-  return args;
-}
 function runCronJob(job, reason = 'schedule') {
   if (job.running) return;
   job.running = true;
@@ -191,7 +186,7 @@ function runCronJob(job, reason = 'schedule') {
     job.running = false;
     job.lastStatus = 'spawn error';
     job.lastOutput = '[spawn error] ' + e.message;
-    try { fs.appendFileSync(logFile, '\\\\n' + '[spawn error] ' + e.message + '\\\\n'); } catch {}
+    try { fs.appendFileSync(logFile, '\n' + '[spawn error] ' + e.message + '\n'); } catch {}
   });
   let finished = false;
   proc.on('close', (code) => {
@@ -1854,7 +1849,8 @@ const server = http.createServer(async (req, res) => {
         }
         const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' }[ext] || 'application/octet-stream';
         // index.html embeds a per-boot token — a cached stale page would 403 itself dead
-        res.writeHead(200, { 'content-type': mime, 'cache-control': (ext === '.html' || p === '/') ? 'no-store' : 'no-cache' });
+        const csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+        res.writeHead(200, { 'content-type': mime, 'cache-control': (ext === '.html' || p === '/') ? 'no-store' : 'no-cache', 'content-security-policy': csp });
         return res.end(data);
       } catch { res.writeHead(404); return res.end('not found'); }
     }
@@ -1878,7 +1874,8 @@ resolveSecrets();
 const API_TOKEN = crypto.randomBytes(24).toString('hex');
 globalThis.API_TOKEN = API_TOKEN;
 
-server.listen(PORT, '127.0.0.1', () => {
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (isMain) server.listen(PORT, '127.0.0.1', () => {
   console.log(`pi-workbench listening on http://127.0.0.1:${PORT}`);
   // warm the codex list cache in the background so the first UI click is instant
   setTimeout(() => {

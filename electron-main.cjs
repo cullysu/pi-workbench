@@ -42,7 +42,7 @@ function ensureRuntime() {
   try { fs.rmSync(appRoot, { recursive: true, force: true }); } catch {}
   fs.mkdirSync(appRoot, { recursive: true });
   return new Promise((resolve, reject) => {
-    const p = spawn(path.join(process.env.SystemRoot || 'C:\Windows', 'System32', 'tar.exe'), ['-xf', runtimeZip, '-C', appRoot], { windowsHide: true });
+    const p = spawn(path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe'), ['-xf', runtimeZip, '-C', appRoot], { windowsHide: true });
     p.on('exit', (code) => {
       if (code === 0) { try { fs.writeFileSync(stamp, sig); } catch {} resolve(); }
       else reject(new Error('runtime extract failed: ' + code));

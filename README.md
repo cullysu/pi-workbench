@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows 桌面应用（Tauri 壳，安装包约 10MB），中文界面。
+**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows 桌面应用（Tauri 壳，安装包 33.5MB），中文界面。
 
 不 fork、不改 pi。工作台以子进程运行 `pi --mode rpc`（stdin/stdout JSONL）驱动 pi 本体：会话文件是 pi 原生格式（`~/.pi/agent/sessions`），自定义模型在 `~/.pi/agent/models.json`，与 pi CLI 完全互通。
 
@@ -26,7 +26,7 @@
 
 ## 安装
 
-从 [GitHub Releases](../../releases) 下载最新版安装包（如 `PiWorkbench-1.0.0-x64-setup.exe`，约 10MB）：
+从 [GitHub Releases](../../releases) 下载最新版安装包（如 `PiWorkbench-1.0.0-x64-setup.exe`，33.5MB）：
 
 - 跟随系统语言（中文 / English），可选安装路径，桌面 + 开始菜单快捷方式
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`

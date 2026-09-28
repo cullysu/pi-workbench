@@ -278,6 +278,31 @@ test('cron is a real endpoint now, mcp stays gone', async () => {
   assert.equal((await req('/api/mcp')).status, 404);
 });
 
+test('cronPiArgs builds flags-only argv (real call, not source regex)', async () => {
+  const {cronPiArgs} = await import('../lib/cron-args.mjs');
+  const args = cronPiArgs({prompt: 'x', model: 'p/m'});
+  assert.deepEqual(args, ['-p', 'x', '--model', 'p/m']);
+  assert.ok(!args.some((a) => a.endsWith('.js')), 'argv must be flags-only (no embedded paths)');
+  assert.ok(args.filter((a) => a === '-p').length === 1);
+});
+
+test('session export returns the transcript, not an empty file', async () => {
+  const dir = path.join(tmpHome, '.pi', 'agent', 'sessions', 'export-proj');
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, 'roll-test.jsonl');
+  const rows = [
+    { type: 'message', message: { role: 'user', content: '第一行提问\n' } },
+    { type: 'message', message: { role: 'assistant', content: '回答正文\n' } },
+  ];
+  fs.writeFileSync(f, rows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+  const res = await get('/api/session/export?path=' + encodeURIComponent(f));
+  assert.equal(res.status, 200);
+  const text = await res.text();   // 本文件的 get() 返回原始 Response，只有 req() 会解析
+  assert.match(text, /## User/, '导出里没有用户段：NL 曾被写成字面反斜杠+n，每行 JSON 都从转义处被切碎');
+  assert.match(text, /第一行提问/);
+  assert.match(text, /回答正文/);
+});
+
 test('static assets and 404', async () => {
   for (const p of ['/', '/app.js', '/style.css', '/dropdowns.js']) {
     const r = await get(p);

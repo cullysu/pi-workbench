@@ -1303,14 +1303,30 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, engines);
     }
+    function resolveEngineCmd(name) {
+      // 解析 npm 全局 .cmd shim 指向的真实 JS 入口：node 直启 + 参数数组，无 cmd.exe 注入面
+      try {
+        const {execSync} = require('node:child_process');
+        const nl = String.fromCharCode(13, 10);
+        const where = execSync(`where ${name}`, {encoding: 'utf8', timeout: 5000}).split(nl).find((l) => l.trim().toLowerCase().endsWith('.cmd'));
+        if (!where) return null;
+        const cmdBody = fs.readFileSync(where.trim(), 'utf8');
+        const m = cmdBody.match(/"%~dp0(\\[^"]*\.js)"\s*%\*/);
+        if (!m) return null;
+        return path.join(path.dirname(where.trim()), m[1]);
+      } catch { return null; }
+    }
     if (p === '/api/engines/run' && req.method === 'POST') {
       const {engine, prompt, cwd} = await readBody(req);
-      if (!['codex', 'zcode', 'claude'].includes(engine) || !prompt) return json(res, 400, {error: 'bad engine/prompt'});
+      if (!['codex', 'zcode', 'claude'].includes(engine) || !prompt || typeof prompt !== 'string' || prompt.length > 8000) return json(res, 400, {error: 'bad engine/prompt'});
+      const jsPath = resolveEngineCmd(engine);
+      if (!jsPath) return json(res, 503, {error: engine + ' CLI not installed'});
       const args = engine === 'codex' ? ['exec', prompt, '--json', '--skip-git-repo-check', '-C', cwd || '.']
                  : engine === 'zcode' ? ['-p', prompt, '--output-format', 'json']
                  : ['-p', prompt, '--output-format', 'json'];
       const {spawn} = await import('node:child_process');
-      const child = spawn(engine, args, {cwd: cwd || '.', shell: process.platform === 'win32', windowsHide: true});
+      // node.exe + 参数数组 + shell:false = CreateProcess 直启，无命令注入面
+      const child = spawn(process.execPath, [jsPath, ...args], {cwd: cwd || '.', shell: false, windowsHide: true});
       let out = '', err = '';
       const kill = setTimeout(() => { try { child.kill(); } catch {} }, 600000);
       child.stdout.on('data', (c) => { out += c; if (out.length > 2e6) out = out.slice(-1e6); });
@@ -1318,6 +1334,7 @@ const server = http.createServer(async (req, res) => {
       child.on('error', (e) => { clearTimeout(kill); return json(res, 500, {error: String(e)}); });
       child.on('close', (code) => {
         clearTimeout(kill);
+        if (res.headersSent) return;
         let usage = null, last = '';
         for (const line of out.split('\n')) {
           let j = null; try { j = JSON.parse(line); } catch { continue; }

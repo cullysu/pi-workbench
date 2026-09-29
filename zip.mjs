@@ -25,6 +25,7 @@ const dosDateTime = (d = new Date()) => ({
 
 /** entries: [{ name: string, data: Buffer }] → zip Buffer */
 export function createZip(entries) {
+  if (entries.length > 0xffff) throw new Error('too many entries for a non-zip64 archive (max 65535)'); // the 16-bit count field would silently wrap
   const { time, date } = dosDateTime();
   const locals = [];
   const centrals = [];
@@ -97,6 +98,7 @@ export function readZip(buf) {
     if (buf.readUInt32LE(ptr) !== 0x02014b50) throw new Error('bad central directory');
     const method = buf.readUInt16LE(ptr + 10);
     const csize = buf.readUInt32LE(ptr + 20);
+    const crc = buf.readUInt32LE(ptr + 16);
     const nameLen = buf.readUInt16LE(ptr + 28);
     const extraLen = buf.readUInt16LE(ptr + 30);
     const commentLen = buf.readUInt16LE(ptr + 32);
@@ -108,6 +110,7 @@ export function readZip(buf) {
     const dataStart = l + 30 + lNameLen + lExtraLen;
     const payload = buf.subarray(dataStart, dataStart + csize);
     const data = method === 0 ? Buffer.from(payload) : zlib.inflateRawSync(payload);
+    if (crc32(data) !== crc) throw new Error('crc mismatch for ' + name); // a torn backup must fail loudly, not import half-configs
     out.push({ name, data });
     ptr += 46 + nameLen + extraLen + commentLen;
   }

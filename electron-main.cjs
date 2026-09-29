@@ -11,9 +11,11 @@ let serverChild = null;
 let mainWindow = null;
 let quitting = false;
 let serverRestarts = 0;
+let serverStartedAt = 0;
 
 const LOG_FILE = path.join(app.getPath('userData'), 'server.log');
 function appendLog(line) {
+  try { if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, ''); } catch { /* rotation is best-effort */ }
   try { fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`); } catch { /* the GUI must never crash over its own log */ }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -25,7 +27,10 @@ const NODE_CANDIDATES = [
   'C:\\Program Files\\nodejs\\node.exe',
   'C:\\Program Files (x86)\\nodejs\\node.exe',
 ];
-const nodeExe = NODE_CANDIDATES.find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+const nodeExe = NODE_CANDIDATES.find((p) => { try { return fs.existsSync(p); } catch { return false; } })
+  || (() => { // nvm/scoop/volta/per-user installs: resolve node from PATH as a last resort
+    try { return require('child_process').execSync('where node.exe', { encoding: 'utf8', timeout: 5000 }).split(/\r?\n/)[0].trim(); } catch { return null; }
+  })();
 const serverJs = path.join(appRoot, 'server.mjs');
 
 // First boot / upgrade: extract the bundled runtime zip (Windows tar.exe, fast).
@@ -39,7 +44,14 @@ function ensureRuntime() {
   try { const st = fs.statSync(runtimeZip); sig += `|${st.size}|${Math.floor(st.mtimeMs)}`; } catch { /* missing zip: keep the version-only signature */ }
   const valid = fs.existsSync(path.join(appRoot, 'server.mjs')) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8').trim() === sig;
   if (valid) return Promise.resolve();
-  try { fs.rmSync(appRoot, { recursive: true, force: true }); } catch { /* already gone is fine */ }
+  try {
+    fs.rmSync(appRoot, { recursive: true, force: true });
+  } catch (err) {
+    // force only forgives ENOENT — EBUSY/EPERM (AV scan, an Explorer window, a
+    // lingering node whose parent-watchdog hasn't fired yet) must abort here, or
+    // tar extracts over a half-removed tree and the stamp certifies the mix as fresh
+    throw new Error('旧运行时清理失败（可能有文件被占用）: ' + err.message);
+  }
   fs.mkdirSync(appRoot, { recursive: true });
   return new Promise((resolve, reject) => {
     const p = spawn(path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe'), ['-xf', runtimeZip, '-C', appRoot], { windowsHide: true });
@@ -56,6 +68,23 @@ function portOpen(port) {
     const s = net.connect(port, '127.0.0.1');
     s.once('connect', () => { s.destroy(); resolve(true); });
     s.once('error', () => { s.destroy(); resolve(false); });
+  });
+}
+
+// the port alone is not identity — a foreign process on 32123 must not get its UI
+// loaded into the shell; the workbench answers an unauthenticated /api/kernel with
+// a plain-text "403 ... forbidden", which is a cheap handshake to verify
+function isWorkbenchPort(port) {
+  return new Promise((resolve) => {
+    const s = net.connect(port, '127.0.0.1');
+    let buf = '';
+    const done = (v) => { try { s.destroy(); } catch { /* already gone */ } resolve(v); };
+    s.setTimeout(1500);
+    s.once('connect', () => s.write('GET /api/kernel HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n'));
+    s.on('data', (c) => { buf += String(c); if (buf.length > 4096) done(buf.includes('403') && buf.includes('forbidden')); });
+    s.once('end', () => done(buf.includes('403') && buf.includes('forbidden')));
+    s.once('timeout', () => done(false));
+    s.once('error', () => done(false));
   });
 }
 
@@ -76,7 +105,10 @@ function waitPort(port, timeoutMs) {
 }
 
 async function startServer() {
-  if (await portOpen(PORT)) return;
+  if (await portOpen(PORT)) {
+    if (await isWorkbenchPort(PORT)) return; // our own previous instance
+    throw new Error('端口 ' + PORT + ' 已被其它程序占用');
+  }
   if (!nodeExe || !fs.existsSync(serverJs)) {
     throw new Error('找不到 node 或 server.mjs');
   }
@@ -86,6 +118,7 @@ async function startServer() {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PIWB_PARENT_PID: String(process.pid) },
   });
+  serverStartedAt = Date.now();
   serverChild.stdout.on('data', () => {});
   serverChild.stderr.on('data', (c) => appendLog('server stderr: ' + String(c).trim()));
   serverChild.on('exit', async (code) => {
@@ -95,7 +128,12 @@ async function startServer() {
     // the port may still be served by another process, or the death may be transient —
     // give it a grace period, then auto-restart twice before bothering the user
     await sleep(1500);
-    if (quitting || (await portOpen(PORT))) return;
+    if (quitting) return;
+    if (await portOpen(PORT)) {
+      if (await isWorkbenchPort(PORT)) return; // a healthy instance is serving again
+      appendLog('the port is held by a foreign process after the crash');
+    }
+    if (Date.now() - serverStartedAt > 5 * 60000) serverRestarts = 0; // a long stable run resets the restart budget
     if (serverRestarts < 2) {
       serverRestarts++;
       appendLog(`auto-restarting server (attempt ${serverRestarts})`);
@@ -108,6 +146,7 @@ async function startServer() {
 
 function killServer() {
   if (!serverChild) return;
+  if (serverChild.exitCode !== null || serverChild.signalCode) { serverChild = null; return; } // already dead — never force-kill a possibly recycled pid
   const pid = serverChild.pid;
   try { exec(`taskkill /pid ${pid} /T /F`); } catch { /* pid may already be gone */ }
   try { serverChild.kill(); } catch { /* teardown is best-effort */ }
@@ -160,7 +199,12 @@ function createWindow() {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  mainWindow.loadURL(`http://127.0.0.1:${PORT}`);
+  mainWindow.loadURL(`http://127.0.0.1:${PORT}`).catch(() => {
+    // the server can die between waitPort and this load — an unhandled rejection
+    // here would bypass every friendly dialog above
+    dialog.showErrorBox('Pi Workbench', '界面加载失败。请重新启动应用。');
+    app.quit();
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 

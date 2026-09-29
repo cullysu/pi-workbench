@@ -8,10 +8,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import { fileURLToPath } from 'node:url';
 
 const PORT = 39944;
 const BASE = `http://127.0.0.1:${PORT}`;
-const ROOT = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
 let child = null;
 let tmpHome = '';
@@ -78,8 +79,11 @@ test.before(async () => {
   TOKEN = m[1];
 });
 
-test.after(() => {
-  if (child) { try { child.kill(); } catch { /* already exited */ } }
+test.after(async () => {
+  if (child) {
+    try { child.kill(); } catch { /* already exited */ }
+    await new Promise((r) => { const t = setTimeout(r, 2000); child.once('exit', () => { clearTimeout(t); r(); }); });
+  }
   for (const dir of [tmpHome, tmpProj]) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows may still hold a handle */ }
   }
@@ -233,8 +237,7 @@ test('backup: export zip then import restores', async () => {
   assert.equal(r.status, 400);
 });
 
-test('term: exec works on windows, guards on empty', async () => {
-  if (process.platform !== 'win32') return; // uses ComSpec
+test('term: exec works on windows, guards on empty', { skip: process.platform !== 'win32' ? 'windows only (uses ComSpec)' : false }, async () => {
   let r = await req('/api/term/exec', { cwd: '', cmd: 'echo test-ok' });
   assert.equal(r.status, 200);
   assert.match(r.data.out, /test-ok/);
@@ -262,6 +265,10 @@ test('mcp config: roundtrip and validation', async () => {
 });
 
 test('mcp bridge install: copies extension into scratch extensions dir', { timeout: 120000 }, async () => {
+  // pre-seed the dep the endpoint checks for — otherwise it fires a background
+  // `npm install` that outlives the suite and races the tmpdir cleanup
+  const seed = path.join(tmpHome, '.pi', 'agent', 'extensions', 'mcp-bridge', 'node_modules', 'typebox');
+  fs.mkdirSync(seed, { recursive: true });
   const r = await req('/api/mcp/install', {});
   assert.equal(r.status, 200);
   assert.equal(r.data.ok, true);

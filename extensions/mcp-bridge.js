@@ -42,6 +42,7 @@ class McpClient {
   }
 
   _send(msg) {
+    if (!this.proc) throw new Error(`mcp client ${this.name} is closed`); // a racing send after a failed start must not TypeError on null
     this.proc.stdin.write(JSON.stringify(msg) + "\n");
   }
 
@@ -76,7 +77,8 @@ class McpClient {
       return;
     }
     if (msg.method === "notifications/message" && msg.params?.data) {
-      this.log(`[${this.name}] ${String(msg.params.data).slice(0, 200)}`);
+      const d = msg.params.data;
+      this.log(`[${this.name}] ${(typeof d === "string" ? d : JSON.stringify(d)).slice(0, 200)}`);
     }
     // other server notifications are ignored
   }
@@ -120,18 +122,32 @@ class McpClient {
         this.log(`[${this.name}] exited (code ${code})`);
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error(`mcp server exited (code ${code})`)); }
         this.pending.clear();
+        if (this.buffer.trim()) this._handleLine(this.buffer.trim()); // a last line without trailing newline still carries a response
+        this.buffer = "";
         this.proc = null;
         this.ready = null;
         this.tools = null;
       });
 
-      const init = await this._request("initialize", {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "pi-mcp-bridge", version: "0.1.0" },
-      }, START_TIMEOUT_MS);
-      this._send({ jsonrpc: "2.0", method: "notifications/initialized" });
-      return init;
+      try {
+        const init = await this._request("initialize", {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "pi-mcp-bridge", version: "0.1.0" },
+        }, START_TIMEOUT_MS);
+        this._send({ jsonrpc: "2.0", method: "notifications/initialized" });
+        return init;
+      } catch (e) {
+        // a failed start must not poison this.ready forever: kill the half-started
+        // process and reset, so the next tool call gets a real retry instead of the
+        // cached rejection (a cold `npx` download routinely exceeds the init timeout)
+        this.log(`[${this.name}] initialize failed: ${e.message} — resetting for retry`);
+        try { this.proc?.kill(); } catch { /* already gone */ }
+        this.proc = null;
+        this.ready = null;
+        this.tools = null;
+        throw e;
+      }
     })();
     return this.ready;
   }

@@ -22,7 +22,7 @@ export default [
   { ignores: ['node_modules/**', 'public/vendor/**', 'remotion/**', 'promo/**', 'dist/**', 'build/**', 'pkg-build/**', 'pkg/**', 'stage/**', 'installer/**', 'tauri/target/**', 'docs/**'] },
   js.configs.recommended,
   {
-    files: ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib/**/*.mjs', 'mcp-bridge.js', 'electron-main.cjs', 'extensions/**/*.js', 'tools/**/*.cjs', 'scripts/**'],
+    files: ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib/**/*.mjs', 'electron-main.cjs', 'extensions/**/*.js', 'tools/**/*.cjs', 'scripts/**'],
     languageOptions: {ecmaVersion: 2024, sourceType: 'module', globals: nodeGlobals},
     rules: {
       'no-empty': 'error',

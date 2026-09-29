@@ -38,8 +38,10 @@ const httpGet = (url, headers = {}) => new Promise((resolve, reject) => {
 });
 
 // ---------- fixture: scratch home with a project, a session, a cron job ----------
-const home = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-uiprobe-'));
-const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-uiproj-'));
+const USERTMP = path.join(process.env.LOCALAPPDATA, 'Temp');
+fs.mkdirSync(USERTMP, { recursive: true });
+const home = fs.mkdtempSync(path.join(USERTMP, 'piwb-uiprobe-'));
+const proj = fs.mkdtempSync(path.join(USERTMP, 'piwb-uiproj-'));
 fs.writeFileSync(path.join(proj, 'calc.py'), 'print(1/0)\n');
 const cfgDir = path.join(home, '.pi-workbench');
 fs.mkdirSync(cfgDir, { recursive: true });
@@ -72,7 +74,7 @@ const server = spawn(process.execPath, [path.resolve('server.mjs')], {
 });
 
 // ---------- start chromium ----------
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-uichrome-'));
+const profile = fs.mkdtempSync(path.join(USERTMP, 'piwb-uichrome-'));
 const chrome = spawn(CHROME, [
   '--headless=new', '--remote-debugging-port=' + CDP_PORT,
   '--user-data-dir=' + profile, '--no-first-run', '--disable-gpu',

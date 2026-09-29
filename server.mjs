@@ -302,7 +302,7 @@ wss.on('connection', (ws) => {
     console.log('[ws] frame:', msg.type, msg.tabId || '');
     if (msg.type === 'open') {
       const { tabId, cwd, sessionPath, model, thinking, name } = msg;
-      closeTab(tabId);
+      closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
       const prov = model ? splitModel(model)[0] : null;
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
@@ -313,16 +313,19 @@ wss.on('connection', (ws) => {
     } else if (msg.type === 'rpc') {
       sendToPi(msg.tabId, msg.data);
     } else if (msg.type === 'close') {
-      closeTab(msg.tabId); // the child's real exit event reports pi-exit — no synthetic duplicate
+      closeTab(msg.tabId); // closeTab announces the exit itself — see the guard in closeTab
     }
   });
 });
-function closeTab(tabId) {
+function closeTab(tabId, silent = false) {
   const tab = tabs.get(tabId);
   if (tab) {
     try { tab.proc.stdin.write(JSON.stringify({ type: 'abort' }) + '\n'); } catch { /* child may already be gone */ }
     try { tab.proc.kill(); } catch { /* abort is best-effort */ }
     tabs.delete(tabId);
+    // whoever sees the tab disappear first owns the announcement: closeTab here,
+    // or the exit handler on a crash. Exactly one pi-exit broadcast, never two, never zero.
+    if (!silent) broadcast({ type: 'pi-exit', tabId, code: 0 });
   }
 }
 
@@ -807,8 +810,9 @@ async function hImport(req, res, u, m) {
     const imp = IMPORT_SOURCES[m[1]];
     if (m[2]) {
       const f = u.searchParams.get('path');
-      if (!f || (imp.root && !contains(imp.root, f))) return json(res, 400, { error: 'bad path' });
-      if (!imp.root && !(f || '').startsWith('opencode://')) return json(res, 400, { error: 'bad path' });
+      const roots = [imp.root, ...(imp.roots ? imp.roots() : [])].filter(Boolean);
+      if (!f || (roots.length && !roots.some((r) => contains(r, f)))) return json(res, 400, { error: 'bad path' });
+      if (!roots.length && !(f || '').startsWith('opencode://')) return json(res, 400, { error: 'bad path' });
       return json(res, 200, { entries: imp.read(f) });
     }
     return json(res, 200, { sessions: await imp.list() });

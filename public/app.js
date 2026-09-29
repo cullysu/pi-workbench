@@ -90,7 +90,7 @@ function cleanTitle(raw, limit = 60) {
   s = s.trim() || '无标题会话';
   return s.length > limit ? s.slice(0, limit) + '…' : s;
 }
-const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function mdRender(text) {
   try {
     const html = marked.parse(text, { breaks: true, gfm: true });
@@ -99,8 +99,8 @@ function mdRender(text) {
   } catch (e) { console.warn('mdRender failed:', e); return `<p>${esc(text)}</p>`; }
 }
 function applyI18n() {
-  $$('[data-i18n]').forEach((el) => { el.textContent = t(el.dataset.i18n); });
-  $$('[data-i18n-ph]').forEach((el) => { el.placeholder = t(el.dataset.i18nPh); });
+  // t() serves the Chinese strings inline; a real i18n pass would hang strings off
+  // data-i18n attributes — none exist yet, so this only keeps the theme in sync
   document.body.classList.toggle('dark', state.cfg.theme === 'dark');
 }
 
@@ -1051,7 +1051,6 @@ function filterSessionList() {
   });
 }
 // ---------- projects (tree: conversations live under their project) ----------
-async function loadSessions() { return renderProjectTree(); }
 function selectProject(p) {
   state.project = p || null;
   $('#proj-title').textContent = p?.path || '—';
@@ -1887,7 +1886,6 @@ async function loadEnv() {
 // ---------- settings ----------
 function applyThemeBtns() {
   $$('[data-theme-set]').forEach((b) => b.classList.toggle('active', b.dataset.themeSet === state.cfg.theme));
-  $$('[data-lang-set]').forEach((b) => b.classList.toggle('active', b.dataset.langSet === state.cfg.lang));
 }
 $$('[data-theme-auto]').forEach((b) => b.onclick = async () => {
   state.cfg.themeAuto = b.dataset.themeAuto === 'on';
@@ -1898,20 +1896,6 @@ $$('[data-theme-set]').forEach((b) => b.onclick = async () => {
   state.cfg.theme = b.dataset.themeSet;
   applyI18n(); applyThemeBtns();
   await api.post('/api/config', { theme: state.cfg.theme });
-});
-$$('[data-lang-set]').forEach((b) => b.onclick = async () => {
-  state.cfg.lang = b.dataset.langSet;
-  applyI18n(); applyThemeBtns();
-  $('#think-chip').textContent = `${t('think')} · ${({ off: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '特高', max: '最大' })[state.thinkLevel || 'medium']}`;
-  await api.post('/api/config', { lang: state.cfg.lang });
-  // re-render language-sensitive dynamic panels
-  const active = document.querySelector('.rail-item.active')?.dataset.panel;
-  if (active === 'usage') loadUsage();
-  if (active === 'health') loadHealth();
-  if (active === 'routing') loadRoutingUI();
-  if (active === 'sessions') loadSessions();
-  if (active === 'import') loadImportList();
-  if (state.streaming === false && !document.querySelector('#timeline .msg')) clearTimeline(true);
 });
 
 // ---------- views & rails (Hermes-style shell) ----------

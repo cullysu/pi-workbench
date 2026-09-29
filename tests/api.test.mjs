@@ -352,4 +352,28 @@ test('malformed POST cannot wipe models.json', async () => {
 test('cron routes reject junk job ids before path.join', async () => {
   const r = await req('/api/cron/lastlog', { id: '..' + path.sep + '..' + path.sep + 'evil' });
   assert.equal(r.status, 400, 'traversal id rejected');
+});
+test('aider import parses a real-shaped chat history (fixture)', async () => {
+  fs.writeFileSync(path.join(tmpHome, '.aider.chat.history.md'), [
+    '# aider chat history',
+    '',
+    '#### User',
+    '帮我修这个报错',
+    'Traceback (most recent call last): ...',
+    '',
+    '#### Assistant',
+    '把除数检查加上就好了',
+    '',
+  ].join('\n') + '\n', 'utf8');
+  const list = await req('/api/import/aider');
+  assert.equal(list.status, 200);
+  const hit = (list.data.sessions || []).find((x) => x.file && x.file.includes('.aider.chat.history.md'));
+  assert.ok(hit, 'history file discovered in scratch HOME');
+  const r = await req('/api/import/aider/read?path=' + encodeURIComponent(hit.file));
+  assert.equal(r.status, 200);
+  const msgs = (r.data.entries || []).filter((x) => x.kind === 'message');
+  assert.equal(msgs.length, 2, 'user + assistant, no folding');
+  assert.equal(msgs[0].role, 'user');
+  assert.match(msgs[0].text, /帮我修这个报错/);
+  assert.equal(msgs[1].role, 'assistant');
 });

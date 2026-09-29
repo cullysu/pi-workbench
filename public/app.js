@@ -527,8 +527,8 @@ function openPiSession({ sessionPath = null, isNew = false }) {
   return doOpen();
 }
 // replay get_entries response
-const origHandle = handlePiEvent;
-handlePiEvent = function (ev) {
+const piEventHandlers = [handlePiEvent];
+piEventHandlers.push(function (ev) {
   if (ev.type === 'response' && ev.command === 'get_entries' && ev.success && ev.data?.entries) {
     renderReplay(ev.data.entries);
     if (state.pendingAfterReplay) { const f = state.pendingAfterReplay; state.pendingAfterReplay = null; setTimeout(f, 60); }
@@ -557,8 +557,7 @@ handlePiEvent = function (ev) {
     }
     return;
   }
-  origHandle(ev);
-};
+});
 function renderReplay(entries) {
   // entries: [{type:'message', id, message:{role, content|text, ...}}...]
   clearTimeline(false);
@@ -628,8 +627,7 @@ async function refreshStats() {
   rpcTo({ id: 'stats-' + Date.now(), type: 'get_session_stats' });
 }
 // intercept stats response — "本轮对话统计"
-const origHandle2 = handlePiEvent;
-handlePiEvent = function (ev) {
+piEventHandlers.push(function (ev) {
   if (ev.type === 'response' && ev.command === 'get_session_stats' && ev.success && ev.data) {
     const s = ev.data;
     state.lastStats = s;
@@ -647,8 +645,7 @@ handlePiEvent = function (ev) {
     state.sessionFile = ev.data.sessionFile;
     return;
   }
-  origHandle2(ev);
-};
+});
 // stats-chip click → session stats detail
 $('#stats-chip').onclick = () => {
   const s = state.lastStats;
@@ -732,16 +729,14 @@ async function loadTodayStats() {
 })();
 // failover triggers: agent settled with error / abnormal pi exit (borrowed from oh-my-pi)
 // note: pi auto-retries internally — wait for agent_settled, don't switch on the first error frame
-const origHandle3 = handlePiEvent;
-handlePiEvent = function (ev) {
+piEventHandlers.push(function (ev) {
   if (ev.type === 'message_end' && ev.message?.role === 'assistant') {
     state.lastAssistantText = (ev.message.content || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('\n');
     state.lastStop = ev.message.stopReason || null;
   }
   if (ev.type === 'pi-exit' && ev.code !== 0 && state.streaming) maybeFailover('pi exited with code ' + ev.code);
   pushLog(ev);
-  origHandle3(ev);
-};
+});
 function fmtK(n) { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
 
 // ---------- log drawer (Hermes logs) ----------

@@ -1,5 +1,7 @@
 # pi-workbench (English)
 
+[![CI](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml)
+
 A local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows desktop app with two packaged shells (Tauri ~10MB lightweight, Electron full), Chinese UI.
 
 pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout JSONL) as a subprocess: sessions are pi-native (`~/.pi/agent/sessions`), custom models live in `~/.pi/agent/models.json`, and everything is fully interoperable with the pi CLI.
@@ -14,6 +16,15 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 - **MCP support**: ships an MCP bridge extension — standard `mcpServers` config (same format as Claude/Cursor), tools registered as native pi tools, lazy connections
 - **Import**: read-only browsing of Codex / Claude / ZCode / OpenCode / OMP / Gemini / Grok CLI / Aider session history
 - **Extras**: git diff, project file browser, built-in terminal, backup/restore zip, config migration, live event log, goal mode (auto-continue until done)
+
+
+## Architecture at a glance
+
+- **Single-file server**: `server.mjs` (~1000 lines) = 42 named handlers + one declarative route table + a single dispatch loop; auth and 404 live in exactly one place
+- **All logic lives in nine `lib/` modules**: factories with explicit ctx injection, and **every factory verifies its wiring contract at boot** (a missing dependency crashes startup loudly instead of silently dying at 9am); IO collapses to four primitives in `lib/io.mjs`
+- **Secure defaults**: per-boot random token + CSP nonce (no `unsafe-inline` scripts), DOMPurify fail-closed sanitization, `path.relative` containment, allowlist config merges, CRC-checked backup zips
+- **Four verification layers** (all committed and re-runnable): repo-wide `eslint` 0/0, 23 API tests + a 47-route acceptance sweep (`scripts/route-sweep.py`), integration probes (`scripts/ws-probe.mjs`: a real pi child through the full WS chain), and a browser-level probe (`scripts/ui-probe.mjs`: headless Chromium asserts replay bubbles, all 17 panels, zero console errors)
+- **Dual-shell builds**: CI produces both Electron (`dist_electron/`) and Tauri (`tauri/target/`) NSIS installers on Windows
 
 ## Install
 

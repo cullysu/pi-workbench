@@ -190,6 +190,17 @@ try {
   await new Promise((r) => setTimeout(r, 900));
   const shot2 = await cdp('Page.captureScreenshot', { format: 'png' }, sid);
   fs.writeFileSync(path.join(shots, 'panel-cron.png'), Buffer.from(shot2.data, 'base64'));
+  await evaluate(`document.querySelector('.rail-item[data-panel="models"]')?.click()`, sid);
+  await new Promise((r) => setTimeout(r, 1200));
+  const shot3 = await cdp('Page.captureScreenshot', { format: 'png' }, sid);
+  fs.writeFileSync(path.join(shots, 'panel-models.png'), Buffer.from(shot3.data, 'base64'));
+  // advanced view: usage dashboard
+  await evaluate(`document.querySelector('.tn-view[data-view="advanced"]').click()`, sid);
+  await new Promise((r) => setTimeout(r, 500));
+  await evaluate(`document.querySelector('.rail-item[data-panel="usage"]')?.click()`, sid);
+  await new Promise((r) => setTimeout(r, 1500));
+  const shot4 = await cdp('Page.captureScreenshot', { format: 'png' }, sid);
+  fs.writeFileSync(path.join(shots, 'panel-usage.png'), Buffer.from(shot4.data, 'base64'));
   check('截图落盘', fs.existsSync(path.join(shots, 'workbench-replay.png')), shots);
 
   console.log(process.exitCode ? 'UI PROBE: FAILURES ABOVE' : 'UI PROBE ALL PASS');

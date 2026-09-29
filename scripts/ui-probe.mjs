@@ -4,7 +4,6 @@
 // Screenshots land in ui-shots/ next to this script for human review.
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import http from 'node:http';

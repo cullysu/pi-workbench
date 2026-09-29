@@ -31,6 +31,10 @@ const CODEX_SESSIONS = path.join(HOME, '.codex', 'sessions');
 const CLAUDE_PROJECTS = path.join(HOME, '.claude', 'projects');
 const PI_CLI = path.join(__dirname, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js');
 const PORT = Number(process.env.PIWB_PORT || 32123);
+// HTTP token auth: any local process could hit the port — random per boot, embedded
+// in the served HTML and required as x-api-token on /api/* routes
+const API_TOKEN = crypto.randomBytes(24).toString('hex');
+const HTML_NONCE = crypto.randomBytes(16).toString('base64'); // CSP script nonce for the injected token bootstrap
 // Electron mode: self-terminate when the desktop app dies, so the port never leaks
 if (process.env.PIWB_PARENT_PID) {
   const parent = Number(process.env.PIWB_PARENT_PID);
@@ -127,7 +131,7 @@ const readJson = (p) => {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 };
 
-// ---------- routing v2 (design borrowed from oh-my-pi: fallback chains + per-key rotation) ----------
+// ---------- routing: fallback chains + per-key cooldowns/rotation ----------
 const ROUTING_FILE = path.join(CFG_DIR, 'routing.json');
 function loadRouting() {
   const d = readJson(ROUTING_FILE);
@@ -143,7 +147,6 @@ function loadRouting() {
   r.providers = r.providers || {};
   r.chains = Array.isArray(r.chains) ? r.chains : [];
   r.state = r.state || {}; r.state.cooldowns = r.state.cooldowns || {};
-  if (!r.chains.length) r.chains = [];
   return r;
 }
 const saveJson = (file, obj) => {
@@ -160,7 +163,7 @@ function saveRouting(r) {
   fs.writeFileSync(ROUTING_FILE, JSON.stringify(r, null, 2));
   return r;
 }
-const failover = createFailover({ SECRET_ENV, readJson, saveJson, logErr, loadRouting, saveRouting });
+const failover = createFailover({ SECRET_ENV, readJson, loadRouting, saveRouting, PI_MODELS });
 const { splitModel, keyEnvsFor, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
 
 async function probeModel(modelId) {
@@ -251,8 +254,9 @@ function spawnPi({ cwd, sessionPath, model, thinking, name, envExtra }) {
 function attachPiReader(tabId, proc) {
   const tab = tabs.get(tabId);
   let buffer = '';
+  proc.stdout.setEncoding('utf8'); // chunkwise toString would corrupt multibyte chars split across packets
   proc.stdout.on('data', (chunk) => {
-    buffer += chunk.toString('utf8');
+    buffer += chunk;
     let i;
     while ((i = buffer.indexOf('\n')) !== -1) {
       let line = buffer.slice(0, i);
@@ -267,8 +271,15 @@ function attachPiReader(tabId, proc) {
       broadcast({ type: 'pi-event', tabId, data: ev });
     }
   });
-  proc.stderr.on('data', (c) => broadcast({ type: 'pi-stderr', tabId, data: c.toString('utf8').slice(0, 2000) }));
-  proc.on('exit', (code) => { broadcast({ type: 'pi-exit', tabId, code }); tabs.delete(tabId); });
+  proc.stderr.setEncoding('utf8');
+  proc.stderr.on('data', (c) => broadcast({ type: 'pi-stderr', tabId, data: String(c).slice(0, 2000) }));
+  const isCurrent = () => { const cur = tabs.get(tabId); return cur && cur.proc === proc; };
+  proc.on('error', () => { if (isCurrent()) { tabs.delete(tabId); broadcast({ type: 'pi-exit', tabId, code: -1 }); } });
+  proc.on('exit', (code) => {
+    if (!isCurrent()) return; // a newer spawn took over this tabId — its exit must not delete the fresh entry
+    tabs.delete(tabId);
+    broadcast({ type: 'pi-exit', tabId, code });
+  });
 }
 function sendToPi(tabId, cmd) {
   const tab = tabs.get(tabId);
@@ -295,14 +306,13 @@ wss.on('connection', (ws) => {
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
       const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
-      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), buffer: '', routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null });
+      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null });
       attachPiReader(tabId, proc);
       ws.send(JSON.stringify({ type: 'opened', tabId }));
     } else if (msg.type === 'rpc') {
       sendToPi(msg.tabId, msg.data);
     } else if (msg.type === 'close') {
-      closeTab(msg.tabId);
-      broadcast({ type: 'pi-exit', tabId: msg.tabId, code: 0 });
+      closeTab(msg.tabId); // the child's real exit event reports pi-exit — no synthetic duplicate
     }
   });
 });
@@ -316,6 +326,13 @@ function closeTab(tabId) {
 }
 
 // ---------- http ----------
+// job ids are server-generated `job-<hex>`; anything else must never reach path.join
+const isJobId = (s2) => typeof s2 === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(s2);
+// path containment that sibling names can't fool: relative() is '' for the root itself
+const contains = (root, target) => {
+  const rel = path.relative(path.resolve(root), path.resolve(String(target || '')));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+};
 function json(res, code, obj) {
   const s = JSON.stringify(obj);
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
@@ -324,15 +341,19 @@ function json(res, code, obj) {
 function readBody(req) {
   return new Promise((resolve) => {
     let b = '';
-    req.on('data', (c) => { b += c; if (b.length > 5e6) req.destroy(); });
+    req.setEncoding('utf8'); // chunkwise coercion would corrupt multibyte bodies split across packets
+    req.on('data', (c) => { b += c; if (b.length > 5e6) { resolve({}); req.destroy(); } });
     req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } });
+    req.on('error', () => resolve({}));
   });
 }
 const runGit = (cwd, args, max = 200000) => new Promise((resolve) => {
   const p = spawn('git', args, { cwd, windowsHide: true });
   let out = '', err = '';
+  p.stdout.setEncoding('utf8');
+  p.stderr.setEncoding('utf8');
   p.stdout.on('data', (c) => { if (out.length < max) out += c; });
-  p.stderr.on('data', (c) => { err += c; });
+  p.stderr.on('data', (c) => { if (err.length < 2000) err += c; });
   p.on('error', (e) => resolve({ error: e.message }));
   p.on('close', (code) => resolve({ code, out: out.slice(0, max), err: err.slice(0, 2000) }));
 });
@@ -346,11 +367,11 @@ const OMP_SESSIONS = path.join(HOME, '.omp', 'agent', 'sessions');
 const GROK_DIR = path.join(HOME, '.grok');
 const PI_SKILLS = path.join(HOME, '.pi', 'agent', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
-const kb = createKbSkills({ MODEL_KB, MODEL_META_FILE, CFG_DIR, PI_MODELS, PI_SKILLS, AGENTS_SKILLS, readJson, loadConfig, fs, path });
+const kb = createKbSkills({ MODEL_KB, MODEL_META_FILE, CFG_DIR, PI_SKILLS, AGENTS_SKILLS, readJson, loadConfig, fs, path });
 const { kbLookup, kbPrice, loadModelMeta, saveModelMeta, listSkills, skillArgsFor } = kb;
 const sources = createSources({ PI_SESSIONS, CODEX_SESSIONS, CLAUDE_PROJECTS, OMP_SESSIONS, GROK_DIR, HOME, DatabaseSync, kbPrice, loadConfig });
 const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, listJsonFiles } = sources;
-const bt = createBackupTerminal({ CFG_DIR, HOME, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, listSkills, copyIfExists, createZip, readZip, spawn, fs, path });
+const bt = createBackupTerminal({ CFG_DIR, HOME, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, VERSION: readJson(path.join(__dirname, 'package.json'))?.version || '0.0.0', listSkills, copyIfExists, createZip, readZip, spawn, fs, path });
 const { exportBackupZip, importBackupZip, migrateScan, openExternalTerm, execInCwd } = bt;
 
 function copyIfExists(src, dest) {
@@ -365,74 +386,21 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const p = u.pathname;
   try {
-    if (p.startsWith('/api/') && p !== '/api/token') {
+    if (p.startsWith('/api/')) {
       const token = req.headers['x-api-token'];
       if (token !== API_TOKEN) { res.writeHead(403); return res.end('forbidden'); }
     }
     if (p === '/api/ledger') {
-      const q = new URL(req.url, 'http://x').searchParams;
-      const days = Math.min(365, Math.max(1, Number(q.get('days') || 30)));
+      const q = u.searchParams;
+      const days = Math.min(365, Math.max(1, Number(q.get('days')) || 30));
       return json(res, 200, ledger({days}));
-    }
-    if (p === '/api/engines' && req.method === 'GET') {
-      const {execSync} = await import('node:child_process');
-      const engines = {};
-      for (const e of ['codex', 'zcode', 'claude']) {
-        try { engines[e] = {ok: true, ver: execSync(`${e} --version 2>nul`, {encoding: 'utf8', timeout: 8000}).trim().slice(0, 60)}; }
-        catch { engines[e] = {ok: false}; }
-      }
-      return json(res, 200, engines);
-    }
-    function resolveEngineCmd(name) {
-      // 解析 npm 全局 .cmd shim 指向的真实 JS 入口：node 直启 + 参数数组，无 cmd.exe 注入面
-      try {
-        const {execSync} = require('node:child_process');
-        const nl = String.fromCharCode(13, 10);
-        const where = execSync(`where ${name}`, {encoding: 'utf8', timeout: 5000}).split(nl).find((l) => l.trim().toLowerCase().endsWith('.cmd'));
-        if (!where) return null;
-        const cmdBody = fs.readFileSync(where.trim(), 'utf8');
-        const m = cmdBody.match(/"%~dp0(\\[^"]*\.js)"\s*%\*/);
-        if (!m) return null;
-        return path.join(path.dirname(where.trim()), m[1]);
-      } catch { return null; }
-    }
-    if (p === '/api/engines/run' && req.method === 'POST') {
-      const {engine, prompt, cwd} = await readBody(req);
-      if (!['codex', 'zcode', 'claude'].includes(engine) || !prompt || typeof prompt !== 'string' || prompt.length > 8000) return json(res, 400, {error: 'bad engine/prompt'});
-      const jsPath = resolveEngineCmd(engine);
-      if (!jsPath) return json(res, 503, {error: engine + ' CLI not installed'});
-      const args = engine === 'codex' ? ['exec', prompt, '--json', '--skip-git-repo-check', '-C', cwd || '.']
-                 : engine === 'zcode' ? ['-p', prompt, '--output-format', 'json']
-                 : ['-p', prompt, '--output-format', 'json'];
-      const {spawn} = await import('node:child_process');
-      // node.exe + 参数数组 + shell:false = CreateProcess 直启，无命令注入面
-      const child = spawn(process.execPath, [jsPath, ...args], {cwd: cwd || '.', shell: false, windowsHide: true});
-      let out = '', err = '';
-      const kill = setTimeout(() => { try { child.kill(); } catch { /* exited on its own already */ } }, 600000);
-      child.stdout.on('data', (c) => { out += c; if (out.length > 2e6) out = out.slice(-1e6); });
-      child.stderr.on('data', (c) => { err += c; if (err.length > 2e5) err = err.slice(-1e5); });
-      child.on('error', (e) => { clearTimeout(kill); return json(res, 500, {error: String(e)}); });
-      child.on('close', (code) => {
-        clearTimeout(kill);
-        if (res.headersSent) return;
-        let usage = null, last = '';
-        for (const line of out.split('\n')) {
-          let j = null; try { j = JSON.parse(line); } catch { continue; }
-          const u = j.usage ?? j.info?.total_token_usage ?? null;
-          if (u) usage = u;
-          if (j.type === 'item.completed' && j.item?.text) last = j.item.text;
-          if (j.result) last = typeof j.result === 'string' ? j.result : last;
-          if (j.is_error) err = String(j.result ?? err);
-        }
-        return json(res, 200, {code, usage, last: last.slice(0, 4000), err: err.slice(-800)});
-      });
-      return;
     }
     if (p === '/api/config') {
       if (req.method === 'POST') {
         const body = await readBody(req);
         const cfg = loadConfig();
-        const next = { ...cfg, ...body };
+        const next = { ...cfg };
+        for (const k of ['lang', 'theme', 'themeAuto', 'defaultModel', 'goals', 'disabledSkills', 'projects', 'relaySecret']) if (k in body) next[k] = body[k]; // allowlist: a stray body key must not clobber config
         saveConfig(next);
         return json(res, 200, next);
       }
@@ -466,7 +434,7 @@ const server = http.createServer(async (req, res) => {
       const { path: file } = await readBody(req);
       const root = path.resolve(PI_SESSIONS);
       const abs = path.resolve(String(file || ''));
-      if (!abs.startsWith(root + path.sep) || !abs.toLowerCase().endsWith('.jsonl')) return json(res, 400, { error: 'bad path' });
+      if (!contains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) return json(res, 400, { error: 'bad path' });
       if (!fs.existsSync(abs)) return json(res, 404, { error: 'not found' });
       fs.rmSync(abs, { force: true });
       return json(res, 200, { ok: true, deleted: abs });
@@ -475,6 +443,9 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST') {
         const body = await readBody(req);
         const { meta: _ignored, ...doc } = body; // meta lives in model-meta.json, never in models.json
+        if (!doc || typeof doc !== 'object' || Array.isArray(doc) || !doc.providers || typeof doc.providers !== 'object') {
+          return json(res, 400, { error: 'body must be {providers:{...}} — refusing to overwrite models.json' });
+        }
         fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
         fs.writeFileSync(PI_MODELS, JSON.stringify(doc, null, 2));
       }
@@ -485,8 +456,9 @@ const server = http.createServer(async (req, res) => {
       const proc = spawn(process.execPath, [PI_CLI, '--mode', 'rpc', '--no-session'], { cwd: HOME, env: { ...process.env, ...SECRET_ENV }, windowsHide: true });
       const result = await new Promise((resolve) => {
         let buf = ''; const to = setTimeout(() => { try { proc.kill(); } catch { /* exited already */ } resolve({ models: [] }); }, 20000);
+        proc.stdout.setEncoding('utf8');
         proc.stdout.on('data', (c) => {
-          buf += c.toString('utf8');
+          buf += c;
           let i;
           while ((i = buf.indexOf('\n')) !== -1) {
             const line = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
@@ -495,7 +467,7 @@ const server = http.createServer(async (req, res) => {
           }
         });
         proc.on('error', () => { clearTimeout(to); resolve({ models: [] }); });
-        proc.stdin.write(JSON.stringify({ id: 'm1', type: 'get_available_models' }) + '\n');
+        try { proc.stdin.write(JSON.stringify({ id: 'm1', type: 'get_available_models' }) + '\n'); } catch { /* died before accepting input — error/timeout handlers resolve */ }
       });
       return json(res, 200, result);
     }
@@ -566,7 +538,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/providers/test' && req.method === 'POST') {
       const { model } = await readBody(req);
-      if (!model) return json(res, 200, { ok: false, detail: 'model required' });
+      if (!model) return json(res, 400, { ok: false, detail: 'model required' });
       return json(res, 200, await testModelReply(model));
     }
     if (p === '/api/routing') {
@@ -590,13 +562,14 @@ const server = http.createServer(async (req, res) => {
       const providers = names.map((name) => {
         const rc = routing.providers[name] || {};
         const cd = providerCooled(name);
+        const envs = keyEnvsFor(name);
         return {
           name,
           enabled: rc.enabled !== false,
           priority: rc.priority || 1,
           testModel: rc.testModel || null,
-          keyEnvs: keyEnvsFor(name),
-          keyCount: keyEnvsFor(name).length || (hasLiteralKey(name) ? 1 : 0),
+          keyEnvs: envs,
+          keyCount: envs.length || (hasLiteralKey(name) ? 1 : 0),
           cooldown: cd ? { until: cd.until, remainMs: Math.max(0, cd.until - Date.now()), error: cd.error || null } : null,
         };
       });
@@ -651,6 +624,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/cron/delete' && req.method === 'POST') {
       const { id } = await readBody(req);
+      if (!isJobId(id)) return json(res, 400, { error: 'bad job id' });
       const d = readJson(CRON_FILE) || { jobs: [] };
       d.jobs = d.jobs.filter((j) => j.id !== id);
       saveJson(CRON_FILE, d);
@@ -667,6 +641,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/cron/logs' && req.method === 'POST') {
       const { id } = await readBody(req);
+      if (!isJobId(id)) return json(res, 400, { error: 'bad job id' });
       const dir = path.join(CRON_RUNS_DIR, id);
       let runs = [];
       try {
@@ -679,6 +654,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/cron/lastlog' && req.method === 'POST') {
       const { id } = await readBody(req);
+      if (!isJobId(id)) return json(res, 400, { error: 'bad job id' });
       const dir = path.join(CRON_RUNS_DIR, id);
       let latest = null, mtime = 0;
       try {
@@ -695,10 +671,11 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/session/export' && req.method === 'GET') {
       const root = path.resolve(PI_SESSIONS);
       const abs = path.resolve(u.searchParams.get('path') || '');
-      if (!abs.startsWith(root + path.sep) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
+      if (!contains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
+      let raw; try { raw = fs.readFileSync(abs, 'utf8'); } catch { res.writeHead(404); return res.end('not found'); } // read before headers: a vanished file must 404, not hang the client
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
-      const NL = '\n';  // 之前那行是字面反斜杠+n：按它切会把每行 JSON 从转义处切碎，导出恒为空
-      for (const line of fs.readFileSync(abs, 'utf8').split(NL)) {
+      const NL = '\n';
+      for (const line of raw.split(NL)) {
         if (!line) continue;
         let j; try { j = JSON.parse(line); } catch { continue; }
         if (j.type !== 'message' || !j.message) continue;
@@ -720,6 +697,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/cron/run-now' && req.method === 'POST') {
       const { id } = await readBody(req);
+      if (!isJobId(id)) return json(res, 400, { error: 'bad job id' });
       const d = readJson(CRON_FILE) || { jobs: [] };
       const job = d.jobs.find((j) => j.id === id);
       if (!job) return json(res, 404, { error: 'job not found' });
@@ -742,7 +720,7 @@ const server = http.createServer(async (req, res) => {
       const known = (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(root || ''));
       if (!root || !known) return json(res, 400, { error: 'unknown project root' });
       const base = path.resolve(root, rel);
-      if (!base.startsWith(path.resolve(root))) return json(res, 400, { error: 'bad path' });
+      if (!contains(root, base)) return json(res, 400, { error: 'bad path' });
       let entries;
       try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch (e) { return json(res, 400, { error: e.message }); }
       const skip = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__']);
@@ -762,7 +740,7 @@ const server = http.createServer(async (req, res) => {
       const known = (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(root || ''));
       if (!root || !known) return json(res, 400, { error: 'unknown project root' });
       const base = path.resolve(root, rel);
-      if (!base.startsWith(path.resolve(root))) return json(res, 400, { error: 'bad path' });
+      if (!contains(root, base)) return json(res, 400, { error: 'bad path' });
       let st; try { st = fs.statSync(base); } catch { return json(res, 400, { error: 'not found' }); }
       if (st.isDirectory()) return json(res, 400, { error: 'is a directory' });
       if (st.size > 400000) return json(res, 200, { text: '', tooBig: true, size: st.size });
@@ -792,6 +770,7 @@ const server = http.createServer(async (req, res) => {
       const gitVer = await new Promise((resolve) => {
         const g = spawn('git', ['--version'], { windowsHide: true });
         let o = '';
+        g.stdout.setEncoding('utf8');
         g.stdout.on('data', (c) => { o += c; });
         g.on('error', () => resolve(null));
         g.on('close', () => resolve(o.trim() || null));
@@ -811,7 +790,7 @@ const server = http.createServer(async (req, res) => {
       const imp = IMPORT_SOURCES[mImport[1]];
       if (mImport[2]) {
         const f = u.searchParams.get('path');
-        if (!f || (imp.root && !path.resolve(f).startsWith(path.resolve(imp.root)))) return json(res, 400, { error: 'bad path' });
+        if (!f || (imp.root && !contains(imp.root, f))) return json(res, 400, { error: 'bad path' });
         if (!imp.root && !(f || '').startsWith('opencode://')) return json(res, 400, { error: 'bad path' });
         return json(res, 200, { entries: imp.read(f) });
       }
@@ -862,8 +841,8 @@ const server = http.createServer(async (req, res) => {
           try { raw = fs.readFileSync(full, 'utf8'); } catch { continue; }
           let desc = '';
           const di = raw.indexOf('description:');
-          if (di >= 0) desc = raw.slice(di + 12, raw.indexOf(String.fromCharCode(10), di)).trim().slice(0, 120);
-          if (!desc) desc = raw.replace(/^---/, '').trim().split(String.fromCharCode(10))[0].slice(0, 120);
+          if (di >= 0) desc = raw.slice(di + 12, raw.indexOf('\n', di)).trim().slice(0, 120); // 12 = 'description:'.length
+          if (!desc) desc = raw.replace(/^---/, '').trim().split('\n')[0].slice(0, 120);
           out.push({ name: e.name.replace(/.md$/i, ''), path: full, source, description: desc, body: raw.slice(0, 20000) });
         }
       }
@@ -929,12 +908,12 @@ const server = http.createServer(async (req, res) => {
         if (ext === '.html' || p === '/') {
           data = Buffer.from(data.toString('utf8').replace(
             '</head>',
-            '<script>window.__API_TOKEN = ' + JSON.stringify(API_TOKEN) + '</scr' + 'ipt></head>'
+            '<script nonce="' + HTML_NONCE + '">window.__API_TOKEN = ' + JSON.stringify(API_TOKEN) + '</scr' + 'ipt></head>'
           ));
         }
         const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png' }[ext] || 'application/octet-stream';
         // index.html embeds a per-boot token — a cached stale page would 403 itself dead
-        const csp = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+        const csp = "default-src 'self'; script-src 'self' 'nonce-" + HTML_NONCE + "'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
         res.writeHead(200, { 'content-type': mime, 'cache-control': (ext === '.html' || p === '/') ? 'no-store' : 'no-cache', 'content-security-policy': csp });
         return res.end(data);
       } catch { res.writeHead(404); return res.end('not found'); }
@@ -954,10 +933,9 @@ server.on('upgrade', (req, socket, head) => {
 
 resolveSecrets();
 
-// HTTP token auth: any local process can hit 32123 without this — generate random
-// token per startup, embed in HTML, require in X-Api-Token header for /api/* routes
-const API_TOKEN = crypto.randomBytes(24).toString('hex');
-globalThis.API_TOKEN = API_TOKEN;
+// cron scheduler heartbeat — without this tick is never called and daily/interval
+// jobs only ever run via run-now
+setInterval(() => { try { cron.tick(); } catch (e) { logErr('cron tick: ' + ((e && e.message) || e)); } }, 20000).unref();
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) server.listen(PORT, '127.0.0.1', () => {

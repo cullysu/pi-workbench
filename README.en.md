@@ -1,6 +1,6 @@
 # pi-workbench (English)
 
-A local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows desktop app (Tauri + WebView2, NSIS installer), Chinese UI.
+A local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows desktop app (Electron shell + WebView2, NSIS installer), Chinese UI.
 
 pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout JSONL) as a subprocess: sessions are pi-native (`~/.pi/agent/sessions`), custom models live in `~/.pi/agent/models.json`, and everything is fully interoperable with the pi CLI.
 
@@ -40,7 +40,7 @@ npm install
 npm start              # server on http://127.0.0.1:32123
 npm test               # API test suite (isolated HOME)
 npm run electron       # Electron shell
-npx tauri build        # Tauri NSIS installer (from tauri/)
+npm run dist           # Electron NSIS installer (artifact in dist_electron/)
 ```
 
 ## License

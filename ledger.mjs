@@ -18,7 +18,8 @@ function* walkFiles(dir, ext, depth = 0, maxDepth = 6) {
 }
 
 function readLines(file, hotSubstr) {
-  // 行式读取；hotSubstr 命中才 parse，控制大文件开销
+  // 行式读取；hotSubstr 命中才 parse，控制大文件开销。
+  // session_meta 行不含任何 usage 关键字，必须无条件放行——cwd/时间戳全靠它
   const out = [];
   let buf = '';
   let fd;
@@ -32,7 +33,7 @@ function readLines(file, hotSubstr) {
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1);
         if (!line.trim()) continue;
-        if (hotSubstr && !line.includes(hotSubstr)) continue;
+        if (hotSubstr && !line.includes(hotSubstr) && !line.includes('session_meta')) continue;
         try { out.push(JSON.parse(line)); } catch { /* skip torn/non-JSON lines */ }
         if (out.length > 200000) return out;
       }
@@ -61,13 +62,18 @@ const deepFindUsage = (o) => {
   return null;
 };
 
-function scanCodex(days) {
-  const H = process.env.PIWB_LEDGER_HOME || os.homedir();
-  const root = path.join(H, '.codex', 'sessions');
+// 用量按用户本地日历日分桶（与 /api/usage 同口径）；toISOString 会把本地早晨归到昨天
+const localDay = (ts) => {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+function scanCodex(days, home) {
+  const root = path.join(home, '.codex', 'sessions');
   const since = Date.now() - days * DAY;
   const recs = [];
   for (const f of walkFiles(root, '.jsonl')) {
-    const st = fs.statSync(f);
+    let st; try { st = fs.statSync(f); } catch { continue; } // file rotated away mid-walk
     if (st.mtimeMs < since) continue;
     const lines = readLines(f, 'token_usage');
     if (!lines.length) continue;
@@ -88,14 +94,13 @@ function scanCodex(days) {
   return recs;
 }
 
-function scanZCode(days) {
-  const home = process.env.PIWB_LEDGER_HOME || os.homedir();
+function scanZCode(days, home) {
   const since = Date.now() - days * DAY;
   const recs = [];
   // 1) model-io：逐次调用（每次一条记录）
   const roll = path.join(home, '.zcode', 'cli', 'rollout');
   for (const f of walkFiles(roll, '.jsonl')) {
-    const st = fs.statSync(f);
+    let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
     for (const l of readLines(f)) {
       const ts = l.startedAt ? Date.parse(l.startedAt) : (l.completedAt ? Date.parse(l.completedAt) : st.mtimeMs);
@@ -104,10 +109,11 @@ function scanZCode(days) {
       if (u) recs.push({engine: 'zcode', file: path.basename(f), ts, cwd: null, model: l.model || null, usage: u});
     }
   }
-  // 2) v2 会话文件（每会话聚合，取 usage 字段若存在）
+  // 2) v2 会话文件是上述逐次调用的会话级聚合——只进 recent 列表，
+  //    不进 byEngine/byDay/byModel，否则同一批 token 被算两遍
   const v2 = path.join(home, '.zcode', 'v2', 'sessions');
   for (const f of walkFiles(v2, '.json')) {
-    const st = fs.statSync(f);
+    let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
     let d = null;
     try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { continue; }
@@ -117,12 +123,12 @@ function scanZCode(days) {
   return recs;
 }
 
-function scanClaude(days) {
-  const root = path.join(process.env.PIWB_LEDGER_HOME || os.homedir(), '.claude', 'projects');
+function scanClaude(days, home) {
+  const root = path.join(home, '.claude', 'projects');
   const since = Date.now() - days * DAY;
   const recs = [];
   for (const f of walkFiles(root, '.jsonl')) {
-    const st = fs.statSync(f);
+    let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
     for (const l of readLines(f, '"usage"')) {
       const u = deepFindUsage(l.message ?? l);
@@ -135,29 +141,31 @@ function scanClaude(days) {
   return recs;
 }
 
-export function ledger({days = 30, engines = ['codex', 'zcode', 'claude']} = {}) {
+export function ledger({days = 30, engines = ['codex', 'zcode', 'claude'], home = process.env.PIWB_LEDGER_HOME || os.homedir()} = {}) {
   let recs = [];
-  if (engines.includes('codex')) recs = recs.concat(scanCodex(days));
-  if (engines.includes('zcode')) recs = recs.concat(scanZCode(days));
-  if (engines.includes('claude')) recs = recs.concat(scanClaude(days));
+  if (engines.includes('codex')) recs = recs.concat(scanCodex(days, home));
+  if (engines.includes('zcode')) recs = recs.concat(scanZCode(days, home));
+  if (engines.includes('claude')) recs = recs.concat(scanClaude(days, home));
   const byEngine = {}, byDay = {}, byModel = {};
   for (const r of recs) {
-    const day = new Date(r.ts).toISOString().slice(0, 10);
-    const bump = (o, k) => {
-      o[k] ??= {calls: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0};
-      const t = o[k]; t.calls++;
-      t.input += r.usage.input; t.cached += r.usage.cached;
-      t.cacheWrite += r.usage.cacheWrite; t.output += r.usage.output;
-      t.reasoning += r.usage.reasoning || 0;
-    };
-    bump(byEngine, r.engine);
-    bump(byDay, day);
-    if (r.model) bump(byModel, `${r.engine}/${r.model}`);
+    if (!r.aggregate) {
+      const day = localDay(r.ts);
+      const bump = (o, k) => {
+        o[k] ??= {calls: 0, input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0};
+        const t = o[k]; t.calls++;
+        t.input += r.usage.input; t.cached += r.usage.cached;
+        t.cacheWrite += r.usage.cacheWrite; t.output += r.usage.output;
+        t.reasoning += r.usage.reasoning || 0;
+      };
+      bump(byEngine, r.engine);
+      bump(byDay, day);
+      if (r.model) bump(byModel, `${r.engine}/${r.model}`);
+    }
   }
   const sortObj = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => (a[0] < b[0] ? -1 : 1)));
   return {
     days,
-    sessions: recs.length,
+    sessions: recs.filter((r) => !r.aggregate).length,
     byEngine: sortObj(byEngine),
     byDay: sortObj(byDay),
     byModel: sortObj(byModel),

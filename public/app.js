@@ -64,7 +64,6 @@ const state = {
   modelsAvailable: [],
   importSrc: 'codex',
   thinkLevel: 'medium',
-  entryEls: new Map(),      // contentIndex -> element for streaming
 };
 
 // ---------- utils ----------
@@ -96,7 +95,7 @@ function mdRender(text) {
   try {
     const html = marked.parse(text, { breaks: true, gfm: true });
     // 模型输出不可信：所有 markdown HTML 过白名单消毒（防 prompt-injection→XSS）
-    return window.DOMPurify ? DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }) : html;
+    return window.DOMPurify ? DOMPurify.sanitize(html, { USE_PROFILES: { html: true } }) : esc(text); // no sanitizer loaded → plain text, never raw html
   } catch (e) { console.warn('mdRender failed:', e); return `<p>${esc(text)}</p>`; }
 }
 function applyI18n() {
@@ -128,27 +127,31 @@ function wsConnect() {
   const ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(window.__API_TOKEN || '')}`);
   state.ws = ws;
   ws.onopen = () => {
-    state.wsReady = true; $('#conn-dot').className = 'dot on';
+    state.wsReady = true; wsRetries = 0; $('#conn-dot').className = 'dot on';
     while (wsQueue.length) { try { state.ws.send(JSON.stringify(wsQueue.shift())); } catch { break; } }
   };
-  ws.onclose = () => { state.wsReady = false; $('#conn-dot').className = 'dot off'; setTimeout(wsConnect, 1500); };
+  ws.onclose = () => { state.wsReady = false; $('#conn-dot').className = 'dot off'; setTimeout(wsConnect, Math.min(15000, 1500 * ++wsRetries)); };
   ws.onerror = () => ws.close();
   ws.onmessage = (ev) => {
     let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.type === 'pi-event') (window.__evts = window.__evts || []).push(msg.data);
+    if (msg.type === 'pi-event') {
+      (window.__evts = window.__evts || []).push(msg.data);
+      if (window.__evts.length > 400) window.__evts.splice(0, window.__evts.length - 400);
+    }
     if (msg.type === 'pi-session-file') {
       state.sessionFile = msg.sessionFile;
       if (state.pendingNewSession) { state.pendingNewSession = false; renderProjectTree(true); }
       return;
     }
     if (msg.tabId !== state.tabId) return;
-    if (msg.type === 'pi-event') handlePiEvent(msg.data);
+    if (msg.type === 'pi-event') for (const h of piEventHandlers) h(msg.data);
     else if (msg.type === 'pi-exit') handlePiExit(msg);
     else if (msg.type === 'pi-stderr') $('#statusline').textContent = msg.data.slice(0, 200);
     else if (msg.type === 'opened') { /* noop */ }
   };
 }
 const wsQueue = [];
+let wsRetries = 0;
 function wsSend(obj) {
   if (state.wsReady) { state.ws.send(JSON.stringify(obj)); return; }
   wsQueue.push(obj); // flushed on open — never drop open/prompt frames
@@ -403,7 +406,9 @@ function handleUiRequest(ev) {
 }
 
 // ---------- modal ----------
+let modalCancel = null; // pending onCancel for the open modal — Escape must fire it, pi extensions wait on the reply
 function modal(title, body, actions) {
+  modalCancel = null;
   $('#modal-title').textContent = title;
   $('#modal-body').textContent = body;
   const act = $('#modal-actions'); act.innerHTML = '';
@@ -416,19 +421,23 @@ function modal(title, body, actions) {
   $('#modal-backdrop').classList.remove('hidden');
 }
 function modalWithInput(title, placeholder, prefill, onOk, onCancel) {
+  modalCancel = onCancel || null;
   $('#modal-title').textContent = title;
   $('#modal-body').innerHTML = `<input id="modal-input" placeholder="${esc(placeholder)}">`;
   const act = $('#modal-actions'); act.innerHTML = '';
   const input = () => $('#modal-input');
   const b1 = document.createElement('button'); b1.textContent = 'OK'; b1.className = 'primary';
-  b1.onclick = () => { closeModal(); onOk(input().value); };
+  b1.onclick = () => { modalCancel = null; closeModal(); onOk(input().value); };
   const b2 = document.createElement('button'); b2.textContent = 'Cancel';
-  b2.onclick = () => { closeModal(); onCancel && onCancel(); };
+  b2.onclick = () => { modalCancel = null; closeModal(); onCancel && onCancel(); };
   act.append(b2, b1);
   $('#modal-backdrop').classList.remove('hidden');
   setTimeout(() => { input().value = prefill || ''; input().focus(); }, 30);
 }
-function closeModal() { $('#modal-backdrop').classList.add('hidden'); }
+function closeModal() {
+  $('#modal-backdrop').classList.add('hidden');
+  const c = modalCancel; modalCancel = null; if (c) c(); // answer a waiting extension with cancelled:true
+}
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
 // bfcache restores a stale page (dead WS, old timeline) — force a fresh boot instead
 window.addEventListener('pageshow', (e) => { if (e.persisted) location.reload(); });
@@ -483,7 +492,7 @@ function openPiSession({ sessionPath = null, isNew = false }) {
     state.tabId = 'tab-' + Math.random().toString(36).slice(2, 9);
     state.streaming = false; state.cur = null; state.toolCards.clear();
     state.goalRound = 0; state.goalDone = false; state.goalInjected = false;
-    state.sessionFile = null;
+    state.sessionFile = null; state.forkMsgs = null; state.pendingForkResolve = null; state.pendingRegenText = '';
     state.pendingNewSession = !!isNew;
     clearTimeline(isNew || !sessionPath);
     $('#proj-title').textContent = state.project.path;
@@ -1267,7 +1276,8 @@ $('#btn-new-session').onclick = async () => {
 // (model/thinking dropdowns live in dropdowns.js)
 $('#btn-diff').onclick = async () => {
   if (!state.project) return;
-  const r = await api.get(`/api/git/diff?cwd=${encodeURIComponent(state.project.path)}`);
+  const r = await api.get(`/api/git/diff?cwd=${encodeURIComponent(state.project.path)}`).catch(() => null);
+  if (!r) { $('#statusline').textContent = '加载 diff 失败'; return; }
   const panel = $('#diff-panel');
   const body = $('#diff-body');
   body.innerHTML = '';
@@ -1294,7 +1304,8 @@ $$('.import-head .chip').forEach((b) => {
 async function loadImportList() {
   const list = $('#import-list');
   list.innerHTML = `<div class="muted small" style="padding:20px 10px">${t('loading')}</div>`;
-  const r = await api.get(`/api/import/${state.importSrc}`);
+  const r = await api.get(`/api/import/${state.importSrc}`).catch(() => null);
+  if (!r) { list.innerHTML = '<div class="muted small" style="padding:20px 10px">加载失败，稍后重试</div>'; return; }
   list.innerHTML = '';
   for (const s of r.sessions || []) {
     const d = document.createElement('div');
@@ -1308,7 +1319,8 @@ async function loadImportList() {
   if (!r.sessions?.length) list.innerHTML = `<div class="placeholder small" style="padding:30px 10px">no sessions found</div>`;
 }
 async function openImported(src, file) {
-  const r = await api.get(`/api/import/${src}/read?path=${encodeURIComponent(file)}`);
+  const r = await api.get(`/api/import/${src}/read?path=${encodeURIComponent(file)}`).catch(() => null);
+  if (!r) { $('#statusline').textContent = '加载会话失败'; return; }
   clearTimeline(false);
   $('#proj-title').textContent = `${src} · ${file.split(/[\\/]/).pop()}`;
   for (const e of r.entries || []) {
@@ -1344,7 +1356,8 @@ async function openImported(src, file) {
 
 // ---------- providers tab (beginner flow: URL + key → discover models → pick) ----------
 async function loadModelsEditor() {
-  const m = await api.get('/api/models');
+  const m = await api.get('/api/models').catch(() => null);
+  if (!m) { const st = $('#models-status'); if (st) st.textContent = '加载 models.json 失败'; return; }
   state.modelsDoc = m;
   state.kbPricing = state.kbPricing || {};
   for (const [k, v] of Object.entries(m.meta || {})) {
@@ -1624,9 +1637,9 @@ async function loadCLedger() {
   $('#btn-cledger').onclick = async () => {
     box.innerHTML = '<div class="muted small">扫描中…</div>';
     const d = await api.get('/api/ledger?days=30').catch((e) => ({error: String(e)}));
-    if (d.error) { box.innerHTML = '加载失败: ' + d.error; return; }
+    if (d.error) { box.innerHTML = '加载失败: ' + esc(String(d.error)); return; }
     const fmt = (o) => Object.entries(o).map(([k, v]) =>
-      `<tr><td>${k}</td><td>${v.calls}</td><td>${(v.input/1e6).toFixed(1)}M</td><td>${(v.cached/1e6).toFixed(1)}M</td><td>${(v.output/1e3).toFixed(1)}K</td><td>${v.input ? Math.round(v.cached/v.input*100) : 0}%</td></tr>`).join('');
+      `<tr><td>${esc(k)}</td><td>${v.calls}</td><td>${(v.input/1e6).toFixed(1)}M</td><td>${(v.cached/1e6).toFixed(1)}M</td><td>${(v.output/1e3).toFixed(1)}K</td><td>${v.input ? Math.round(v.cached/v.input*100) : 0}%</td></tr>`).join('');
     box.innerHTML = `
       <div class="usage-sec">按引擎（30 天）</div>
       <table class="usage-table"><thead><tr><th>引擎</th><th>调用</th><th>输入(M)</th><th>缓存读(M)</th><th>输出(K)</th><th>缓存率</th></tr></thead>
@@ -1886,11 +1899,6 @@ $$('[data-theme-set]').forEach((b) => b.onclick = async () => {
   applyI18n(); applyThemeBtns();
   await api.post('/api/config', { theme: state.cfg.theme });
 });
-$$('[data-theme-auto]').forEach((b) => b.onclick = async () => {
-  state.cfg.themeAuto = b.dataset.themeAuto === 'on';
-  await api.post('/api/config', { themeAuto: state.cfg.themeAuto });
-  applySystemTheme();
-});
 $$('[data-lang-set]').forEach((b) => b.onclick = async () => {
   state.cfg.lang = b.dataset.langSet;
   applyI18n(); applyThemeBtns();
@@ -2007,7 +2015,7 @@ async function loadCron() {
     if (sel) {
       const cur = sel.value;
       sel.innerHTML = '<option value="">（留空用默认模型）</option>' +
-        [...new Set(av.map((m) => m.provider + '/' + m.id))].map((k) => `<option value="${k}">${k}</option>`).join('');
+        [...new Set(av.map((m) => m.provider + '/' + m.id))].map((k) => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
       sel.value = cur;
     }
   } catch { /* leave the select on its default if models fail to load */ }
@@ -2047,7 +2055,7 @@ function renderCronJobs() {
   box.querySelectorAll('.cron-run').forEach((b) => {
     b.onclick = async () => {
       b.textContent = '运行中…'; b.disabled = true;
-      await api.post('/api/cron/run-now', { id: b.dataset.id });
+      try { await api.post('/api/cron/run-now', { id: b.dataset.id }); } catch { /* button restored below */ }
       b.textContent = '立即运行'; b.disabled = false;
       loadCron();
     };
@@ -2057,8 +2065,8 @@ function renderCronJobs() {
       b.textContent = '…'; b.disabled = true;
       try {
         const r = await api.post('/api/cron/lastlog', { id: b.dataset.id });
-        modal(r.content || '(no output)', [{ label: '关闭', primary: true }]);
-      } catch { modal('(failed to load log)', [{ label: '关闭', primary: true }]); }
+        modal('任务日志', r.content || '(no output)', [{ label: '关闭', primary: true }]);
+      } catch { modal('任务日志', '(failed to load log)', [{ label: '关闭', primary: true }]); }
       b.textContent = '日志'; b.disabled = false;
     };
   });
@@ -2181,7 +2189,6 @@ const PANEL_LOADERS = {
   env: loadEnv,
   settings: loadSecStatus,
 };
-$('#btn-update-check');
 $$('.rail-item[data-panel]').forEach((b) => {
   b.onclick = () => {
     $$('.rail-item[data-panel]').forEach((x) => x.classList.remove('active'));
@@ -2266,7 +2273,7 @@ function emptyStateHtml(g, meta) {
   const handle = $('#sb-resize');
   const rail = $('#rail');
   if (!handle || !rail) return;
-  const saved = Number(localStorage.getItem('railW'));
+  let saved = 0; try { saved = Number(localStorage.getItem('railW')); } catch { /* storage may be denied */ }
   if (saved >= 180 && saved <= 480) {
     rail.style.width = saved + 'px';
     rail.style.setProperty('--rail-w', saved + 'px');
@@ -2288,7 +2295,7 @@ function emptyStateHtml(g, meta) {
     if (!dragging) return;
     dragging = false;
     const w = Math.round(rail.getBoundingClientRect().width);
-    localStorage.setItem('railW', String(w));
+    try { localStorage.setItem('railW', String(w)); } catch { /* storage may be denied */ }
     document.body.classList.remove('rail-dragging');
   });
 })();
@@ -2378,7 +2385,8 @@ $('#btn-update-check').onclick = async () => {
   st.textContent = '检查中…';
   const r = await api.get('/api/update/check').catch(() => ({ error: '网络失败' }));
   if (r.latest) {
-    st.innerHTML = '最新版 ' + r.latest + ' — <a href="' + r.url + '" target="_blank" style="color:var(--accent)">前往下载</a>';
+    const url = /^https:\/\//.test(r.url || '') ? r.url : '#';
+    st.innerHTML = '最新版 ' + esc(String(r.latest)) + ' — <a href="' + esc(url) + '" target="_blank" rel="noopener" style="color:var(--accent)">前往下载</a>';
   } else {
     st.textContent = '暂无法获取（GitHub 不可达或无发布版本）';
   }
@@ -2392,6 +2400,7 @@ window.addEventListener('unhandledrejection', (e) => { window.__bootErrors.push(
   marked.setOptions({ breaks: true, gfm: true });
   await loadProjects();
   wsConnect();
+  api.get('/api/kernel').then((k) => { const el = $('#sb-gw'); if (el && k && k.port) el.textContent = '网关 ' + k.port; }).catch(() => {});
   clearTimeline(true);
   initSuggestions();
   if (state.cfg.defaultModel) { state.selModel = state.cfg.defaultModel; updateModelChip(); }

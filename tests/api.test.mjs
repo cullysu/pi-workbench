@@ -310,3 +310,39 @@ test('static assets and 404', async () => {
   }
   assert.equal((await req('/api/definitely-missing')).status, 404);
 });
+test('cron scheduler actually ticks: a due job is spawned without waiting for run-now', async () => {
+  const { createCron } = await import('../lib/cron.mjs');
+  const cronFile = path.join(tmpHome, 'cron-tick.json');
+  const jobs = [{ id: 'job-tick', name: 'tick-me', kind: 'interval', everyMin: 0.01, prompt: 'hello', enabled: true }];
+  fs.writeFileSync(cronFile, JSON.stringify({ jobs }));
+  let spawned = 0;
+  const engine = createCron({
+    CRON_FILE: cronFile, CRON_RUNS_DIR: path.join(tmpHome, 'cron-tick-runs'), HOME: tmpHome,
+    SECRET_ENV: {}, PI_CLI: 'pi-cli', cronPiArgs: () => ['-p', 'x'], broadcast: () => {},
+    readJson: (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } },
+    saveJson: (f, d) => { fs.writeFileSync(f, JSON.stringify(d)); },
+    spawn: () => { spawned++; const fake = { on: () => {}, stdin: { write: () => {} } }; return fake; },
+  });
+  engine.tick();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(spawned >= 1, 'tick() must spawn a due job — the scheduler interval went missing once already');
+});
+
+test('factory ctx guards: wiring drift crashes at boot, not silently at 9am', async () => {
+  const { createFailover } = await import('../lib/failover.mjs');
+  assert.throws(() => createFailover({ SECRET_ENV: {}, readJson: () => null, loadRouting: () => ({}), saveRouting: () => {} }),
+    /missing ctx\.PI_MODELS/, 'failover without PI_MODELS must throw loudly');
+});
+
+test('malformed POST cannot wipe models.json', async () => {
+  const modelsPath = path.join(tmpHome, '.pi', 'agent', 'models.json');
+  const before = fs.readFileSync(modelsPath, 'utf8');
+  const r = await req('/api/models', { garbage: true });
+  assert.equal(r.status, 400, 'body without providers must be rejected');
+  assert.equal(fs.readFileSync(modelsPath, 'utf8'), before, 'models.json untouched');
+});
+
+test('cron routes reject junk job ids before path.join', async () => {
+  const r = await req('/api/cron/lastlog', { id: '..' + path.sep + '..' + path.sep + 'evil' });
+  assert.equal(r.status, 400, 'traversal id rejected');
+});

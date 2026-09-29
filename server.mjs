@@ -9,6 +9,7 @@ import crypto from 'node:crypto';
 import {ledger} from './ledger.mjs';
 import {pathToFileURL} from 'node:url';
 import {cronPiArgs} from './lib/cron-args.mjs';
+import { collectProc } from './lib/io.mjs';
 import {createCron} from './lib/cron.mjs';
 import {createFailover} from './lib/failover.mjs';
 import {createSources} from './lib/sources.mjs';
@@ -789,14 +790,8 @@ async function hKernel(req, res, u) {
 }
 
 async function hEnv(req, res, u) {
-    const gitVer = await new Promise((resolve) => {
-      const g = spawn('git', ['--version'], { windowsHide: true });
-      let o = '';
-      g.stdout.setEncoding('utf8');
-      g.stdout.on('data', (c) => { o += c; });
-      g.on('error', () => resolve(null));
-      g.on('close', () => resolve(o.trim() || null));
-    });
+    const g = await collectProc(spawn, 'git', ['--version'], { maxOut: 200 });
+    const gitVer = g.error ? null : (g.out.trim() || null);
     const providers = Object.keys((readJson(PI_MODELS) || { providers: {} }).providers || {});
     return json(res, 200, {
       platform: process.platform + ' ' + process.arch,
@@ -1006,7 +1001,7 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname.startsWith('/api/')) {
       if (req.headers['x-api-token'] !== API_TOKEN) { res.writeHead(403); return res.end('forbidden'); }
       for (const [method, path, handler] of routes) {
-        if (method !== '*' && method !== req.method) continue;
+        if (method && method !== '*' && method !== req.method) continue; // null/regex rows match any method
         const m = typeof path === 'string' ? (u.pathname === path ? [path] : null) : path.exec(u.pathname);
         if (m) return handler(req, res, u, m);
       }

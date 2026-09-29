@@ -12,6 +12,8 @@ import {cronPiArgs} from './lib/cron-args.mjs';
 import {createCron} from './lib/cron.mjs';
 import {createFailover} from './lib/failover.mjs';
 import {createSources} from './lib/sources.mjs';
+import {createKbSkills} from './lib/kb-skills.mjs';
+import {createBackupTerminal} from './lib/backup-terminal.mjs';
 import { spawn } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -230,10 +232,6 @@ async function testModelReply(modelId) {
   }
 }
 
-const OMP_SESSIONS = path.join(HOME, '.omp', 'agent', 'sessions');
-const GROK_DIR = path.join(HOME, '.grok');
-const sources = createSources({ PI_SESSIONS, CODEX_SESSIONS, CLAUDE_PROJECTS, OMP_SESSIONS, GROK_DIR, HOME, readJson, logErr, DatabaseSync, kbPrice, loadConfig });
-const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, codexSessionInfo, claudeSessionInfo, claudeSessionRead, listJsonFiles, firstLines } = sources;
 // ---------- pi process manager ----------
 const tabs = new Map(); // tabId -> {proc, cwd, sessionPath, sessionFile, model, startedAt, buffer}
 function spawnPi({ cwd, sessionPath, model, thinking, name, envExtra }) {
@@ -344,119 +342,17 @@ const MCP_FILE = path.join(HOME, '.pi', 'agent', 'mcp.json');
 const MODEL_KB_FILE = path.join(__dirname, 'data', 'models-kb.json');
 const MODEL_META_FILE = path.join(CFG_DIR, 'model-meta.json');
 const MODEL_KB = readJson(MODEL_KB_FILE) || { models: {}, family: {} };
-
-// Look up a model id in the knowledge base. Exact id first (with common suffixes
-// stripped), then longest family-prefix match. Family matches carry structure
-// (context window / max output) but never invented pricing.
-function kbLookup(modelId) {
-  let id = String(modelId || '').toLowerCase();
-  if (id.includes('/')) id = id.slice(id.lastIndexOf('/') + 1);
-  id = id.replace(/:latest$/, '').replace(/:free$/, '').replace(/:beta$/, '');
-  const exact = MODEL_KB.models[id];
-  if (exact) return { ...exact, source: 'exact' };
-  const dated = id.replace(/-\d{8}$/, '');
-  if (dated !== id && MODEL_KB.models[dated]) return { ...MODEL_KB.models[dated], source: 'exact' };
-  let best = null;
-  for (const [prefix, meta] of Object.entries(MODEL_KB.family || {})) {
-    if (id.startsWith(prefix) && (!best || prefix.length > best._len)) best = { ...meta, _len: prefix.length };
-  }
-  if (best) return { ctx: best.ctx, max: best.max, price: best.price, source: 'family' };
-  return null;
-}
-function kbPrice(modelId) {
-  const hit = kbLookup(modelId);
-  if (hit && hit.price && hit.price.cur === 'usd') return hit.price;
-  return null;
-}
-function loadModelMeta() {
-  return readJson(MODEL_META_FILE) || {};
-}
-function saveModelMeta(meta) {
-  fs.mkdirSync(CFG_DIR, { recursive: true });
-  fs.writeFileSync(MODEL_META_FILE, JSON.stringify(meta, null, 2));
-}
+const OMP_SESSIONS = path.join(HOME, '.omp', 'agent', 'sessions');
+const GROK_DIR = path.join(HOME, '.grok');
 const PI_SKILLS = path.join(HOME, '.pi', 'agent', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
+const kb = createKbSkills({ MODEL_KB, MODEL_META_FILE, CFG_DIR, PI_MODELS, PI_SKILLS, AGENTS_SKILLS, readJson, loadConfig, fs, path });
+const { kbLookup, kbPrice, loadModelMeta, saveModelMeta, parseFrontmatter, loadSkillFile, walkSkillDir, listSkills, skillArgsFor } = kb;
+const sources = createSources({ PI_SESSIONS, CODEX_SESSIONS, CLAUDE_PROJECTS, OMP_SESSIONS, GROK_DIR, HOME, readJson, logErr, DatabaseSync, kbPrice, loadConfig });
+const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, codexSessionInfo, claudeSessionInfo, claudeSessionRead, listJsonFiles, firstLines } = sources;
+const bt = createBackupTerminal({ CFG_DIR, HOME, PI_SESSIONS, IMPORT_SOURCES, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, listSkills, copyIfExists, createZip, readZip, logErr, spawn, SECRET_ENV, fs, path });
+const { exportBackupZip, importBackupZip, countFiles, migrateScan, openExternalTerm, execInCwd } = bt;
 
-function parseFrontmatter(md) {
-  const text = String(md || '').replace(/^\uFEFF/, '');
-  const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  const fm = {};
-  if (m) {
-    for (const line of m[1].split(/\r?\n/)) {
-      const i = line.indexOf(':');
-      if (i < 1) continue;
-      fm[line.slice(0, i).trim()] = line.slice(i + 1).trim().replace(/^["']|["']$/g, '');
-    }
-  }
-  return { fm, body: m ? text.slice(m[0].length) : text };
-}
-function loadSkillFile(file, source, fallbackName) {
-  let md = '';
-  try { md = fs.readFileSync(file, 'utf8'); } catch { return null; }
-  const { fm, body } = parseFrontmatter(md);
-  const name = String(fm.name || fallbackName || path.basename(path.dirname(file))).trim();
-  const description = String(fm.description || '').trim();
-  if (!description && !fm.name) return null;
-  return {
-    name,
-    description,
-    path: file,
-    dir: path.dirname(file),
-    source,
-    license: fm.license || '',
-    compatibility: fm.compatibility || '',
-    body,
-  };
-}
-function walkSkillDir(root, source, out, depth = 0) {
-  if (depth > 5 || !root) return;
-  let ents;
-  try { ents = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
-  const isPiRoot = source === 'pi' || source === 'project-pi';
-  for (const e of ents) {
-    if (e.name === 'node_modules' || e.name === '.git') continue;
-    const full = path.join(root, e.name);
-    if (e.isDirectory()) {
-      const skillMd = path.join(full, 'SKILL.md');
-      if (fs.existsSync(skillMd)) {
-        const s = loadSkillFile(skillMd, source, e.name);
-        if (s) out.push(s);
-      } else walkSkillDir(full, source, out, depth + 1);
-    } else if (isPiRoot && depth === 0 && e.name.toLowerCase().endsWith('.md') && e.name.toLowerCase() !== 'skill.md') {
-      const s = loadSkillFile(full, source, e.name.replace(/\.md$/i, ''));
-      if (s) out.push(s);
-    }
-  }
-}
-function listSkills(cwd) {
-  const out = [];
-  walkSkillDir(PI_SKILLS, 'pi', out);
-  walkSkillDir(AGENTS_SKILLS, 'agents', out);
-  if (cwd) {
-    walkSkillDir(path.join(cwd, '.pi', 'skills'), 'project-pi', out);
-    walkSkillDir(path.join(cwd, '.agents', 'skills'), 'project-agents', out);
-  }
-  const disabled = new Set(loadConfig().disabledSkills || []);
-  const seen = new Set();
-  const skills = [];
-  for (const s of out) {
-    if (seen.has(s.name)) continue;
-    seen.add(s.name);
-    skills.push({ ...s, enabled: !disabled.has(s.name) });
-  }
-  skills.sort((a, b) => a.name.localeCompare(b.name));
-  return { skills, disabled: [...disabled] };
-}
-function skillArgsFor(cwd) {
-  const { skills, disabled } = listSkills(cwd);
-  if (!disabled.length) return [];
-  const args = ['--no-skills'];
-  for (const s of skills) {
-    if (s.enabled && s.path) args.push('--skill', s.path);
-  }
-  return args;
-}
 function copyIfExists(src, dest) {
   try {
     if (!fs.existsSync(src)) return false;
@@ -465,108 +361,6 @@ function copyIfExists(src, dest) {
     return true;
   } catch { return false; }
 }
-async function exportBackupZip() {
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const destDir = path.join(CFG_DIR, 'exports');
-  fs.mkdirSync(destDir, { recursive: true });
-  const zipPath = path.join(destDir, `pi-workbench-backup-${stamp}.zip`);
-  const entries = [];
-  const add = (name, src) => {
-    try {
-      if (fs.existsSync(src)) entries.push({ name, data: fs.readFileSync(src) });
-    } catch {}
-  };
-  add('workbench/config.json', CFG_FILE);
-  add('workbench/routing.json', ROUTING_FILE);
-  add('pi-agent/models.json', PI_MODELS);
-  add('workbench/cron.json', CRON_FILE);
-  add('workbench/model-meta.json', MODEL_META_FILE);
-  add('pi-agent/settings.json', PI_SETTINGS);
-  entries.push({ name: 'manifest.json', data: Buffer.from(JSON.stringify({
-    app: 'pi-workbench', version: '0.3.0', at: new Date().toISOString(), packed: entries.map((e) => e.name),
-    skills: listSkills(null).skills.map((s) => s.name),
-  }, null, 2)) });
-  const zip = createZip(entries);
-  fs.writeFileSync(zipPath, zip);
-  return { path: zipPath, packed: entries.map((e) => e.name), size: zip.length };
-}
-async function importBackupZip(zipPath) {
-  if (!zipPath || !fs.existsSync(zipPath) || !zipPath.toLowerCase().endsWith('.zip')) throw new Error('需要本地 .zip 路径');
-  const pre = path.join(CFG_DIR, 'backups', 'pre-import-' + Date.now());
-  fs.mkdirSync(pre, { recursive: true });
-  copyIfExists(CFG_FILE, path.join(pre, 'config.json'));
-  copyIfExists(ROUTING_FILE, path.join(pre, 'routing.json'));
-  copyIfExists(PI_MODELS, path.join(pre, 'models.json'));
-  copyIfExists(PI_SETTINGS, path.join(pre, 'settings.json'));
-  const entries = readZip(fs.readFileSync(zipPath));
-  const byName = new Map(entries.map((e) => [e.name.split('\\').join('/'), e.data]));
-  const targets = [
-    ['workbench/config.json', CFG_FILE, 'config.json'],
-    ['workbench/routing.json', ROUTING_FILE, 'routing.json'],
-    ['workbench/cron.json', CRON_FILE, 'cron.json'],
-    ['workbench/model-meta.json', MODEL_META_FILE, 'model-meta.json'],
-    ['pi-agent/models.json', PI_MODELS, 'models.json'],
-    ['pi-agent/settings.json', PI_SETTINGS, 'settings.json'],
-  ];
-  const restored = [];
-  for (const [name, dest, label] of targets) {
-    if (byName.has(name)) {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, byName.get(name));
-      restored.push(label);
-    }
-  }
-  if (!restored.length) throw new Error('压缩包里没有可识别的备份文件');
-  return { restored, backup: pre };
-}
-
-function countFiles(root, ext, max = 400) {
-  let n = 0;
-  const walk = (d, depth) => {
-    if (n >= max || depth > 4) return;
-    let ents; try { ents = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-    for (const e of ents) {
-      if (n >= max) return;
-      const f = path.join(d, e.name);
-      if (e.isDirectory()) walk(f, depth + 1);
-      else if (!ext || e.name.toLowerCase().endsWith(ext)) n++;
-    }
-  };
-  walk(root, 0);
-  return n;
-}
-function migrateScan() {
-  const exists = (p) => { try { return fs.existsSync(p); } catch { return false; } };
-  const sources = [
-    { id: 'models', name: '模型与密钥', path: PI_MODELS, found: exists(PI_MODELS), detail: exists(PI_MODELS) ? '已有 models.json' : '还没有 models.json' },
-    { id: 'routing', name: '回退路由', path: ROUTING_FILE, found: exists(ROUTING_FILE), detail: exists(ROUTING_FILE) ? '已有 routing.json' : '还没有 routing.json' },
-    { id: 'skills', name: '技能', path: PI_SKILLS, found: listSkills(null).skills.length > 0, detail: `${listSkills(null).skills.length} 个已发现` },
-    { id: 'codex', name: 'Codex 会话', path: CODEX_SESSIONS, found: exists(CODEX_SESSIONS), detail: exists(CODEX_SESSIONS) ? `${countFiles(CODEX_SESSIONS, '.jsonl')} 个 jsonl` : '未安装' },
-    { id: 'claude', name: 'Claude 会话', path: CLAUDE_PROJECTS, found: exists(CLAUDE_PROJECTS), detail: exists(CLAUDE_PROJECTS) ? `${countFiles(CLAUDE_PROJECTS, '.jsonl')} 个 jsonl` : '未安装' },
-    { id: 'zcode', name: 'ZCode 会话', path: path.join(HOME, '.zcode'), found: exists(path.join(HOME, '.zcode')), detail: exists(path.join(HOME, '.zcode')) ? '本机有 .zcode 目录' : '未安装' },
-  ];
-  return { sources };
-}
-function openExternalTerm(cwd) {
-  const dir = cwd && fs.existsSync(cwd) ? cwd : HOME;
-  spawn(process.env.ComSpec || 'cmd.exe', ['/c', 'start', 'cmd.exe', '/K', `cd /d "${dir}"`], { windowsHide: true, cwd: dir });
-  return { ok: true, cwd: dir };
-}
-function execInCwd(cwd, cmd) {
-  const dir = cwd && fs.existsSync(cwd) ? cwd : HOME;
-  const isWin = process.platform === 'win32';
-  const exe = isWin ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
-  const args = isWin ? ['/d', '/s', '/c', cmd] : ['-c', cmd];
-  return new Promise((resolve) => {
-    const p = spawn(exe, args, { cwd: dir, windowsHide: true });
-    let out = '', err = '';
-    p.stdout.on('data', (c) => { if (out.length < 200000) out += c; });
-    p.stderr.on('data', (c) => { if (err.length < 40000) err += c; });
-    p.on('error', (e) => resolve({ code: -1, out: '', err: e.message, cwd: dir }));
-    p.on('close', (code) => resolve({ code, out, err, cwd: dir }));
-  });
-}
-
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const p = u.pathname;
@@ -1166,7 +960,6 @@ const API_TOKEN = crypto.randomBytes(24).toString('hex');
 globalThis.API_TOKEN = API_TOKEN;
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
-console.error('[boot-debug] isMain=' + isMain, 'argv1=' + process.argv[1], 'meta=' + import.meta.url);
 if (isMain) server.listen(PORT, '127.0.0.1', () => {
   console.log(`pi-workbench listening on http://127.0.0.1:${PORT}`);
   // warm the codex list cache in the background so the first UI click is instant

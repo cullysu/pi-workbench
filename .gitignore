@@ -44,3 +44,5 @@ tauri/target/
 
 
 .release-tmp/
+# local UI-probe screenshot artifacts
+scripts/ui-shots/

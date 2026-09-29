@@ -99,7 +99,7 @@ class McpClient {
         this.log(`[${this.name}] spawn failed: ${e.message}`);
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(e); }
         this.pending.clear();
-        try { this.proc?.kill(); } catch {}
+        try { this.proc?.kill(); } catch { /* process already dead */ }
         this.proc = null;
         this.ready = null;
         this.tools = null;
@@ -158,13 +158,13 @@ class McpClient {
   }
 
   shutdown() {
-    try { this.proc?.kill(); } catch {}
+    try { this.proc?.kill(); } catch { /* shutdown is best-effort */ }
   }
 }
 
 export default function mcpBridge(pi) {
   const clients = new Map(); // server name -> McpClient
-  const log = (line) => { try { console.log("[mcp-bridge]", line); } catch {} };
+  const log = (line) => { try { console.log("[mcp-bridge]", line); } catch { /* stdout must never throw */ } };
 
   const getClient = (name, conf) => {
     if (!clients.has(name)) clients.set(name, new McpClient(name, conf, log));

@@ -5,7 +5,7 @@ const nodeGlobals = {
   module: 'writable', __dirname: 'readonly', __filename: 'readonly',
   setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly',
   URL: 'readonly', URLSearchParams: 'readonly', globalThis: 'writable', performance: 'readonly',
-  fetch: 'readonly', AbortSignal: 'readonly', setImmediate: 'readonly', clearTimeout: 'readonly', setTimeout: 'readonly', clearImmediate: 'readonly', queueMicrotask: 'readonly',
+  fetch: 'readonly', AbortSignal: 'readonly', setImmediate: 'readonly', clearImmediate: 'readonly', queueMicrotask: 'readonly',
 };
 const browserGlobals = {
   window: 'readonly', document: 'readonly', localStorage: 'readonly', sessionStorage: 'readonly',
@@ -25,15 +25,15 @@ export default [
     files: ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib/**/*.mjs', 'mcp-bridge.js', 'electron-main.cjs', 'extensions/**/*.js', 'tools/**/*.cjs', 'scripts/**'],
     languageOptions: {ecmaVersion: 2024, sourceType: 'module', globals: nodeGlobals},
     rules: {
-      'no-empty': ['error', {allowEmptyCatch: true}],
-      'no-unused-vars': ['warn', {args: 'none', caughtErrors: 'none'}],
+      'no-empty': 'error',
+      'no-unused-vars': ['warn', {args: 'none', caughtErrors: 'none', varsIgnorePattern: '^_'}],
       'no-undef': 'error',
     },
   },
   {
     files: ['tests/**/*.mjs'],
     languageOptions: {ecmaVersion: 2024, sourceType: 'module', globals: {...nodeGlobals, process: 'readonly'}},
-    rules: {'no-empty': ['error', {allowEmptyCatch: true}], 'no-unused-vars': ['warn', {args: 'none', caughtErrors: 'none'}], 'no-undef': 'error'},
+    rules: {'no-empty': 'error', 'no-unused-vars': ['warn', {args: 'none', caughtErrors: 'none', varsIgnorePattern: '^_'}], 'no-undef': 'error'},
   },
   {
     files: ['public/app.js'],
@@ -49,7 +49,7 @@ export default [
     files: ['public/**/*.js'],
     languageOptions: {ecmaVersion: 2024, sourceType: 'script', globals: browserGlobals},
     rules: {
-      'no-empty': ['error', {allowEmptyCatch: true}],
+      'no-empty': 'error',
       'no-unused-vars': ['warn', {args: 'none', caughtErrors: 'none', varsIgnorePattern: '^(marked|hljs|uPlot|DOMPurify)$'}],
       'no-undef': 'error',
     },

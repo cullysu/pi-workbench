@@ -14,7 +14,7 @@ let serverRestarts = 0;
 
 const LOG_FILE = path.join(app.getPath('userData'), 'server.log');
 function appendLog(line) {
-  try { fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`); } catch {}
+  try { fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`); } catch { /* the GUI must never crash over its own log */ }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -36,15 +36,15 @@ function ensureRuntime() {
   // signature = app version + runtime zip identity, so a rebuilt installer with the
   // same version still re-extracts (the old version-only stamp skipped stale runtimes)
   let sig = app.getVersion();
-  try { const st = fs.statSync(runtimeZip); sig += `|${st.size}|${Math.floor(st.mtimeMs)}`; } catch {}
+  try { const st = fs.statSync(runtimeZip); sig += `|${st.size}|${Math.floor(st.mtimeMs)}`; } catch { /* missing zip: keep the version-only signature */ }
   const valid = fs.existsSync(path.join(appRoot, 'server.mjs')) && fs.existsSync(stamp) && fs.readFileSync(stamp, 'utf8').trim() === sig;
   if (valid) return Promise.resolve();
-  try { fs.rmSync(appRoot, { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(appRoot, { recursive: true, force: true }); } catch { /* already gone is fine */ }
   fs.mkdirSync(appRoot, { recursive: true });
   return new Promise((resolve, reject) => {
     const p = spawn(path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe'), ['-xf', runtimeZip, '-C', appRoot], { windowsHide: true });
     p.on('exit', (code) => {
-      if (code === 0) { try { fs.writeFileSync(stamp, sig); } catch {} resolve(); }
+      if (code === 0) { try { fs.writeFileSync(stamp, sig); } catch { /* stamp failure only costs a re-extract next boot */ } resolve(); }
       else reject(new Error('runtime extract failed: ' + code));
     });
     p.on('error', reject);
@@ -109,8 +109,8 @@ async function startServer() {
 function killServer() {
   if (!serverChild) return;
   const pid = serverChild.pid;
-  try { exec(`taskkill /pid ${pid} /T /F`); } catch {}
-  try { serverChild.kill(); } catch {}
+  try { exec(`taskkill /pid ${pid} /T /F`); } catch { /* pid may already be gone */ }
+  try { serverChild.kill(); } catch { /* teardown is best-effort */ }
   serverChild = null;
 }
 

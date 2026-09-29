@@ -79,9 +79,9 @@ test.before(async () => {
 });
 
 test.after(() => {
-  if (child) { try { child.kill(); } catch {} }
+  if (child) { try { child.kill(); } catch { /* already exited */ } }
   for (const dir of [tmpHome, tmpProj]) {
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows may still hold a handle */ }
   }
 });
 
@@ -119,7 +119,7 @@ test('ws upgrade without token is destroyed', async () => {
     s.on('data', (d) => { resolve(d.toString().includes('101')); s.destroy(); });
     s.on('error', () => resolve(false));
     s.on('connect', () => s.write(reqText));
-    setTimeout(() => { try { s.destroy(); } catch {} resolve(false); }, 3000);
+    setTimeout(() => { try { s.destroy(); } catch { /* socket may be gone */ } resolve(false); }, 3000);
   });
   assert.equal(upgraded, false, 'bare ws upgrade must not complete');
 });

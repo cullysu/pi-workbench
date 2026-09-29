@@ -115,9 +115,9 @@ const LOG_FILE = path.join(CFG_DIR, 'server.log');
 function logErr(line) {
   try {
     fs.mkdirSync(CFG_DIR, { recursive: true });
-    try { if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, ''); } catch {}
+    try { if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, ''); } catch { /* rotation is best-effort */ }
     fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
-  } catch {}
+  } catch { /* never let the error logger itself throw */ }
 }
 process.on('uncaughtException', (e) => logErr('uncaughtException: ' + ((e && e.stack) || e)));
 process.on('unhandledRejection', (e) => logErr('unhandledRejection: ' + ((e && e.stack) || e)));
@@ -161,7 +161,7 @@ function saveRouting(r) {
   return r;
 }
 const failover = createFailover({ SECRET_ENV, readJson, saveJson, logErr, loadRouting, saveRouting });
-const { splitModel, keyEnvsFor, hasLiteralKey, keyValue, providerHasKey, pickKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
+const { splitModel, keyEnvsFor, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
 
 async function probeModel(modelId) {
   const [prov] = splitModel(modelId);
@@ -280,7 +280,7 @@ function sendToPi(tabId, cmd) {
 const wss = new WebSocketServer({ noServer: true });
 function broadcast(obj) {
   const s = JSON.stringify(obj);
-  for (const c of wss.clients) { try { c.send(s); } catch {} }
+  for (const c of wss.clients) { try { c.send(s); } catch { /* dead or closing socket just drops this frame */ } }
 }
 
 wss.on('connection', (ws) => {
@@ -309,8 +309,8 @@ wss.on('connection', (ws) => {
 function closeTab(tabId) {
   const tab = tabs.get(tabId);
   if (tab) {
-    try { tab.proc.stdin.write(JSON.stringify({ type: 'abort' }) + '\n'); } catch {}
-    try { tab.proc.kill(); } catch {}
+    try { tab.proc.stdin.write(JSON.stringify({ type: 'abort' }) + '\n'); } catch { /* child may already be gone */ }
+    try { tab.proc.kill(); } catch { /* abort is best-effort */ }
     tabs.delete(tabId);
   }
 }
@@ -347,11 +347,11 @@ const GROK_DIR = path.join(HOME, '.grok');
 const PI_SKILLS = path.join(HOME, '.pi', 'agent', 'skills');
 const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
 const kb = createKbSkills({ MODEL_KB, MODEL_META_FILE, CFG_DIR, PI_MODELS, PI_SKILLS, AGENTS_SKILLS, readJson, loadConfig, fs, path });
-const { kbLookup, kbPrice, loadModelMeta, saveModelMeta, parseFrontmatter, loadSkillFile, walkSkillDir, listSkills, skillArgsFor } = kb;
-const sources = createSources({ PI_SESSIONS, CODEX_SESSIONS, CLAUDE_PROJECTS, OMP_SESSIONS, GROK_DIR, HOME, readJson, logErr, DatabaseSync, kbPrice, loadConfig });
-const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, codexSessionInfo, claudeSessionInfo, claudeSessionRead, listJsonFiles, firstLines } = sources;
-const bt = createBackupTerminal({ CFG_DIR, HOME, PI_SESSIONS, IMPORT_SOURCES, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, listSkills, copyIfExists, createZip, readZip, logErr, spawn, SECRET_ENV, fs, path });
-const { exportBackupZip, importBackupZip, countFiles, migrateScan, openExternalTerm, execInCwd } = bt;
+const { kbLookup, kbPrice, loadModelMeta, saveModelMeta, listSkills, skillArgsFor } = kb;
+const sources = createSources({ PI_SESSIONS, CODEX_SESSIONS, CLAUDE_PROJECTS, OMP_SESSIONS, GROK_DIR, HOME, DatabaseSync, kbPrice, loadConfig });
+const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, listJsonFiles } = sources;
+const bt = createBackupTerminal({ CFG_DIR, HOME, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, listSkills, copyIfExists, createZip, readZip, spawn, fs, path });
+const { exportBackupZip, importBackupZip, migrateScan, openExternalTerm, execInCwd } = bt;
 
 function copyIfExists(src, dest) {
   try {
@@ -408,7 +408,7 @@ const server = http.createServer(async (req, res) => {
       // node.exe + 参数数组 + shell:false = CreateProcess 直启，无命令注入面
       const child = spawn(process.execPath, [jsPath, ...args], {cwd: cwd || '.', shell: false, windowsHide: true});
       let out = '', err = '';
-      const kill = setTimeout(() => { try { child.kill(); } catch {} }, 600000);
+      const kill = setTimeout(() => { try { child.kill(); } catch { /* exited on its own already */ } }, 600000);
       child.stdout.on('data', (c) => { out += c; if (out.length > 2e6) out = out.slice(-1e6); });
       child.stderr.on('data', (c) => { err += c; if (err.length > 2e5) err = err.slice(-1e5); });
       child.on('error', (e) => { clearTimeout(kill); return json(res, 500, {error: String(e)}); });
@@ -484,14 +484,14 @@ const server = http.createServer(async (req, res) => {
       // short-lived rpc to enumerate models (uses pi's own catalog + models.json)
       const proc = spawn(process.execPath, [PI_CLI, '--mode', 'rpc', '--no-session'], { cwd: HOME, env: { ...process.env, ...SECRET_ENV }, windowsHide: true });
       const result = await new Promise((resolve) => {
-        let buf = ''; const to = setTimeout(() => { try { proc.kill(); } catch {} resolve({ models: [] }); }, 20000);
+        let buf = ''; const to = setTimeout(() => { try { proc.kill(); } catch { /* exited already */ } resolve({ models: [] }); }, 20000);
         proc.stdout.on('data', (c) => {
           buf += c.toString('utf8');
           let i;
           while ((i = buf.indexOf('\n')) !== -1) {
             const line = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
             let ev; try { ev = JSON.parse(line); } catch { continue; }
-            if (ev.type === 'response' && ev.command === 'get_available_models') { clearTimeout(to); try { proc.kill(); } catch {}; resolve(ev.data || { models: [] }); }
+            if (ev.type === 'response' && ev.command === 'get_available_models') { clearTimeout(to); try { proc.kill(); } catch { /* exited already */ }; resolve(ev.data || { models: [] }); }
           }
         });
         proc.on('error', () => { clearTimeout(to); resolve({ models: [] }); });
@@ -674,7 +674,7 @@ const server = http.createServer(async (req, res) => {
           const full = path.join(dir, f);
           return { file: f, size: fs.statSync(full).size, mtime: fs.statSync(full).mtimeMs };
         });
-      } catch {}
+      } catch { /* job has no runs yet */ }
       return json(res, 200, { runs });
     }
     if (p === '/api/cron/lastlog' && req.method === 'POST') {
@@ -688,7 +688,7 @@ const server = http.createServer(async (req, res) => {
           const m = fs.statSync(full).mtimeMs;
           if (m > mtime) { mtime = m; latest = full; }
         }
-      } catch {}
+      } catch { /* job never ran; latest stays null */ }
       if (!latest) return json(res, 200, { content: '(no runs yet)' });
       return json(res, 200, { content: fs.readFileSync(latest, 'utf8').slice(-4000), file: latest });
     }
@@ -749,7 +749,7 @@ const server = http.createServer(async (req, res) => {
       const items = entries.filter((e) => !skip.has(e.name)).map((e) => {
         let size = 0, mtime = 0;
         let isDir = e.isDirectory();
-        try { const st = fs.statSync(path.join(base, e.name)); size = st.size; mtime = st.mtimeMs; } catch {}
+        try { const st = fs.statSync(path.join(base, e.name)); size = st.size; mtime = st.mtimeMs; } catch { /* file vanished mid-scan; serve the rest */ }
         return { name: e.name, dir: isDir, size, mtime };
       });
       items.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name));
@@ -854,7 +854,7 @@ const server = http.createServer(async (req, res) => {
       if (q) dirs.push([path.join(q, '.pi', 'prompts'), 'project']);
       for (const [dir, source] of dirs) {
         let ents = [];
-        try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch {}
+        try { ents = fs.readdirSync(dir, { withFileTypes: true }); } catch { /* dir absent: nothing discovered */ }
         for (const e of ents) {
           if (!e.isFile() || !e.name.toLowerCase().endsWith('.md')) continue;
           const full = path.join(dir, e.name);

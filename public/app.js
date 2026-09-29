@@ -91,14 +91,6 @@ function cleanTitle(raw, limit = 60) {
   s = s.trim() || '无标题会话';
   return s.length > limit ? s.slice(0, limit) + '…' : s;
 }
-function greeting() {
-  const h = new Date().getHours();
-  if (h < 6) return '夜深啦，别忘了照顾好自己哦';
-  if (h < 11) return '早上好，新的一天开始啦';
-  if (h < 13) return '中午好，休息一下吧';
-  if (h < 18) return '下午好，继续加油';
-  return '晚上好，今天过得怎么样';
-}
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function mdRender(text) {
   try {
@@ -124,7 +116,7 @@ function apiHeaders() { return Object.assign({ 'content-type': 'application/json
 // stale page (token from a previous boot) → every call 403s; reload once to pick up the fresh token
 function apiOn403(r) {
   if (r.status === 403 && !sessionStorage.getItem('pw403')) {
-    try { sessionStorage.setItem('pw403', '1'); } catch {}
+    try { sessionStorage.setItem('pw403', '1'); } catch { /* private mode may block storage */ }
     location.reload();
   }
   return r;
@@ -704,7 +696,7 @@ async function loadTodayStats() {
     const sbt = document.querySelector('#sb-today');
     if (sbt) sbt.textContent = `今日 ${fmtTok(tot)}`;
     renderTodayPop(d);
-  } catch {}
+  } catch { /* usage widget is decorative; stay silent on failure */ }
 }
 (function bindTodayPop() {
   const wrap = $('#today-wrap');
@@ -1425,7 +1417,7 @@ function renderCurrentCfg() {
       state.cfg.defaultModel = key;
       state.selModel = key;
       updateModelChip();
-      try { rpcTo({ type: 'set_model', provider: name, modelId: mid }); } catch {}
+      try { rpcTo({ type: 'set_model', provider: name, modelId: mid }); } catch { /* socket may be closed mid-edit */ }
       renderCurrentCfg();
       if (state.editProv === name) renderProvModels(state.modelsDoc.providers[name] || {});
     };
@@ -2018,7 +2010,7 @@ async function loadCron() {
         [...new Set(av.map((m) => m.provider + '/' + m.id))].map((k) => `<option value="${k}">${k}</option>`).join('');
       sel.value = cur;
     }
-  } catch {}
+  } catch { /* leave the select on its default if models fail to load */ }
   renderCronJobs();
 }
 function renderCronJobs() {

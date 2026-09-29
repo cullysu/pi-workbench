@@ -33,11 +33,11 @@ function readLines(file, hotSubstr) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1);
         if (!line.trim()) continue;
         if (hotSubstr && !line.includes(hotSubstr)) continue;
-        try { out.push(JSON.parse(line)); } catch {}
+        try { out.push(JSON.parse(line)); } catch { /* skip torn/non-JSON lines */ }
         if (out.length > 200000) return out;
       }
     }
-    if (buf.trim()) { try { out.push(JSON.parse(buf)); } catch {} }
+    if (buf.trim()) { try { out.push(JSON.parse(buf)); } catch { /* partial trailing line */ } }
   } finally { fs.closeSync(fd); }
   return out;
 }

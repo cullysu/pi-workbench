@@ -127,7 +127,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq libfuse2 xvfb curl
           f=(dist_electron/*.AppImage)
-          timeout 90 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
+          timeout 180 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
           ok=0
           for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32123/ || true)

@@ -256,12 +256,14 @@ if (!gotLock) {
   console.log('[main] requesting single-instance lock + whenReady');
   app.whenReady().then(async () => {
     console.log('[main] whenReady fired');
+    console.log('[main] calling ensureRuntime');
     try { await ensureRuntime(); } catch (e) {
       appendLog('FATAL ensureRuntime: ' + e.message);
       dialog.showErrorBox('Pi Workbench', '运行时解压失败：' + e.message);
       app.quit();
       return;
     }
+    console.log('[main] ensureRuntime done');
     try { await startServer(); } catch (e) {
       appendLog('FATAL startServer: ' + e.message);
       dialog.showErrorBox('Pi Workbench', '本地服务启动失败：' + e.message);

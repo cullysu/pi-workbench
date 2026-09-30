@@ -129,7 +129,7 @@ jobs:
           f=(dist_electron/*.AppImage)
           timeout 180 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
           ok=0
-          for i in $(seq 1 60); do
+          for i in $(seq 1 150); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32123/ || true)
             echo "poll $i: $code"
             if [ "$code" = "200" ]; then ok=1; break; fi

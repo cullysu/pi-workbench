@@ -126,7 +126,14 @@ jobs:
       - name: Boot test - shipped AppImage must serve the panel
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq libfuse2 xvfb curl
+          echo '--- extraction tools available:'
+          for t in unzip bsdtar python3; do command -v "$t" >/dev/null 2>&1 && echo "$t: yes" || echo "$t: NO"; done
           f=(dist_electron/*.AppImage)
+          chmod +x "${f[0]}"
+          "${f[0]}" --appimage-extract > /dev/null 2>&1 || true
+          RZ=squashfs-root/resources/runtime.zip
+          ls -la "$RZ" || true
+          if [ -f "$RZ" ]; then rm -rf /tmp/rzprobe; unzip -o "$RZ" -d /tmp/rzprobe > /tmp/unzip-probe.log 2>&1; echo "unzip exit: $?"; tail -5 /tmp/unzip-probe.log; fi
           timeout 180 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
           ok=0
           for i in $(seq 1 150); do

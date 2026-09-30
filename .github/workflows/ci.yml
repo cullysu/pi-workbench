@@ -146,6 +146,8 @@ jobs:
             ls -la "$HOME/.config/Pi Workbench/runtime" 2>/dev/null | head -8 || echo '(no runtime dir)'
             echo '--- node locations:'
             ls -la /usr/bin/node /usr/local/bin/node 2>/dev/null | head -4 || true
+            echo '--- disk space:'
+            df -h /home /tmp || true
             echo '--- full app.log (first 120 lines):'
             head -120 /tmp/app.log
             exit 1

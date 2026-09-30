@@ -71,9 +71,12 @@ function ensureRuntime() {
     const exe = IS_WIN ? path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : 'unzip';
     const args = IS_WIN ? ['-xf', runtimeZip, '-C', appRoot] : ['-o', runtimeZip, '-d', appRoot];
     const p = spawn(exe, args, { windowsHide: true });
+    let extractErr = '';
+    p.stderr.setEncoding('utf8');
+    p.stderr.on('data', (c) => { extractErr += c; });
     p.on('exit', (code) => {
       if (code === 0) { try { fs.writeFileSync(stamp, sig); } catch { /* stamp failure only costs a re-extract next boot */ } resolve(); }
-      else reject(new Error('runtime extract failed: ' + code));
+      else reject(new Error('runtime extract failed: ' + code + ' stderr: ' + extractErr.slice(0, 400)));
     });
     p.on('error', (err) => reject(new Error(IS_WIN ? 'tar.exe failed: ' + err.message : 'unzip not found (install unzip): ' + err.message)));
   });

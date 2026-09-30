@@ -88,7 +88,7 @@ function cjsReadZip(buf) {
     ptr += 46 + nameLen + extraLen + commentLen;
   }
   return out;
-
+}
 // First boot / upgrade: extract the bundled runtime zip (Windows tar.exe, fast).
 // Version stamp decides whether a re-extract is needed; user data lives elsewhere.
 function ensureRuntime() {

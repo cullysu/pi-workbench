@@ -66,10 +66,13 @@ jobs:
           Copy-Item electron-main.cjs pkg-build/electron-main.cjs
           Copy-Item lib pkg-build/lib -Recurse -Force
           Copy-Item data pkg-build/data -Recurse -Force
+          Copy-Item ledger.mjs pkg-build/ledger.mjs
           Copy-Item extensions pkg-build/extensions -Recurse -Force
           robocopy public pkg-build/public /E /NFL /NDL /NJH /NJS /NP
           if ($LASTEXITCODE -ge 8) { exit 1 }
           node scripts/make-runtime.mjs
+      - name: Runtime import self-check
+        run: node scripts/check-runtime.mjs
       - name: Build NSIS installer
         run: npx electron-builder --win nsis --x64 --publish never
         env:
@@ -107,13 +110,15 @@ jobs:
       - name: Assemble runtime (pi + server + public)
         run: |
           npm install --prefix pkg-build @earendil-works/pi-coding-agent@0.85.0 ws@8.21.3 --omit=dev --no-fund --no-audit
-          cp server.mjs zip.mjs electron-main.cjs pkg-build/
+          cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib
           cp -r data pkg-build/data
           cp -r extensions pkg-build/extensions
           mkdir -p pkg-build/public
           cp -r public/. pkg-build/public/
           node scripts/make-runtime.mjs
+      - name: Runtime import self-check
+        run: node scripts/check-runtime.mjs
       - name: Build Linux AppImage
         run: npx electron-builder --linux AppImage --x64 --publish never
       - name: Smoke test AppImage structure
@@ -182,13 +187,15 @@ jobs:
       - name: Assemble runtime (pi + server + public)
         run: |
           npm install --prefix pkg-build @earendil-works/pi-coding-agent@0.85.0 ws@8.21.3 --omit=dev --no-fund --no-audit
-          cp server.mjs zip.mjs electron-main.cjs pkg-build/
+          cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib
           cp -r data pkg-build/data
           cp -r extensions pkg-build/extensions
           mkdir -p pkg-build/public
           cp -r public/. pkg-build/public/
           node scripts/make-runtime.mjs
+      - name: Runtime import self-check
+        run: node scripts/check-runtime.mjs
       - name: Build macOS dmg (arm64 + x64)
         run: npx electron-builder --mac dmg --arm64 --x64 --publish never
         env:

@@ -119,6 +119,20 @@ jobs:
           "${f[0]}" --appimage-extract > /dev/null
           test -x squashfs-root/AppRun
           echo 'AppImage structure verified (AppRun executable)'
+      - name: Boot test - shipped AppImage must serve the panel
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libfuse2 xvfb curl
+          f=(dist_electron/*.AppImage)
+          timeout 90 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
+          ok=0
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32123/ || true)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 1
+          done
+          pkill -f appimage-extract-and-run 2>/dev/null || true
+          if [ "$ok" != "1" ]; then echo 'BOOT FAILED - panel never answered 200'; tail -20 /tmp/app.log; exit 1; fi
+          echo 'BOOT VERIFIED: the shipped AppImage served the panel (HTTP 200)'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
@@ -146,8 +160,8 @@ jobs:
           mkdir -p pkg-build/public
           cp -r public/. pkg-build/public/
           node scripts/make-runtime.mjs
-      - name: Build macOS dmg
-        run: npx electron-builder --mac dmg --publish never
+      - name: Build macOS dmg (arm64 + x64)
+        run: npx electron-builder --mac dmg --arm64 --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - uses: actions/upload-artifact@v4

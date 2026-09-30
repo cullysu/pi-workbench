@@ -112,8 +112,46 @@ jobs:
           node scripts/make-runtime.mjs
       - name: Build Linux AppImage
         run: npx electron-builder --linux AppImage --x64 --publish never
+      - name: Smoke test AppImage structure
+        run: |
+          f=(dist_electron/*.AppImage)
+          chmod +x "${f[0]}"
+          "${f[0]}" --appimage-extract > /dev/null
+          test -x squashfs-root/AppRun
+          echo 'AppImage structure verified (AppRun executable)'
       - uses: actions/upload-artifact@v4
         with:
           name: linux-appimage
           path: dist_electron/*.AppImage
+          retention-days: 7
+
+  build-mac:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install build deps
+        run: |
+          npm ci
+          node node_modules/electron/install.js
+      - name: Assemble runtime (pi + server + public)
+        run: |
+          npm install --prefix pkg-build @earendil-works/pi-coding-agent@0.85.0 ws@8.21.3 --omit=dev --no-fund --no-audit
+          cp server.mjs zip.mjs electron-main.cjs pkg-build/
+          cp -r extensions pkg-build/extensions
+          mkdir -p pkg-build/public
+          cp -r public/. pkg-build/public/
+          node scripts/make-runtime.mjs
+      - name: Build macOS dmg
+        run: npx electron-builder --mac dmg --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg
+          path: dist_electron/*.dmg
           retention-days: 7

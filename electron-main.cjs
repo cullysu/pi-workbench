@@ -66,20 +66,22 @@ function ensureRuntime() {
     throw new Error('旧运行时清理失败（可能有文件被占用）: ' + err.message);
   }
   fs.mkdirSync(appRoot, { recursive: true });
-  return new Promise((resolve, reject) => {
-    // Windows ships bsdtar as tar.exe (reads zip); GNU tar elsewhere cannot — use unzip
-    const exe = IS_WIN ? path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : 'unzip';
-    const args = IS_WIN ? ['-xf', runtimeZip, '-C', appRoot] : ['-o', runtimeZip, '-d', appRoot];
-    const p = spawn(exe, args, { windowsHide: true });
-    let extractErr = '';
-    p.stderr.setEncoding('utf8');
-    p.stderr.on('data', (c) => { extractErr += c; });
-    p.on('exit', (code) => {
-      if (code === 0) { try { fs.writeFileSync(stamp, sig); } catch { /* stamp failure only costs a re-extract next boot */ } resolve(); }
-      else reject(new Error('runtime extract failed: ' + code + ' stderr: ' + extractErr.slice(0, 400)));
-    });
-    p.on('error', (err) => reject(new Error(IS_WIN ? 'tar.exe failed: ' + err.message : 'unzip not found (install unzip): ' + err.message)));
-  });
+  // Extract with our own zip reader — no PATH dependence at all. This used to shell
+  // out to tar.exe/unzip, which broke inside AppImages: AppRun prepends APPDIR/usr/bin
+  // to PATH, so the spawned `unzip` resolved to something inside the AppImage and
+  // exited 80 with no output. readZip is the same primitive the backup feature uses.
+  return (async () => {
+    const { readZip } = await import(path.join(__dirname, 'zip.mjs'));
+    const entries = readZip(fs.readFileSync(runtimeZip));
+    for (const entry of entries) {
+      const rel = entry.name.split('/').join(path.sep);
+      const dest = path.join(appRoot, rel);
+      if (!path.resolve(dest).startsWith(path.resolve(appRoot) + path.sep)) throw new Error('zip-slip blocked: ' + entry.name);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, entry.data);
+    }
+    try { fs.writeFileSync(stamp, sig); } catch { /* stamp failure only costs a re-extract next boot */ }
+  })();
 }
 
 function portOpen(port) {

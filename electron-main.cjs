@@ -45,6 +45,50 @@ const nodeExe = NODE_CANDIDATES.find((p) => { try { return fs.existsSync(p); } c
   })();
 const serverJs = path.join(appRoot, 'server.mjs');
 
+// Minimal zip reader (same format as zip.mjs): EOCD scan + central directory +
+// inflateRaw. Inlined because the packaged app must never depend on a file
+// outside its own entry for boot-critical work.
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c; }
+  return t;
+})();
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+function cjsReadZip(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd === -1) throw new Error('not a zip (no EOCD)');
+  const count = buf.readUInt16LE(eocd + 10);
+  let ptr = buf.readUInt32LE(eocd + 16);
+  const out = [];
+  for (let n = 0; n < count; n++) {
+    if (buf.readUInt32LE(ptr) !== 0x02014b50) throw new Error('bad central directory');
+    const method = buf.readUInt16LE(ptr + 10);
+    const csize = buf.readUInt32LE(ptr + 20);
+    const crc = buf.readUInt32LE(ptr + 16);
+    const nameLen = buf.readUInt16LE(ptr + 28);
+    const extraLen = buf.readUInt16LE(ptr + 30);
+    const commentLen = buf.readUInt16LE(ptr + 32);
+    const localOffset = buf.readUInt32LE(ptr + 42);
+    const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen);
+    const l = localOffset;
+    const lNameLen = buf.readUInt16LE(l + 26);
+    const lExtraLen = buf.readUInt16LE(l + 28);
+    const dataStart = l + 30 + lNameLen + lExtraLen;
+    const payload = buf.subarray(dataStart, dataStart + csize);
+    const data = method === 0 ? Buffer.from(payload) : require('zlib').inflateRawSync(payload);
+    if (crc32(data) !== crc) throw new Error('crc mismatch for ' + name);
+    out.push({ name, data });
+    ptr += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+
 // First boot / upgrade: extract the bundled runtime zip (Windows tar.exe, fast).
 // Version stamp decides whether a re-extract is needed; user data lives elsewhere.
 function ensureRuntime() {
@@ -71,8 +115,7 @@ function ensureRuntime() {
   // to PATH, so the spawned `unzip` resolved to something inside the AppImage and
   // exited 80 with no output. readZip is the same primitive the backup feature uses.
   return (async () => {
-    const { readZip } = await import(path.join(__dirname, 'zip.mjs'));
-    const entries = readZip(fs.readFileSync(runtimeZip));
+    const entries = cjsReadZip(fs.readFileSync(runtimeZip));
     for (const entry of entries) {
       const rel = entry.name.split('/').join(path.sep);
       const dest = path.join(appRoot, rel);

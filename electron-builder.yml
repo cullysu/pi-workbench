@@ -18,6 +18,7 @@ linux:
   target:
     - AppImage
   category: Development
+  icon: tauri/icons/icon.png
   artifactName: PiWorkbench-${version}-linux.${ext}
 win:
   target:

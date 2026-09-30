@@ -1,5 +1,9 @@
 appId: com.cullysu.piworkbench
 productName: Pi Workbench
+# asar off: electron-main dynamically imports zip.mjs at runtime, and Node's ESM
+# loader cannot resolve modules inside an asar archive. The app carries its own
+# runtime.zip anyway - an unpacked app/ directory costs nothing here.
+asar: false
 copyright: Copyright © 2026 cullysu
 directories:
   output: dist_electron

@@ -127,11 +127,19 @@ jobs:
           ok=0
           for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32123/ || true)
+            echo "poll $i: $code"
             if [ "$code" = "200" ]; then ok=1; break; fi
             sleep 1
           done
           pkill -f appimage-extract-and-run 2>/dev/null || true
-          if [ "$ok" != "1" ]; then echo 'BOOT FAILED - panel never answered 200'; tail -20 /tmp/app.log; exit 1; fi
+          if [ "$ok" != "1" ]; then
+            echo 'BOOT FAILED - panel never answered 200'
+            echo '--- node/electron processes still alive:'
+            ps aux | grep -E 'node|electron|appimage' | grep -v grep || echo '(none)'
+            echo '--- full app.log:'
+            cat /tmp/app.log
+            exit 1
+          fi
           echo 'BOOT VERIFIED: the shipped AppImage served the panel (HTTP 200)'
       - uses: actions/upload-artifact@v4
         with:

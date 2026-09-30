@@ -22,14 +22,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const appRoot = app.isPackaged ? path.join(app.getPath('userData'), 'runtime') : path.join(__dirname, 'pkg-build');
 const runtimeZip = app.isPackaged ? path.join(process.resourcesPath, 'runtime.zip') : null;
-const NODE_CANDIDATES = [
+const IS_WIN = process.platform === 'win32';
+const NODE_CANDIDATES = IS_WIN ? [
   path.join(appRoot, 'node.exe'),
   'C:\\Program Files\\nodejs\\node.exe',
   'C:\\Program Files (x86)\\nodejs\\node.exe',
+] : [
+  path.join(appRoot, 'node'),
+  '/usr/bin/node',
+  '/usr/local/bin/node',
+  '/opt/homebrew/bin/node',
 ];
 const nodeExe = NODE_CANDIDATES.find((p) => { try { return fs.existsSync(p); } catch { return false; } })
-  || (() => { // nvm/scoop/volta/per-user installs: resolve node from PATH as a last resort
-    try { return require('child_process').execSync('where node.exe', { encoding: 'utf8', timeout: 5000 }).split(/\r?\n/)[0].trim(); } catch { return null; }
+  || (() => { // version managers / per-user installs: resolve node from PATH as a last resort
+    try { return require('child_process').execSync(IS_WIN ? 'where node.exe' : 'sh -c "command -v node"', { encoding: 'utf8', timeout: 5000 }).split(/\r?\n/)[0].trim(); } catch { return null; }
   })();
 const serverJs = path.join(appRoot, 'server.mjs');
 
@@ -54,12 +60,15 @@ function ensureRuntime() {
   }
   fs.mkdirSync(appRoot, { recursive: true });
   return new Promise((resolve, reject) => {
-    const p = spawn(path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe'), ['-xf', runtimeZip, '-C', appRoot], { windowsHide: true });
+    // Windows ships bsdtar as tar.exe (reads zip); GNU tar elsewhere cannot — use unzip
+    const exe = IS_WIN ? path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe') : 'unzip';
+    const args = IS_WIN ? ['-xf', runtimeZip, '-C', appRoot] : ['-o', runtimeZip, '-d', appRoot];
+    const p = spawn(exe, args, { windowsHide: true });
     p.on('exit', (code) => {
       if (code === 0) { try { fs.writeFileSync(stamp, sig); } catch { /* stamp failure only costs a re-extract next boot */ } resolve(); }
       else reject(new Error('runtime extract failed: ' + code));
     });
-    p.on('error', reject);
+    p.on('error', (err) => reject(new Error(IS_WIN ? 'tar.exe failed: ' + err.message : 'unzip not found (install unzip): ' + err.message)));
   });
 }
 
@@ -115,6 +124,7 @@ async function startServer() {
   serverChild = spawn(nodeExe, [serverJs], {
     cwd: appRoot,
     windowsHide: true,
+    detached: !IS_WIN, // own process group on POSIX so killServer can signal the whole tree
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, PIWB_PARENT_PID: String(process.pid) },
   });
@@ -148,7 +158,12 @@ function killServer() {
   if (!serverChild) return;
   if (serverChild.exitCode !== null || serverChild.signalCode) { serverChild = null; return; } // already dead — never force-kill a possibly recycled pid
   const pid = serverChild.pid;
-  try { exec(`taskkill /pid ${pid} /T /F`); } catch { /* pid may already be gone */ }
+  if (IS_WIN) {
+    try { exec(`taskkill /pid ${pid} /T /F`); } catch { /* pid may already be gone */ }
+  } else {
+    // the server was spawned detached with its own process group — one signal takes down the whole tree, pi grandchildren included
+    try { process.kill(-pid, 'SIGTERM'); } catch { /* group may already be gone */ }
+  }
   try { serverChild.kill(); } catch { /* teardown is best-effort */ }
   serverChild = null;
 }

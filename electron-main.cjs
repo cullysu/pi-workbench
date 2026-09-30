@@ -20,6 +20,7 @@ function appendLog(line) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+console.log('[main] booted, electron', process.versions.electron, 'platform', process.platform);
 const appRoot = app.isPackaged ? path.join(app.getPath('userData'), 'runtime') : path.join(__dirname, 'pkg-build');
 const runtimeZip = app.isPackaged ? path.join(process.resourcesPath, 'runtime.zip') : null;
 const IS_WIN = process.platform === 'win32';
@@ -244,7 +245,9 @@ if (!gotLock) {
     }
   });
 
+  console.log('[main] requesting single-instance lock + whenReady');
   app.whenReady().then(async () => {
+    console.log('[main] whenReady fired');
     try { await ensureRuntime(); } catch (e) {
       appendLog('FATAL ensureRuntime: ' + e.message);
       dialog.showErrorBox('Pi Workbench', '运行时解压失败：' + e.message);
@@ -257,6 +260,7 @@ if (!gotLock) {
       app.quit();
       return;
     }
+    console.log('[main] server spawned, waiting port', PORT);
     const ok = await waitPort(PORT, 30000);
     if (!ok) {
       appendLog('FATAL waitPort timeout — server never listened on ' + PORT);
@@ -264,6 +268,7 @@ if (!gotLock) {
       app.quit();
       return;
     }
+    console.log('[main] port open, creating window');
     createWindow();
   });
 

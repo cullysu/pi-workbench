@@ -136,8 +136,14 @@ jobs:
             echo 'BOOT FAILED - panel never answered 200'
             echo '--- node/electron processes still alive:'
             ps aux | grep -E 'node|electron|appimage' | grep -v grep || echo '(none)'
-            echo '--- full app.log:'
-            cat /tmp/app.log
+            echo '--- electron server.log (appendLog forensics):'
+            cat "$HOME/.config/Pi Workbench/server.log" 2>/dev/null || echo '(no server.log)'
+            echo '--- runtime dir:'
+            ls -la "$HOME/.config/Pi Workbench/runtime" 2>/dev/null | head -8 || echo '(no runtime dir)'
+            echo '--- node locations:'
+            ls -la /usr/bin/node /usr/local/bin/node 2>/dev/null | head -4 || true
+            echo '--- full app.log (first 120 lines):'
+            head -120 /tmp/app.log
             exit 1
           fi
           echo 'BOOT VERIFIED: the shipped AppImage served the panel (HTTP 200)'

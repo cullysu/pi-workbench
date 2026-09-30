@@ -56,6 +56,7 @@ function ensureRuntime() {
     // force only forgives ENOENT — EBUSY/EPERM (AV scan, an Explorer window, a
     // lingering node whose parent-watchdog hasn't fired yet) must abort here, or
     // tar extracts over a half-removed tree and the stamp certifies the mix as fresh
+    appendLog('ensureRuntime rm failed: ' + err.message);
     throw new Error('旧运行时清理失败（可能有文件被占用）: ' + err.message);
   }
   fs.mkdirSync(appRoot, { recursive: true });
@@ -119,7 +120,10 @@ async function startServer() {
     throw new Error('端口 ' + PORT + ' 已被其它程序占用');
   }
   if (!nodeExe || !fs.existsSync(serverJs)) {
-    throw new Error('找不到 node 或 server.mjs');
+    // diagnostics for headless CI boot failures: which candidates were checked
+    const seen = NODE_CANDIDATES.map((cand) => cand + '=' + (() => { try { return fs.existsSync(cand); } catch { return 'ERR'; } })()).join(', ');
+    appendLog('startServer: nodeExe=' + String(nodeExe) + ' serverJs=' + serverJs + ' exists=' + fs.existsSync(serverJs) + ' candidates: ' + seen);
+    throw new Error('找不到 node 或 server.mjs (candidates: ' + seen + ')');
   }
   serverChild = spawn(nodeExe, [serverJs], {
     cwd: appRoot,
@@ -129,6 +133,7 @@ async function startServer() {
     env: { ...process.env, PIWB_PARENT_PID: String(process.pid) },
   });
   serverStartedAt = Date.now();
+  serverChild.on('error', (err) => appendLog('server spawn error: ' + err.message));
   serverChild.stdout.on('data', () => {});
   serverChild.stderr.on('data', (c) => appendLog('server stderr: ' + String(c).trim()));
   serverChild.on('exit', async (code) => {
@@ -214,9 +219,10 @@ function createWindow() {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  mainWindow.loadURL(`http://127.0.0.1:${PORT}`).catch(() => {
+  mainWindow.loadURL(`http://127.0.0.1:${PORT}`).catch((err) => {
     // the server can die between waitPort and this load — an unhandled rejection
     // here would bypass every friendly dialog above
+    appendLog('FATAL loadURL: ' + err.message);
     dialog.showErrorBox('Pi Workbench', '界面加载失败。请重新启动应用。');
     app.quit();
   });
@@ -240,17 +246,20 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     try { await ensureRuntime(); } catch (e) {
+      appendLog('FATAL ensureRuntime: ' + e.message);
       dialog.showErrorBox('Pi Workbench', '运行时解压失败：' + e.message);
       app.quit();
       return;
     }
     try { await startServer(); } catch (e) {
+      appendLog('FATAL startServer: ' + e.message);
       dialog.showErrorBox('Pi Workbench', '本地服务启动失败：' + e.message);
       app.quit();
       return;
     }
     const ok = await waitPort(PORT, 30000);
     if (!ok) {
+      appendLog('FATAL waitPort timeout — server never listened on ' + PORT);
       dialog.showErrorBox('Pi Workbench', '本地服务启动失败（127.0.0.1:32123 超时）。请重新启动应用。');
       app.quit();
       return;

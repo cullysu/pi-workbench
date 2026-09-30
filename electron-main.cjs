@@ -15,8 +15,13 @@ let serverStartedAt = 0;
 
 const LOG_FILE = path.join(app.getPath('userData'), 'server.log');
 function appendLog(line) {
-  try { if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, ''); } catch { /* rotation is best-effort */ }
-  try { fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`); } catch { /* the GUI must never crash over its own log */ }
+  try { console.log('[app] ' + line); } catch { /* stdout mirror so headless CI sees it in app.log */ }
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true }); // userData may not exist yet on a fresh/failed boot
+    if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, '');
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
+  } catch { /* the GUI must never crash over its own log — the console mirror above still survives */
+  }
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

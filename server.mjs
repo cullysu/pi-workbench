@@ -782,6 +782,7 @@ async function hKernel(req, res, u) {
       port: PORT,
       pi: piPkg.version || null,
       secrets: { relay: !!Object.keys(SECRET_ENV).length },
+      sqlite: !!DatabaseSync,
       paths: {
         config: CFG_FILE,
         routing: ROUTING_FILE,

@@ -37,7 +37,7 @@
 
 ## 安装
 
-从 [GitHub Releases](../../releases) 下载最新版安装包（文件名形如 `PiWorkbench-Setup-<版本>.exe`）：
+从 [GitHub Releases](../../releases) 下载最新版安装包（文件名形如 `PiWorkbench-Setup-<版本>.exe`）。桌面壳依赖本机 Node.js **≥ 22.13**（旧版 Node 仅 OpenCode 导入降级，其余功能正常；安装包不含 Node）：
 
 - 跟随系统语言（中文 / English），可选安装路径，桌面 + 开始菜单快捷方式
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`

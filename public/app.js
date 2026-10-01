@@ -2187,12 +2187,18 @@ $$('.rail-item[data-panel]').forEach((b) => {
     (PANEL_LOADERS[b.dataset.panel] || (() => {}))();
   };
 });
-$('#btn-backup-export').onclick = async () => {
-  $('#backup-status').textContent = '正在打包…';
-  const r = await api.post('/api/backup/export', {}).catch((e) => ({ error: e.message }));
-  if (r.error) { $('#backup-status').textContent = '失败：' + r.error; return; }
-  $('#backup-status').textContent = `已导出 ${r.path}（${Math.round((r.size || 0) / 1024)} KB）`;
+$('#btn-backup-export').onclick = () => {
+  modal('导出备份', '备份包含你的工作台配置与会话元数据。模型 API Key 会以明文写入备份文件（还原需要）——请勿上传网盘或直接发给别人。', [
+    { label: '导出（含密钥）', primary: true, cb: () => doBackupExport(false) },
+    { label: '导出（不含密钥，更安全）', cb: () => doBackupExport(true) },
+  ]);
 };
+async function doBackupExport(excludeKeys) {
+  $('#backup-status').textContent = '正在打包…';
+  const r = await api.post('/api/backup/export?excludeKeys=' + (excludeKeys ? '1' : '0'), {}).catch((e) => ({ error: e.message }));
+  if (r.error) { $('#backup-status').textContent = '失败：' + r.error; return; }
+  $('#backup-status').textContent = `已导出 ${r.path}（${Math.round((r.size || 0) / 1024)} KB）${excludeKeys ? '，不含密钥' : '，含明文密钥请妥善保管'}`;
+}
 $('#btn-backup-import').onclick = () => {
   modalWithInput('导入备份', '本地 zip 完整路径', '', async (val) => {
     if (!val) return;

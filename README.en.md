@@ -38,11 +38,11 @@ Download the installer for your platform from [Releases](../../releases) (1.1.3 
 | macOS (Apple Silicon) | `PiWorkbench-<version>-macOS-arm64.dmg` |
 | macOS (Intel) | `PiWorkbench-<version>-macOS-x64.dmg` |
 
-The desktop shells require system Node.js **≥ 22.13** (mirrored in `package.json` engines; older Node only degrades the OpenCode importer — everything else works; no bundled node.exe):
+The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; macOS x64 — Apple Silicon runs it via Rosetta), so **no system Node.js is needed**. `package.json` `engines >= 22.13` only constrains development from source:
 
 - Windows installers follow system language (Chinese/English), per-user install, desktop + start menu shortcuts
 - Upgrades keep config and sessions; uninstall leaves `~/.pi-workbench` and `~/.pi` untouched
-- First launch extracts the bundled runtime (uses system Node)
+- First launch extracts the bundled runtime (bundled Node + pi — works out of the box)
 
 ## Configuration
 

@@ -9,6 +9,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # bundled into every installer so users never need a system Node
+  NODE_BUNDLE_VERSION: v22.14.0
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -95,6 +99,7 @@ jobs:
           Copy-Item extensions pkg-build/extensions -Recurse -Force
           robocopy public pkg-build/public /E /NFL /NDL /NJH /NJS /NP
           if ($LASTEXITCODE -ge 8) { exit 1 }
+          Invoke-WebRequest -Uri "https://nodejs.org/dist/${{ env.NODE_BUNDLE_VERSION }}/win-x64/node.exe" -OutFile pkg-build/node.exe
           Set-Location pkg-build
           node ../scripts/write-manifest.mjs
           Set-Location ..
@@ -144,6 +149,10 @@ jobs:
           cp -r extensions pkg-build/extensions
           mkdir -p pkg-build/public
           cp -r public/. pkg-build/public/
+          curl -fsSL "https://nodejs.org/dist/${{ env.NODE_BUNDLE_VERSION }}/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64.tar.xz" -o /tmp/node.txz
+          tar -xJf /tmp/node.txz -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64/bin/node"
+          cp "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64/bin/node" pkg-build/node
+          chmod +x pkg-build/node
           cd pkg-build && node ../scripts/write-manifest.mjs && cd ..
           node scripts/make-runtime.mjs
       - name: Runtime import self-check
@@ -237,6 +246,10 @@ jobs:
           cp -r extensions pkg-build/extensions
           mkdir -p pkg-build/public
           cp -r public/. pkg-build/public/
+          curl -fsSL "https://nodejs.org/dist/${{ env.NODE_BUNDLE_VERSION }}/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64.tar.xz" -o /tmp/node.txz
+          tar -xJf /tmp/node.txz -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64/bin/node"
+          cp "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64/bin/node" pkg-build/node
+          chmod +x pkg-build/node
           cd pkg-build && node ../scripts/write-manifest.mjs && cd ..
           node scripts/make-runtime.mjs
       - name: Runtime import self-check

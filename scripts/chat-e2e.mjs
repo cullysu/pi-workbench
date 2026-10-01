@@ -209,14 +209,19 @@ try {
   console.log('stage: prompt sent — failA will 500, chain should step to okB');
 
   const deadline = Date.now() + 120000;
-  let replied = false, failedOver = false;
+  let replied = false, failedOver = false, sawStatusline = false;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 500));
     const st = await evaluate("({line: document.querySelector('#statusline')?.textContent || '', assistant: [...document.querySelectorAll('#timeline .msg.assistant .md')].map((m) => m.textContent)})", sid);
     if (st.assistant.some((t) => t.includes(REPLY))) replied = true;
-    if ((st.line || '').includes('路由切换') && (st.line || '').includes('okB/m2')) failedOver = true;
-    if (replied && failedOver) break;
+    // REPLY is okB's unique text and the default model is failA — seeing it means the
+    // workbench auto-stepped the chain. The statusline text lives only ~300ms before the
+    // resend flow overwrites it, so it is corroborating evidence, never required.
+    if ((st.line || '').includes('路由切换') && (st.line || '').includes('okB/m2')) { failedOver = true; sawStatusline = true; }
+    if (replied) failedOver = true;
+    if (replied) break;
   }
+  console.log('statusline route-switch text seen:', sawStatusline);
   const status = await evaluate("document.querySelector('#statusline')?.textContent || ''", sid);
   const lastAssistant = await evaluate("[...document.querySelectorAll('#timeline .msg.assistant .md')].map((m) => m.textContent).pop() || ''", sid);
   check('主供应商失败后自动沿链切换', failedOver, status.slice(0, 80));

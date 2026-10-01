@@ -47,11 +47,11 @@
 | macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` |
 | macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` |
 
-桌面壳依赖本机 Node.js **≥ 22.13**（`package.json` engines 同步约束；旧版 Node 仅 OpenCode 导入降级，其余功能正常；安装包不含 Node）：
+安装包**内置 Node 运行时**（Windows/Linux 为 x64 官方二进制，macOS 为 x64 —— Apple Silicon 经 Rosetta 运行），**无需本机安装 Node.js**。`package.json` 的 `engines >= 22.13` 仅约束源码开发环境：
 
 - 跟随系统语言（中文 / English），可选安装路径，桌面 + 开始菜单快捷方式
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`
-- 首次启动自动解压内置运行时（用系统 Node，不捆绑 node.exe）
+- 首次启动自动解压内置运行时（含捆绑的 Node 与 pi，开箱即用）
 
 ## 配置
 

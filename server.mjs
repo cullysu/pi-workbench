@@ -1089,7 +1089,7 @@ async function hMcpInstall(req, res, u) {
 }
 
 async function hBackupExport(req, res, u) {
-    try { return json(res, 200, await exportBackupZip()); }
+    try { return json(res, 200, await exportBackupZip(u.searchParams.get('excludeKeys') === '1')); }
     catch (e) { return json(res, 500, { error: e.message }); }
 }
 

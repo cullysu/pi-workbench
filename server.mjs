@@ -436,10 +436,25 @@ const contains = (root, target) => {
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 };
 // lexical contains() is escapable by a symlink/junction inside the project pointing
-// outside; realpath both ends so the check sees what the OS will actually open
+// outside; realpath both ends so the check sees what the OS will actually open.
+// A not-yet-existing target is resolved through its nearest existing ancestor
+// (macOS /var → /private/var would otherwise flip a legit delete into a 400).
 const realContains = (root, target) => {
-  const rp = (p2) => { try { return fs.realpathSync(p2); } catch { return path.resolve(p2); } };
-  return contains(rp(root), rp(target));
+  let rpRoot;
+  try { rpRoot = fs.realpathSync(root); } catch { rpRoot = path.resolve(root); }
+  let t = path.resolve(String(target || ''));
+  const tail = [];
+  for (;;) {
+    try { t = fs.realpathSync(t); break; } catch (e) {
+      if (e && e.code === 'ENOENT') {
+        tail.unshift(path.basename(t));
+        const parent = path.dirname(t);
+        if (parent === t) return false; // walked past the filesystem root
+        t = parent;
+      } else return false;
+    }
+  }
+  return contains(rpRoot, tail.length ? path.join(t, ...tail) : t);
 };
 function json(res, code, obj) {
   const s = JSON.stringify(obj);

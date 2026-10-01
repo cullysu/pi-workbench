@@ -27,7 +27,7 @@
         <button id="today-chip" class="chip" type="button">今日 —</button>
         <div id="today-pop" class="pop-card hidden"></div>
       </div>
-      <button id="btn-theme" class="icon-btn" title="切换主题">
+      <button id="btn-theme" class="icon-btn" title="切换主题" aria-label="切换主题">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"/></svg>
       </button>
     </div>
@@ -87,11 +87,11 @@
 
         <div id="timeline"><div class="tl-inner"></div></div>
         <div id="diff-panel" class="hidden">
-          <div class="diff-head"><span>Git 改动</span><button id="btn-diff-close" class="icon-btn">✕</button></div>
+          <div class="diff-head"><span>Git 改动</span><button id="btn-diff-close" class="icon-btn" aria-label="关闭改动面板">✕</button></div>
           <pre id="diff-body" class="diff-body"></pre>
         </div>
         <div id="files-panel" class="hidden">
-          <div class="diff-head"><span>项目文件</span><button id="btn-files-close" class="icon-btn">✕</button></div>
+          <div class="diff-head"><span>项目文件</span><button id="btn-files-close" class="icon-btn" aria-label="关闭文件面板">✕</button></div>
           <div id="files-crumbs" class="files-crumbs"></div>
           <div id="files-list" class="files-list"></div>
           <pre id="file-view" class="hidden"></pre>

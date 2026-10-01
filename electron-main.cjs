@@ -175,6 +175,31 @@ function waitPort(port, timeoutMs) {
   });
 }
 
+// Runtime manifest check: CI writes manifest.json (sha256 per runtime file) at
+// assembly time; after extraction we re-hash and refuse to spawn on drift. A
+// v1.1.2-class assembly omission must die here loudly, not as ERR_MODULE_NOT_FOUND.
+function verifyRuntimeManifest() {
+  const mfPath = path.join(appRoot, 'manifest.json');
+  if (!fs.existsSync(mfPath)) return null; // dev run — nothing to check
+  const { createHash } = require('node:crypto');
+  let mf;
+  try { mf = JSON.parse(fs.readFileSync(mfPath, 'utf8')); } catch (e) {
+    return { total: 0, bad: ['manifest unreadable: ' + e.message] };
+  }
+  const bad = [];
+  const entries = Object.entries(mf.files || {});
+  for (const [rel, want] of entries) {
+    let ok = false;
+    try {
+      const buf = fs.readFileSync(path.join(appRoot, rel));
+      ok = buf.length === want.size && createHash('sha256').update(buf).digest('hex') === want.sha256;
+    } catch { ok = false; }
+    if (!ok && bad.length < 8) bad.push(rel);
+    else if (!ok) bad.push('…');
+  }
+  return { total: entries.length, bad };
+}
+
 async function startServer() {
   if (await portOpen(PORT)) {
     if (await isWorkbenchPort(PORT)) return; // our own previous instance
@@ -316,6 +341,16 @@ if (!gotLock) {
       return;
     }
     console.log('[main] ensureRuntime done');
+    const mf = verifyRuntimeManifest();
+    if (mf) {
+      if (mf.bad.length) {
+        appendLog('FATAL manifest verify: ' + mf.bad.join(', ') + ' (of ' + mf.total + ')');
+        dialog.showErrorBox('Pi Workbench', '运行时文件校验失败（安装可能损坏，请重新安装）：\n' + mf.bad.join('\n'));
+        app.quit();
+        return;
+      }
+      appendLog('manifest verified: ' + mf.total + ' files');
+    }
     try { await startServer(); } catch (e) {
       appendLog('FATAL startServer: ' + e.message);
       dialog.showErrorBox('Pi Workbench', '本地服务启动失败：' + e.message);

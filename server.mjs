@@ -131,6 +131,7 @@ function resolveSecrets() {
 
 // ---------- crash resilience: a local workbench should not die on a stray rejection ----------
 const LOG_FILE = path.join(CFG_DIR, 'server.log');
+let DEGRADED_AT = null; // set when an uncaughtException survives — /api/kernel surfaces it
 function logErr(line) {
   try {
     fs.mkdirSync(CFG_DIR, { recursive: true });
@@ -138,8 +139,12 @@ function logErr(line) {
     fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
   } catch { /* never let the error logger itself throw */ }
 }
-process.on('uncaughtException', (e) => logErr('uncaughtException: ' + ((e && e.stack) || e)));
+process.on('uncaughtException', (e) => { DEGRADED_AT = DEGRADED_AT || Date.now(); logErr('uncaughtException: ' + ((e && e.stack) || e)); });
 process.on('unhandledRejection', (e) => logErr('unhandledRejection: ' + ((e && e.stack) || e)));
+
+// DNS-rebinding armor: a browser-resolved evil.com -> 127.0.0.1 would arrive with a
+// foreign Host header; the token already stops the API, this stops even the static page
+const hostAllowed = (h) => h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}` || h === `[::1]:${PORT}`;
 
 // ---------- helpers ----------
 const readJson = (p) => {
@@ -222,6 +227,19 @@ async function fetchJsonCapped(url, opts = {}, maxBytes = 2e6) {
   return { r, j };
 }
 
+// per-protocol auth: anthropic wants x-api-key (+ version header), google wants
+// x-goog-api-key, everything OpenAI-shaped speaks Bearer. api type comes from the
+// provider config when known, otherwise it is sniffed from the hostname.
+const isGoogleApi = (p, url) => p?.api === 'google-generative-ai' || /generativelanguage\.googleapis\.com/i.test(String(url || ''));
+const isAnthropicApi = (p, url) => p?.api === 'anthropic-messages' || /api\.anthropic\.com/i.test(String(url || ''));
+const authHeadersFor = (p, url, key, extra = {}) => {
+  if (!key) return { ...extra };
+  if (isGoogleApi(p, url)) return { ...extra, 'x-goog-api-key': key };
+  if (isAnthropicApi(p, url)) return { ...extra, 'x-api-key': key, 'anthropic-version': '2023-06-01' };
+  return { ...extra, authorization: `Bearer ${key}` };
+};
+const modelsUrlFor = (p, url) => (isGoogleApi(p, url) ? String(url).replace(/\/$/, '') + '/v1beta/models' : String(url).replace(/\/$/, '') + '/models');
+
 async function probeModel(modelId) {
   const [prov] = splitModel(modelId);
   const models = readJson(PI_MODELS) || { providers: {} };
@@ -233,13 +251,14 @@ async function probeModel(modelId) {
   if (!key && hasLiteralKey(prov)) key = p.apiKey;
   const t0 = Date.now();
   try {
-    const { r, j } = await fetchJsonCapped(p.baseUrl.replace(/\/$/, '') + '/models', {
-      headers: key ? { authorization: `Bearer ${key}` } : {},
+    const { r, j } = await fetchJsonCapped(modelsUrlFor(p, p.baseUrl), {
+      headers: authHeadersFor(p, p.baseUrl, key),
       signal: AbortSignal.timeout(8000),
     });
     const ms = Date.now() - t0;
     if (!r.ok) return { ok: false, status: r.status, ms };
-    return { ok: true, ms, models: Array.isArray(j.data) ? j.data.length : null };
+    const n = Array.isArray(j.data) ? j.data.length : Array.isArray(j.models) ? j.models.length : null;
+    return { ok: true, ms, models: n };
   } catch (e) {
     return { ok: false, detail: String(e.message || e), ms: Date.now() - t0 };
   }
@@ -253,21 +272,27 @@ async function testModelReply(modelId) {
   const ov = envOverrideFor(prov);
   let key = ov ? Object.values(ov).find((v) => typeof v === 'string') : null;
   if (!key && hasLiteralKey(prov)) key = p.apiKey;
-  const auth = key ? { authorization: `Bearer ${key}` } : {};
   const base = p.baseUrl.replace(/\/$/, '');
   const t0 = Date.now();
   try {
     let r, j, txt = '';
-    if (p.api === 'anthropic-messages') {
+    if (isGoogleApi(p, p.baseUrl)) {
+      ({ r, j } = await fetchJsonCapped(`${base}/v1beta/models/${encodeURIComponent(mid)}:generateContent`, {
+        method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
+        body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: '只回复ok' }] }], generationConfig: { maxOutputTokens: 16 } }),
+        signal: AbortSignal.timeout(30000),
+      }));
+      txt = (j.candidates?.[0]?.content?.parts || []).map((c) => c.text || '').join('');
+    } else if (p.api === 'anthropic-messages') {
       ({ r, j } = await fetchJsonCapped(base + '/messages', {
-        method: 'POST', headers: { ...auth, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+        method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
         body: JSON.stringify({ model: mid, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
         signal: AbortSignal.timeout(25000),
       }));
       txt = Array.isArray(j.content) ? j.content.map((c) => c.text || '').join('') : '';
     } else if (p.api === 'openai-responses') {
       ({ r, j } = await fetchJsonCapped(base + '/responses', {
-        method: 'POST', headers: { ...auth, 'content-type': 'application/json' },
+        method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
         body: JSON.stringify({ model: mid, input: '只回复ok', max_output_tokens: 16 }),
         signal: AbortSignal.timeout(30000),
       }));
@@ -275,7 +300,7 @@ async function testModelReply(modelId) {
     } else { // openai-completions and anything else speaking the chat shape
       // no max_tokens: reasoning models spend it on thinking and some relays 400 on tiny budgets
       ({ r, j } = await fetchJsonCapped(base + '/chat/completions', {
-        method: 'POST', headers: { ...auth, 'content-type': 'application/json' },
+        method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
         body: JSON.stringify({ model: mid, messages: [{ role: 'user', content: '只回复ok' }] }),
         signal: AbortSignal.timeout(30000),
       }));
@@ -343,31 +368,51 @@ function sendToPi(tabId, cmd) {
 
 // ---------- ws ----------
 const wss = new WebSocketServer({ noServer: true });
+// a tab belongs to the connection that opened it: its pi-event/rpc/exit frames go
+// only there. When the owner connection dies the tab keeps running and its frames
+// fan out to everyone again — that is the re-attach path for a reopened window.
+const ownerLive = (tab) => tab && tab.owner && tab.owner.readyState === 1; // ws.OPEN
 function broadcast(obj) {
+  const tabId = obj && obj.tabId;
+  const tab = tabId ? tabs.get(tabId) : null;
   const s = JSON.stringify(obj);
+  if (tab && ownerLive(tab)) { try { tab.owner.send(s); } catch { /* dead socket drops the frame */ } return; }
   for (const c of wss.clients) { try { c.send(s); } catch { /* dead or closing socket just drops this frame */ } }
 }
 
 wss.on('connection', (ws) => {
-  console.log('[ws] client connected');
+  ws.clientId = crypto.randomBytes(8).toString('hex');
+  console.log(`[ws] client connected (${ws.clientId})`);
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
     console.log('[ws] frame:', msg.type, msg.tabId || '');
     if (msg.type === 'open') {
       const { tabId, cwd, sessionPath, model, thinking, name } = msg;
+      // pi runs inside a registered project (or HOME) — same boundary as the file browser
+      if (cwd && !knownProject(cwd) && path.resolve(cwd) !== path.resolve(HOME)) {
+        ws.send(JSON.stringify({ type: 'open-denied', tabId }));
+        return;
+      }
       closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
       const prov = model ? splitModel(model)[0] : null;
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
       const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
-      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null });
+      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, owner: ws });
       attachPiReader(tabId, proc);
       ws.send(JSON.stringify({ type: 'opened', tabId }));
     } else if (msg.type === 'rpc') {
+      const tab = tabs.get(msg.tabId);
+      if (ownerLive(tab) && tab.owner !== ws) { try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId })); } catch { /* socket gone */ } return; }
       sendToPi(msg.tabId, msg.data);
     } else if (msg.type === 'close') {
+      const tab = tabs.get(msg.tabId);
+      if (ownerLive(tab) && tab.owner !== ws) return; // only the owner (or an adopted orphan) may kill a tab
       closeTab(msg.tabId); // closeTab announces the exit itself — see the guard in closeTab
     }
+  });
+  ws.on('close', () => {
+    for (const tab of tabs.values()) if (tab.owner === ws) tab.owner = null; // frames fan out; any window may adopt
   });
 });
 function closeTab(tabId, silent = false) {
@@ -497,7 +542,7 @@ async function hSessionsDelete(req, res, u) {
     const { path: file } = await readBody(req);
     const root = path.resolve(PI_SESSIONS);
     const abs = path.resolve(String(file || ''));
-    if (!contains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) return json(res, 400, { error: 'bad path' });
+    if (!realContains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) return json(res, 400, { error: 'bad path' });
     if (!fs.existsSync(abs)) return json(res, 404, { error: 'not found' });
     fs.rmSync(abs, { force: true });
     return json(res, 200, { ok: true, deleted: abs });
@@ -541,9 +586,8 @@ async function hProvidersDiscover(req, res, u) {
     const { provider, baseUrl, apiKey } = await readBody(req);
     let url = baseUrl;
     let key = apiKey || null;
+    const pv = provider ? ((readJson(PI_MODELS) || { providers: {} }).providers?.[provider] || {}) : {};
     if ((!url || !key) && provider) {
-      const models = readJson(PI_MODELS) || { providers: {} };
-      const pv = models.providers?.[provider] || {};
       if (!url) url = pv.baseUrl;
       if (!key) {
         const ov = envOverrideFor(provider);
@@ -555,12 +599,15 @@ async function hProvidersDiscover(req, res, u) {
     if (!assertHttpUrl(url)) return json(res, 200, { ok: false, detail: 'API 地址必须是 http(s) URL' });
     try {
       const t0 = Date.now();
-      const { r, j } = await fetchJsonCapped(url.replace(/\/$/, '') + '/models', {
-        headers: key ? { authorization: `Bearer ${key}` } : {},
+      const { r, j } = await fetchJsonCapped(modelsUrlFor(pv, url), {
+        headers: authHeadersFor(pv, url, key),
         signal: AbortSignal.timeout(10000),
       });
       if (!r.ok) return json(res, 200, { ok: false, status: r.status, ms: Date.now() - t0 });
-      const ids = (j.data || j.models || []).map((m) => m.id || m.name).filter(Boolean);
+      const ids = (j.data || j.models || []).map((m) => {
+        const id = m.id || m.name || '';
+        return id.startsWith('models/') ? id.slice('models/'.length) : id; // google lists "models/gemini-…"
+      }).filter(Boolean);
       const kb = {};
       for (const id of ids) {
         const hit = kbLookup(id);
@@ -750,7 +797,9 @@ async function hCronLastlog(req, res, u) {
 async function hSessionExport(req, res, u) {
     const root = path.resolve(PI_SESSIONS);
     const abs = path.resolve(u.searchParams.get('path') || '');
-    if (!contains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
+    if (!realContains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
+    let st0; try { st0 = fs.statSync(abs); } catch { res.writeHead(404); return res.end('not found'); }
+    if (st0.size > 100e6) { res.writeHead(413); return res.end('session too large to export (> 100MB)'); } // readFileSync is unbounded otherwise
     let raw; try { raw = fs.readFileSync(abs, 'utf8'); } catch { res.writeHead(404); return res.end('not found'); } // read before headers: a vanished file must 404, not hang the client
     res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
     const NL = '\n';
@@ -843,6 +892,7 @@ async function hKernel(req, res, u) {
       pi: piPkg.version || null,
       secrets: { relay: !!Object.keys(SECRET_ENV).length },
       sqlite: !!DatabaseSync,
+      degradedSince: DEGRADED_AT, // non-null = an uncaughtException happened this boot — check server.log
       paths: {
         config: CFG_FILE,
         routing: ROUTING_FILE,
@@ -872,7 +922,7 @@ async function hImport(req, res, u, m) {
     if (m[2]) {
       const f = u.searchParams.get('path');
       const roots = [imp.root, ...(imp.roots ? imp.roots() : [])].filter(Boolean);
-      if (!f || (roots.length && !roots.some((r) => contains(r, f)))) return json(res, 400, { error: 'bad path' });
+      if (!f || (roots.length && !roots.some((r) => realContains(r, f)))) return json(res, 400, { error: 'bad path' });
       if (!roots.length && !(f || '').startsWith('opencode://')) return json(res, 400, { error: 'bad path' });
       return json(res, 200, { entries: imp.read(f) });
     }
@@ -885,14 +935,23 @@ async function hGitStatus(req, res, u) {
     return json(res, 200, r);
 }
 
+// git/terminal-adjacent routes only ever run inside a registered project — an
+// arbitrary cwd would let any token holder diff their way through the whole disk
+const knownProject = (cwd) => {
+  const cfgc = loadConfig();
+  return !!(cwd && (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(String(cwd))));
+};
+
 async function hGitDiff(req, res, u) {
     const cwd = u.searchParams.get('cwd');
+    if (!knownProject(cwd)) return json(res, 400, { error: 'unknown project root' });
     const r = await runGit(cwd, ['diff', 'HEAD'], 300000);
     return json(res, 200, r);
 }
 
 async function hGitWorktrees(req, res, u) {
     const cwd = u.searchParams.get('cwd');
+    if (!knownProject(cwd)) return json(res, 400, { error: 'unknown project root' });
     const r = await runGit(cwd, ['worktree', 'list', '--porcelain']);
     return json(res, 200, r);
 }
@@ -984,12 +1043,14 @@ async function hMigrateScan(req, res, u) {
 
 async function hTermOpen(req, res, u) {
     const { cwd } = await readBody(req);
+    if (cwd && !knownProject(cwd)) return json(res, 400, { error: 'unknown project root' });
     return json(res, 200, await openExternalTerm(cwd));
 }
 
 async function hTermExec(req, res, u) {
     const { cwd, cmd } = await readBody(req);
     if (!cmd || typeof cmd !== 'string' || cmd.length > 4000) return json(res, 400, { error: 'bad cmd' });
+    if (cwd && !knownProject(cwd)) return json(res, 400, { error: 'unknown project root' }); // '' (=HOME) stays allowed
     return json(res, 200, await execInCwd(cwd, cmd));
 }
 
@@ -1063,6 +1124,7 @@ const routes = [
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   try {
+    if (!hostAllowed(req.headers.host || '')) { res.writeHead(403); return res.end('forbidden host'); }
     if (u.pathname.startsWith('/api/')) {
       // browsers always attach Origin to cross-site fetches — a drive-by page probing
       // 127.0.0.1 must die here even before the token check; local processes can
@@ -1088,7 +1150,7 @@ const server = http.createServer(async (req, res) => {
 server.on('upgrade', (req, socket, head) => {
   const { pathname, searchParams } = new URL(req.url, 'http://x');
   // WS can't carry custom headers — token rides the ?t= query param instead
-  if (pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  if (hostAllowed(req.headers.host || '') && pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   else socket.destroy();
 });
 

@@ -53,6 +53,13 @@ try {
   });
   ws.on('message', (raw) => { try { events.push(JSON.parse(raw.toString())); } catch { /* ignore */ } });
 
+  // the server only spawns pi inside registered projects — register the scratch one first
+  await fetch(`${BASE}/api/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-token': token },
+    body: JSON.stringify({ projects: [{ path: proj, name: 'probe' }] }),
+  });
+
   // open a tab with a real project dir — the server spawns pi --mode rpc
   ws.send(JSON.stringify({ type: 'open', tabId: 'probe-1', cwd: proj }));
   await new Promise((resolve, reject) => {

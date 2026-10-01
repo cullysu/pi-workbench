@@ -59,6 +59,8 @@ jobs:
       - run: npm ci
       - name: WS integration probe (real pi child through the full chain)
         run: node scripts/ws-probe.mjs
+      - name: Failover chain probe (real pi, 3 mock providers)
+        run: node scripts/failover-e2e.mjs
 
   build:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -87,6 +89,9 @@ jobs:
           Copy-Item extensions pkg-build/extensions -Recurse -Force
           robocopy public pkg-build/public /E /NFL /NDL /NJH /NJS /NP
           if ($LASTEXITCODE -ge 8) { exit 1 }
+          Set-Location pkg-build
+          node ../scripts/write-manifest.mjs
+          Set-Location ..
           node scripts/make-runtime.mjs
       - name: Runtime import self-check
         run: node scripts/check-runtime.mjs
@@ -133,9 +138,14 @@ jobs:
           cp -r extensions pkg-build/extensions
           mkdir -p pkg-build/public
           cp -r public/. pkg-build/public/
+          cd pkg-build && node ../scripts/write-manifest.mjs && cd ..
           node scripts/make-runtime.mjs
       - name: Runtime import self-check
         run: node scripts/check-runtime.mjs
+      - name: SBOM (CycloneDX over the shipped runtime deps)
+        run: |
+          node scripts/sbom.mjs pkg-build > sbom-pi-workbench.cdx.json
+          python3 -c "import json;d=json.load(open('sbom-pi-workbench.cdx.json'));print('sbom components:',len(d['components']))"
       - name: Build Linux AppImage
         run: npx electron-builder --linux AppImage --x64 --publish never
       - name: Smoke test AppImage structure
@@ -164,6 +174,12 @@ jobs:
             if [ "$code" = "200" ]; then ok=1; break; fi
             sleep 1
           done
+          if [ "$ok" = "1" ]; then
+            tok=$(curl -s http://127.0.0.1:32123/ | grep -o '__API_TOKEN = "[0-9a-f]*"' | cut -d'"' -f2)
+            piv=$(curl -s -H "x-api-token: $tok" http://127.0.0.1:32123/api/kernel | grep -o '"pi":"[^"]*"' || true)
+            echo "kernel pi field: $piv"
+            if [ -z "$piv" ]; then echo 'KERNEL CHECK FAILED: bundled pi missing from /api/kernel'; ok=0; fi
+          fi
           pkill -f appimage-extract-and-run 2>/dev/null || true
           if [ "$ok" != "1" ]; then
             echo 'BOOT FAILED - panel never answered 200'
@@ -187,6 +203,11 @@ jobs:
           name: linux-appimage
           path: dist_electron/*.AppImage
           retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom-pi-workbench.cdx.json
+          retention-days: 90
 
   build-mac:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -210,6 +231,7 @@ jobs:
           cp -r extensions pkg-build/extensions
           mkdir -p pkg-build/public
           cp -r public/. pkg-build/public/
+          cd pkg-build && node ../scripts/write-manifest.mjs && cd ..
           node scripts/make-runtime.mjs
       - name: Runtime import self-check
         run: node scripts/check-runtime.mjs

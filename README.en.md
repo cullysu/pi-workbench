@@ -24,11 +24,11 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 - **All logic lives in nine `lib/` modules**: factories with explicit ctx injection, and **every factory verifies its wiring contract at boot** (a missing dependency crashes startup loudly instead of silently dying at 9am); IO collapses to four primitives in `lib/io.mjs`
 - **Secure defaults**: per-boot random token + CSP nonce (no `unsafe-inline` scripts), DOMPurify fail-closed sanitization, `path.relative` + realpath containment (symlinks/junctions cannot escape the project root), Origin checks, provider URLs forced to http(s) with capped responses, atomic config writes (tmp+rename, corrupt files preserved for forensics), CRC-checked backup zips with extraction limits, cron job ID allowlist
 - **Four verification layers** (all committed and re-runnable): repo-wide `eslint` 0/0, 23 API tests + a 47-route acceptance sweep (`scripts/route-sweep.py`), integration probes (`scripts/ws-probe.mjs`: a real pi child through the full WS chain), and a browser-level probe (`scripts/ui-probe.mjs`: headless Chromium asserts replay bubbles, all 17 panels, zero console errors)
-- **Five-channel builds**: every push produces five installers — Windows Electron NSIS, Windows Tauri NSIS, Linux AppImage (boot-tested in xvfb before it counts), macOS dmg arm64 + x64
+- **Five-channel builds**: every push produces five installers — Windows Electron NSIS, Windows Tauri NSIS, Linux AppImage (boot-tested in xvfb: HTTP 200 plus a /api/kernel check that the bundled pi answers), macOS dmg arm64 + x64; assembly writes a sha256 manifest the shell verifies before spawning (a broken install fails loudly at boot), and a CycloneDX SBOM artifact rides along
 
 ## Install
 
-Download the installer for your platform from [Releases](../../releases) (1.1.2 shown):
+Download the installer for your platform from [Releases](../../releases) (1.1.3 shown):
 
 | Platform | File |
 |---|---|

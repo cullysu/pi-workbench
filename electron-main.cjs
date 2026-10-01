@@ -123,10 +123,13 @@ function ensureRuntime() {
   // exited 80 with no output. readZip is the same primitive the backup feature uses.
   return (async () => {
     const entries = cjsReadZip(fs.readFileSync(runtimeZip));
+    let realRoot = appRoot;
+    try { realRoot = fs.realpathSync(appRoot); } catch { /* fresh dir not yet on disk: lexical is all we have */ }
     for (const entry of entries) {
       const rel = entry.name.split('/').join(path.sep);
       const dest = path.join(appRoot, rel);
       if (!path.resolve(dest).startsWith(path.resolve(appRoot) + path.sep)) throw new Error('zip-slip blocked: ' + entry.name);
+      if (realRoot !== appRoot && !path.resolve(dest).startsWith(realRoot + path.sep)) throw new Error('zip-slip via symlinked root blocked: ' + entry.name);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, entry.data);
     }

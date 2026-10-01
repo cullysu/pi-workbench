@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml)
 
-**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). 跨平台桌面应用：Windows 双壳（Electron 完整壳 + Tauri 轻量壳 ≈10MB）、Linux AppImage、macOS dmg（arm64/x64），中文界面。
+**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). 跨平台桌面应用：Windows 双壳（Electron 完整壳 + Tauri 轻量壳，安装包 ≈32MB）、Linux AppImage、macOS dmg（arm64/x64），中文界面。
 
 不 fork、不改 pi。工作台以子进程运行 `pi --mode rpc`（stdin/stdout JSONL）驱动 pi 本体：会话文件是 pi 原生格式（`~/.pi/agent/sessions`），自定义模型在 `~/.pi/agent/models.json`，与 pi CLI 完全互通。
 
@@ -33,7 +33,7 @@
 - **逻辑全部在 `lib/` 九个模块**：工厂 + ctx 显式注入，**每个工厂启动即校验接线契约**（缺一个依赖直接崩在启动，而不是某天早上静默哑火）；IO 只有三条原语（`lib/io.mjs`：有界遍历 / 头字节预览 / 分块 JSONL / 子进程收集）
 - **安全默认**：每启动随机 token + CSP nonce（无 `unsafe-inline` 脚本）、DOMPurify fail-closed 消毒、`path.relative` + realpath 双层路径包含校验（symlink/junction 也逃不出项目根）、Origin 校验、供应商 URL 强制 http(s) 且响应限流、配置原子写入（tmp+rename，损坏自动留证）、备份 zip CRC + 解压上限、定时任务 ID 白名单
 - **四层验证体系**（全部入库可复跑）：`eslint` 全仓 0/0 → 23 条 API 测试 + 47 路由全量扫描（`scripts/route-sweep.py`）→ 集成探针（`scripts/ws-probe.mjs`：spawn 真 pi 子进程走完 WS 全链）→ 浏览器级探针（`scripts/ui-probe.mjs`：headless Chromium 加载真实面板，断言回放气泡/17 面板/零 console error 并出截图）
-- **五通道构建**：CI 每次 push 产出 Windows Electron NSIS + Windows Tauri NSIS + Linux AppImage + macOS dmg（arm64/x64）五件安装包，AppImage 出包前在 xvfb 里真实启动并轮询 HTTP 200、并校验 /api/kernel 报告内置 pi 才算过；组装时生成 sha256 manifest，壳启动前先验运行时完整性（安装损坏会在启动时明确报错而不是半死不活）；出包同时产出 CycloneDX SBOM artifact
+- **五通道构建**：CI 在 main 分支每次 push 产出 Windows Electron NSIS + Windows Tauri NSIS + Linux AppImage + macOS dmg（arm64/x64）五件安装包，AppImage 出包前在 xvfb 里真实启动并轮询 HTTP 200、并校验 /api/kernel 报告内置 pi 才算过；组装时生成 sha256 manifest，壳启动前先验运行时完整性（安装损坏会在启动时明确报错而不是半死不活）；出包同时产出 CycloneDX SBOM artifact
 
 ## 安装
 
@@ -58,6 +58,7 @@
 所有个人配置都在本机，不进仓库：
 
 - `~/.pi-workbench/config.json` — 工作台配置（项目、主题、语言、默认模型、技能开关）
+- **密钥说明**：API key 存于 `~/.pi/agent/models.json`（`$ENV` 写法可引用环境变量，面板接口对明文 key 只回 `***`，编辑时留空即保持）；备份 zip 为还原会**包含明文 key**，请妥善保管
 - `~/.pi-workbench/routing.json` — 回退链与冷却状态
 - `~/.pi/agent/models.json` — 供应商与模型（pi 原生格式）
 

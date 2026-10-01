@@ -16,6 +16,7 @@ import {createSources} from './lib/sources.mjs';
 import {createKbSkills} from './lib/kb-skills.mjs';
 import {createBackupTerminal} from './lib/backup-terminal.mjs';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { createZip, readZip } from './zip.mjs';
@@ -368,24 +369,42 @@ function sendToPi(tabId, cmd) {
 
 // ---------- ws ----------
 const wss = new WebSocketServer({ noServer: true });
-// a tab belongs to the connection that opened it: its pi-event/rpc/exit frames go
-// only there. When the owner connection dies the tab keeps running and its frames
-// fan out to everyone again — that is the re-attach path for a reopened window.
+// A tab belongs to the connection that opened it: its pi-event/rpc/exit frames go
+// only there. When the owner connection dies the tab keeps running and frames stop
+// fanning out — a reopened window must explicitly {type:'adopt'} to reattach, so a
+// foreign connection can never silently read or steer someone else's conversation.
 const ownerLive = (tab) => tab && tab.owner && tab.owner.readyState === 1; // ws.OPEN
 function broadcast(obj) {
   const tabId = obj && obj.tabId;
   const tab = tabId ? tabs.get(tabId) : null;
   const s = JSON.stringify(obj);
-  if (tab && ownerLive(tab)) { try { tab.owner.send(s); } catch { /* dead socket drops the frame */ } return; }
+  if (tab) {
+    if (ownerLive(tab)) { try { tab.owner.send(s); } catch { /* dead socket drops the frame */ } return; }
+    for (const c of wss.clients) {
+      if (!c.adopted || !c.adopted.has(tabId)) continue;
+      try { c.send(s); } catch { /* dead socket drops the frame */ }
+    }
+    return; // nobody adopted: transient frames are dropped, the tab itself keeps running
+  }
   for (const c of wss.clients) { try { c.send(s); } catch { /* dead or closing socket just drops this frame */ } }
 }
 
 wss.on('connection', (ws) => {
   ws.clientId = crypto.randomBytes(8).toString('hex');
+  ws.adopted = new Set();
   console.log(`[ws] client connected (${ws.clientId})`);
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
     console.log('[ws] frame:', msg.type, msg.tabId || '');
+    if (msg.type === 'adopt') {
+      const tab = tabs.get(msg.tabId);
+      if (tab && !ownerLive(tab)) {
+        tab.owner = ws;
+        ws.adopted.add(msg.tabId);
+        try { ws.send(JSON.stringify({ type: 'adopted', tabId: msg.tabId })); } catch { /* socket gone */ }
+      }
+      return;
+    }
     if (msg.type === 'open') {
       const { tabId, cwd, sessionPath, model, thinking, name } = msg;
       // pi runs inside a registered project (or HOME) — same boundary as the file browser
@@ -399,20 +418,23 @@ wss.on('connection', (ws) => {
       const { __keyIdx, ...envExtra } = ov || {};
       const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
       tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, owner: ws });
+      ws.adopted.add(tabId);
       attachPiReader(tabId, proc);
       ws.send(JSON.stringify({ type: 'opened', tabId }));
     } else if (msg.type === 'rpc') {
       const tab = tabs.get(msg.tabId);
-      if (ownerLive(tab) && tab.owner !== ws) { try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId })); } catch { /* socket gone */ } return; }
+      const mine = ownerLive(tab) ? tab.owner === ws : !!(tab && ws.adopted.has(msg.tabId));
+      if (!mine) { try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId })); } catch { /* socket gone */ } return; }
       sendToPi(msg.tabId, msg.data);
     } else if (msg.type === 'close') {
       const tab = tabs.get(msg.tabId);
-      if (ownerLive(tab) && tab.owner !== ws) return; // only the owner (or an adopted orphan) may kill a tab
+      const mine = ownerLive(tab) ? tab.owner === ws : !!(tab && ws.adopted.has(msg.tabId));
+      if (!mine) return; // only the owner (or an explicit adopter) may kill a tab
       closeTab(msg.tabId); // closeTab announces the exit itself — see the guard in closeTab
     }
   });
   ws.on('close', () => {
-    for (const tab of tabs.values()) if (tab.owner === ws) tab.owner = null; // frames fan out; any window may adopt
+    for (const tab of tabs.values()) if (tab.owner === ws) tab.owner = null; // tab keeps running; frames wait for an adopt
   });
 });
 function closeTab(tabId, silent = false) {
@@ -563,6 +585,17 @@ async function hSessionsDelete(req, res, u) {
     return json(res, 200, { ok: true, deleted: abs });
 }
 
+// API keys are write-only over the API: GET answers '***' for literal keys ($ENV refs
+// are not secrets and stay readable — the UI shows the env name), and POST substitutes
+// the stored key back when the sentinel round-trips. The UI never pre-fills key inputs.
+const KEY_SENTINEL = '***';
+const maskApiKeys = (doc) => {
+  for (const p of Object.values(doc.providers || {})) {
+    if (p && typeof p.apiKey === 'string' && p.apiKey && !p.apiKey.startsWith('$')) p.apiKey = KEY_SENTINEL;
+  }
+  return doc;
+};
+
 async function hModels(req, res, u) {
     if (req.method === 'POST') {
       const body = await readBody(req);
@@ -570,10 +603,18 @@ async function hModels(req, res, u) {
       if (!doc || typeof doc !== 'object' || Array.isArray(doc) || !doc.providers || typeof doc.providers !== 'object') {
         return json(res, 400, { error: 'body must be {providers:{...}} — refusing to overwrite models.json' });
       }
+      const prev = readJson(PI_MODELS) || { providers: {} };
+      for (const [name, p] of Object.entries(doc.providers)) {
+        if (p && p.apiKey === KEY_SENTINEL) {
+          const stored = prev.providers?.[name]?.apiKey;
+          if (stored) p.apiKey = stored; // sentinel round-trip: keep the real key
+          else delete p.apiKey;
+        }
+      }
       fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
       atomicWrite(PI_MODELS, JSON.stringify(doc, null, 2));
     }
-    return json(res, 200, { ...(readJson(PI_MODELS) || { providers: {} }), meta: loadModelMeta() });
+    return json(res, 200, { ...maskApiKeys(readJson(PI_MODELS) || { providers: {} }), meta: loadModelMeta() });
 }
 
 async function hModelsAvailable(req, res, u) {
@@ -600,7 +641,7 @@ async function hModelsAvailable(req, res, u) {
 async function hProvidersDiscover(req, res, u) {
     const { provider, baseUrl, apiKey } = await readBody(req);
     let url = baseUrl;
-    let key = apiKey || null;
+    let key = apiKey && apiKey !== KEY_SENTINEL ? apiKey : null; // masked round-trip = "use the stored key"
     const pv = provider ? ((readJson(PI_MODELS) || { providers: {} }).providers?.[provider] || {}) : {};
     if ((!url || !key) && provider) {
       if (!url) url = pv.baseUrl;
@@ -814,28 +855,34 @@ async function hSessionExport(req, res, u) {
     const abs = path.resolve(u.searchParams.get('path') || '');
     if (!realContains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
     let st0; try { st0 = fs.statSync(abs); } catch { res.writeHead(404); return res.end('not found'); }
-    if (st0.size > 100e6) { res.writeHead(413); return res.end('session too large to export (> 100MB)'); } // readFileSync is unbounded otherwise
-    let raw; try { raw = fs.readFileSync(abs, 'utf8'); } catch { res.writeHead(404); return res.end('not found'); } // read before headers: a vanished file must 404, not hang the client
+    if (st0.size > 100e6) { res.writeHead(413); return res.end('session too large to export (> 100MB)'); }
+    // streamed line-by-line: a big session never sits whole in memory and the
+    // event loop keeps serving while the file is walked
     res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
     const NL = '\n';
-    for (const line of raw.split(NL)) {
-      if (!line) continue;
-      let j; try { j = JSON.parse(line); } catch { continue; }
-      if (j.type !== 'message' || !j.message) continue;
-      const m = j.message;
-      if (m.role !== 'user' && m.role !== 'assistant') continue;
-      const c = m.content;
-      let text = '';
-      if (typeof c === 'string') text = c;
-      else if (Array.isArray(c)) text = c.map((b) => {
-        if (b.type === 'text') return b.text;
-        if (b.type === 'toolCall') return '[' + (b.name || 'tool') + ']';
-        if (b.type === 'thinking') return '[thinking]';
-        return '';
-      }).filter(Boolean).join(NL);
-      if (!text.trim()) continue;
-      res.write((m.role === 'user' ? '## User' + NL + NL : '## Assistant' + NL + NL) + text.trim() + NL + NL + '---' + NL);
-    }
+    const write = (s2) => new Promise((r2) => { if (res.write(s2)) r2(); else res.once('drain', r2); });
+    const rl = createInterface({ input: fs.createReadStream(abs, { encoding: 'utf8' }), crlfDelay: Infinity });
+    res.on('error', () => rl.close()); // client vanished mid-export
+    try {
+      for await (const line of rl) {
+        if (!line) continue;
+        let j; try { j = JSON.parse(line); } catch { continue; }
+        if (j.type !== 'message' || !j.message) continue;
+        const m = j.message;
+        if (m.role !== 'user' && m.role !== 'assistant') continue;
+        const c = m.content;
+        let text = '';
+        if (typeof c === 'string') text = c;
+        else if (Array.isArray(c)) text = c.map((b) => {
+          if (b.type === 'text') return b.text;
+          if (b.type === 'toolCall') return '[' + (b.name || 'tool') + ']';
+          if (b.type === 'thinking') return '[thinking]';
+          return '';
+        }).filter(Boolean).join(NL);
+        if (!text.trim()) continue;
+        await write((m.role === 'user' ? '## User' + NL + NL : '## Assistant' + NL + NL) + text.trim() + NL + NL + '---' + NL);
+      }
+    } catch { /* read or client error: best-effort export */ }
     return res.end();
 }
 

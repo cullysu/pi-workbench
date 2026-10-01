@@ -44,6 +44,7 @@ console.log(JSON.stringify({
   metadata: {
     timestamp: new Date().toISOString(),
     component: { type: 'application', name: appPkg.name || 'pi-workbench', version: appPkg.version || '0.0.0' },
+    properties: [{ name: 'scope', value: 'platform-independent JS runtime dependencies (the packaged node_modules tree) — all platform builds share this dependency set' }],
   },
   components: comps,
 }, null, 2));

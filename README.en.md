@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml)
 
-A local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Cross-platform desktop app: Windows dual shells (Electron full + Tauri ~10MB lightweight), Linux AppImage, macOS dmg (arm64/x64). Chinese UI.
+A local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Cross-platform desktop app: Windows dual shells (Electron full + Tauri lightweight, ~32MB installer), Linux AppImage, macOS dmg (arm64/x64). Chinese UI.
 
 pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout JSONL) as a subprocess: sessions are pi-native (`~/.pi/agent/sessions`), custom models live in `~/.pi/agent/models.json`, and everything is fully interoperable with the pi CLI.
 
@@ -24,7 +24,7 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 - **All logic lives in nine `lib/` modules**: factories with explicit ctx injection, and **every factory verifies its wiring contract at boot** (a missing dependency crashes startup loudly instead of silently dying at 9am); IO collapses to four primitives in `lib/io.mjs`
 - **Secure defaults**: per-boot random token + CSP nonce (no `unsafe-inline` scripts), DOMPurify fail-closed sanitization, `path.relative` + realpath containment (symlinks/junctions cannot escape the project root), Origin checks, provider URLs forced to http(s) with capped responses, atomic config writes (tmp+rename, corrupt files preserved for forensics), CRC-checked backup zips with extraction limits, cron job ID allowlist
 - **Four verification layers** (all committed and re-runnable): repo-wide `eslint` 0/0, 23 API tests + a 47-route acceptance sweep (`scripts/route-sweep.py`), integration probes (`scripts/ws-probe.mjs`: a real pi child through the full WS chain), and a browser-level probe (`scripts/ui-probe.mjs`: headless Chromium asserts replay bubbles, all 17 panels, zero console errors)
-- **Five-channel builds**: every push produces five installers — Windows Electron NSIS, Windows Tauri NSIS, Linux AppImage (boot-tested in xvfb: HTTP 200 plus a /api/kernel check that the bundled pi answers), macOS dmg arm64 + x64; assembly writes a sha256 manifest the shell verifies before spawning (a broken install fails loudly at boot), and a CycloneDX SBOM artifact rides along
+- **Five-channel builds**: every push to main produces five installers — Windows Electron NSIS, Windows Tauri NSIS, Linux AppImage (boot-tested in xvfb: HTTP 200 plus a /api/kernel check that the bundled pi answers), macOS dmg arm64 + x64; assembly writes a sha256 manifest the shell verifies before spawning (a broken install fails loudly at boot), and a CycloneDX SBOM artifact rides along
 
 ## Install
 
@@ -48,6 +48,7 @@ The desktop shells require system Node.js **≥ 22.13** (mirrored in `package.js
 
 Everything is local, nothing is committed to this repo:
 
+- **Keys**: API keys live in `~/.pi/agent/models.json` (use `$ENV_NAME` to reference an environment variable; the API answers `***` for literal keys — leave the field empty when editing to keep the stored one). Backup zips contain keys in plaintext for restore — keep them safe.
 - `~/.pi-workbench/config.json` — workbench config (projects, theme, language, default model, skill toggles, optional `relaySecret`)
 - `~/.pi-workbench/routing.json` — fallback chains and cooldown state
 - `~/.pi/agent/models.json` — providers and models (pi-native format)

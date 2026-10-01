@@ -113,6 +113,75 @@ fn which_node_from_path() -> Option<PathBuf> {
     None
 }
 
+/// Verify the CI-written runtime manifest (sha256 per file) against the extracted
+/// tree — parity with the Electron shell. A v1.1.2-class assembly omission must die
+/// here loudly, not as a module-not-found crash inside the spawned server.
+fn verify_runtime_manifest(dir: &Path) -> Result<(), String> {
+    let mf_path = dir.join("manifest.json");
+    if !mf_path.exists() {
+        return Ok(()); // dev run without a manifest — nothing to check
+    }
+    use sha2::{Digest, Sha256};
+    let txt = std::fs::read_to_string(&mf_path).map_err(|e| format!("manifest unreadable: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&txt).map_err(|e| format!("manifest unparsable: {e}"))?;
+    let files = v
+        .get("files")
+        .and_then(|f| f.as_object())
+        .ok_or_else(|| "manifest has no files map".to_string())?;
+    let mut bad: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for (rel, meta) in files {
+        checked += 1;
+        let want_size = meta.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+        let want_hash = meta.get("sha256").and_then(|s| s.as_str()).unwrap_or("");
+        let mut hasher = Sha256::new();
+        let mut size = 0u64;
+        match std::fs::File::open(dir.join(rel)) {
+            Ok(mut f) => {
+                let mut buf = [0u8; 65536];
+                loop {
+                    match std::io::Read::read(&mut f, &mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            size += n as u64;
+                            hasher.update(&buf[..n]);
+                        }
+                        Err(_) => {
+                            bad.push(rel.clone());
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                bad.push(rel.clone());
+                continue;
+            }
+        }
+        if bad.last().map(|b| b == rel).unwrap_or(false) {
+            continue;
+        }
+        let got = hasher.finalize();
+        let mut hex = String::with_capacity(64);
+        for b in got {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        if size != want_size || hex != want_hash {
+            if bad.len() < 8 {
+                bad.push(rel.clone());
+            }
+        }
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "运行时文件校验失败（共 {checked} 项，前几个不匹配: {}）——安装可能损坏，请重新安装",
+            bad.join(", ")
+        ))
+    }
+}
+
 /// Extract runtime.zip when the fingerprint changed.
 /// Stamp = `version|zipSize|zipMtime` — same scheme as the Electron shell.
 fn ensure_runtime(zip: &Path, dir: &Path, version: &str) -> Result<(), String> {
@@ -197,6 +266,7 @@ fn main() {
                 .join("pi-workbench-tauri")
                 .join("runtime");
             ensure_runtime(&zip, &runtime_dir, &version)?;
+            verify_runtime_manifest(&runtime_dir)?;
 
             let already_up = TcpStream::connect(("127.0.0.1", PORT)).is_ok();
             let mut owned = false;

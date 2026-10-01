@@ -128,6 +128,9 @@ function wsConnect() {
   state.ws = ws;
   ws.onopen = () => {
     state.wsReady = true; wsRetries = 0; $('#conn-dot').className = 'dot on';
+    // the server-side tab survived the socket drop — reclaim it so its frames
+    // flow here again (foreign connections can never silently adopt a live tab)
+    if (state.tabId) { try { state.ws.send(JSON.stringify({ type: 'adopt', tabId: state.tabId })); } catch { /* queue drains below anyway */ } }
     while (wsQueue.length) { try { state.ws.send(JSON.stringify(wsQueue.shift())); } catch { break; } }
   };
   ws.onclose = () => { state.wsReady = false; $('#conn-dot').className = 'dot off'; setTimeout(wsConnect, Math.min(15000, 1500 * ++wsRetries)); };

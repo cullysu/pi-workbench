@@ -37,7 +37,8 @@ const httpGet = (url, headers = {}) => new Promise((resolve, reject) => {
 });
 
 // ---------- fixture: scratch home with a project, a session, a cron job ----------
-const USERTMP = path.join(process.env.LOCALAPPDATA, 'Temp');
+import os from 'node:os';
+const USERTMP = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Temp') : os.tmpdir(); // linux CI has no LOCALAPPDATA
 fs.mkdirSync(USERTMP, { recursive: true });
 const home = fs.mkdtempSync(path.join(USERTMP, 'piwb-uiprobe-'));
 const proj = fs.mkdtempSync(path.join(USERTMP, 'piwb-uiproj-'));

@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
+import WebSocket from 'ws';
 
 const PORT = 39944;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -385,4 +386,64 @@ test('aider import parses a real-shaped chat history (fixture)', async () => {
   assert.equal(msgs[0].role, 'user');
   assert.match(msgs[0].text, /帮我修这个报错/);
   assert.equal(msgs[1].role, 'assistant');
+});
+
+test('api keys are write-only: GET masks, POST sentinel preserves', async () => {
+  const file = path.join(tmpHome, '.pi', 'agent', 'models.json');
+  fs.writeFileSync(file, JSON.stringify({ providers: { provA: { baseUrl: 'http://x/v1', apiKey: 'sk-real-secret', models: [{ id: 'm1' }] }, provB: { baseUrl: 'http://y/v1', apiKey: '$MY_ENV', models: [] } } }));
+  let r = await req('/api/models');
+  assert.equal(r.status, 200);
+  assert.equal(r.data.providers.provA.apiKey, '***', 'literal key masked');
+  assert.equal(r.data.providers.provB.apiKey, '$MY_ENV', 'env ref stays readable');
+  // round-trip the masked doc: the stored key must survive untouched
+  r = await req('/api/models', { providers: r.data.providers });
+  assert.equal(r.status, 200);
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(stored.providers.provA.apiKey, 'sk-real-secret', 'sentinel round-trip preserved the real key');
+  // a typed key replaces; an empty sentinel with no stored key deletes the field
+  r = await req('/api/models', { providers: { provA: { baseUrl: 'http://x/v1', apiKey: 'sk-new' }, provB: { baseUrl: 'http://y/v1' } } });
+  assert.equal(r.status, 200);
+  const stored2 = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(stored2.providers.provA.apiKey, 'sk-new');
+  assert.equal('apiKey' in stored2.providers.provB, false, 'sentinel with no stored key deletes the field');
+});
+
+test('ws adopt: foreign tabs are invisible until explicitly adopted', async () => {
+  // second connection cannot see or steer the tab the first connection owns
+  const ws2 = new WebSocket(`ws://127.0.0.1:${PORT}/ws?t=${TOKEN}`);
+  await new Promise((res, rej) => { ws2.once('open', res); ws2.once('error', rej); });
+  const frames2 = [];
+  ws2.on('message', (raw) => { try { frames2.push(JSON.parse(raw.toString())); } catch { /* ignore */ } });
+  // register the scratch project, then open a real tab from the MAIN connection (child)
+  await req('/api/config', { projects: [{ path: tmpProj, name: 'p' }] });
+  const ws1 = new WebSocket(`ws://127.0.0.1:${PORT}/ws?t=${TOKEN}`);
+  await new Promise((res, rej) => { ws1.once('open', res); ws1.once('error', rej); });
+  const frames1 = [];
+  ws1.on('message', (raw) => { try { frames1.push(JSON.parse(raw.toString())); } catch { /* ignore */ } });
+  const wait = async (pred, ms, label) => {
+    const dl = Date.now() + ms;
+    for (;;) {
+      const f = frames1.find(pred) || frames2.find(pred);
+      if (f) return f;
+      if (Date.now() > dl) throw new Error('timeout: ' + label);
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  };
+  ws1.send(JSON.stringify({ type: 'open', tabId: 'adopt-1', cwd: tmpProj }));
+  await wait((f) => f.type === 'opened' && f.tabId === 'adopt-1', 20000, 'opened');
+  // foreign connection: no pi-event frames arrive, rpc denied
+  ws2.send(JSON.stringify({ type: 'rpc', tabId: 'adopt-1', data: { id: 'x1', type: 'get_entries' } }));
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.ok(frames2.some((f) => f.type === 'rpc-denied' && f.tabId === 'adopt-1'), 'foreign rpc denied');
+  assert.ok(!frames2.some((f) => f.type === 'pi-event' && f.tabId === 'adopt-1'), 'foreign connection gets no tab frames');
+  // owner dies -> frames stop for everyone; adopter must claim explicitly
+  ws1.close();
+  await new Promise((r) => setTimeout(r, 700));
+  ws2.send(JSON.stringify({ type: 'adopt', tabId: 'adopt-1' }));
+  await wait((f) => f.type === 'adopted' && f.tabId === 'adopt-1', 5000, 'adopted');
+  ws2.send(JSON.stringify({ type: 'rpc', tabId: 'adopt-1', data: { id: 'x2', type: 'get_entries' } }));
+  await wait((f) => f.type === 'pi-event' && f.tabId === 'adopt-1', 30000, 'frames flow to adopter');
+  ws2.send(JSON.stringify({ type: 'close', tabId: 'adopt-1' }));
+  await wait((f) => f.type === 'pi-exit' && f.tabId === 'adopt-1', 15000, 'adopter can close');
+  ws2.close();
 });

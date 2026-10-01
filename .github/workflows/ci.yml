@@ -61,6 +61,12 @@ jobs:
         run: node scripts/ws-probe.mjs
       - name: Failover chain probe (real pi, 3 mock providers)
         run: node scripts/failover-e2e.mjs
+      - name: UI probe (headless Chromium via CDP)
+        run: |
+          npx -y playwright@1.49.1 install --with-deps chromium
+          CHROME_EXE=$(find ~/.cache/ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)
+          echo "chrome: $CHROME_EXE"
+          CHROME_EXE="$CHROME_EXE" node scripts/ui-probe.mjs
 
   build:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'

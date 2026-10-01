@@ -408,7 +408,8 @@ test('api keys are write-only: GET masks, POST sentinel preserves', async () => 
   assert.equal('apiKey' in stored2.providers.provB, false, 'sentinel with no stored key deletes the field');
 });
 
-test('ws adopt: foreign tabs are invisible until explicitly adopted', async () => {
+const PI_CLI_LOCAL = path.join(ROOT, '..', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js');
+test('ws adopt: foreign tabs are invisible until explicitly adopted', { skip: !fs.existsSync(PI_CLI_LOCAL) ? 'needs the pi package (the tab must survive its owner)' : false }, async () => {
   // second connection cannot see or steer the tab the first connection owns
   const ws2 = new WebSocket(`ws://127.0.0.1:${PORT}/ws?t=${TOKEN}`);
   await new Promise((res, rej) => { ws2.once('open', res); ws2.once('error', rej); });

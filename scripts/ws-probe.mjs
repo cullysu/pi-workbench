@@ -89,21 +89,53 @@ try {
   const sf = events.find((e) => e.type === 'pi-session-file');
   console.log('pi-session-file:', sf ? 'OK (' + sf.sessionFile + ')' : 'not emitted (pi may not create a session for get_entries only)');
 
-  // close semantics: synthetic pi-exit is gone; the real exit must arrive after close
-  // (Windows kill is async — pi teardown can take a few seconds)
-  events.length = 0;
-  ws.send(JSON.stringify({ type: 'close', tabId: 'probe-1' }));
+  // adopt semantics: a second connection is blind to the tab while its owner lives;
+  // after the owner's socket dies, only an explicit adopt reattaches (and grants rpc/close)
+  const events2 = [];
+  const ws2 = new WebSocket(`ws://127.0.0.1:${PORT}/ws?t=${token}`);
+  await new Promise((resolve, reject) => { ws2.once('open', resolve); ws2.once('error', reject); setTimeout(() => reject(new Error('ws2 open timeout')), 10000); });
+  ws2.on('message', (raw) => { try { events2.push(JSON.parse(raw.toString())); } catch { /* ignore */ } });
+  ws2.send(JSON.stringify({ type: 'rpc', tabId: 'probe-1', data: { id: 'x0', type: 'get_entries' } }));
+  await new Promise((r) => setTimeout(r, 1200));
+  if (events2.some((e) => e.type === 'rpc-denied' && e.tabId === 'probe-1')) console.log('foreign rpc denied OK');
+  else { failed = true; console.error('FAIL: foreign rpc was not denied'); }
+  if (events2.some((e) => e.type === 'pi-event' && e.tabId === 'probe-1')) { failed = true; console.error('FAIL: foreign connection received tab frames'); }
+  else console.log('foreign connection gets no tab frames OK');
+
+  // owner socket dies — the tab keeps running, frames stop until the explicit adopt
+  ws.close();
+  await new Promise((r) => setTimeout(r, 800));
+  ws2.send(JSON.stringify({ type: 'adopt', tabId: 'probe-1' }));
+  const adoptDeadline = Date.now() + 5000;
+  while (Date.now() < adoptDeadline && !events2.some((e) => e.type === 'adopted' && e.tabId === 'probe-1')) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (events2.some((e) => e.type === 'adopted' && e.tabId === 'probe-1')) console.log('adopt handshake OK');
+  else { failed = true; console.error('FAIL: no adopted frame'); }
+
+  // close semantics via the adopter: synthetic pi-exit is gone; the real exit must
+  // arrive after close (Windows kill is async — pi teardown can take a few seconds)
+  ws2.send(JSON.stringify({ type: 'rpc', tabId: 'probe-1', data: { id: 'x1', type: 'get_entries' } }));
+  const rpcDeadline = Date.now() + 30000;
+  while (Date.now() < rpcDeadline && !events2.some((e) => e.type === 'pi-event' && e.tabId === 'probe-1')) {
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  if (events2.some((e) => e.type === 'pi-event' && e.tabId === 'probe-1')) console.log('frames flow to adopter OK');
+  else { failed = true; console.error('FAIL: no frames after adopt'); }
+
+  events2.length = 0;
+  ws2.send(JSON.stringify({ type: 'close', tabId: 'probe-1' }));
   const deadline = Date.now() + 10000;
   let exits = [];
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 300));
-    exits = events.filter((e) => e.type === 'pi-exit' && e.tabId === 'probe-1');
+    exits = events2.filter((e) => e.type === 'pi-exit' && e.tabId === 'probe-1');
     if (exits.length) break;
   }
   if (exits.length !== 1) { failed = true; console.error('FAIL: expected exactly 1 pi-exit after close, got', exits.length); }
   else console.log('close → exactly one real pi-exit OK (' + Math.round((Date.now() - deadline + 10000) / 100) / 10 + 's)');
 
-  ws.close();
+  ws2.close();
   if (failed) process.exitCode = 1;
   else console.log('WS PROBE ALL PASS');
 } catch (e) {

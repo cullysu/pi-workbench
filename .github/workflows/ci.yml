@@ -42,6 +42,23 @@ jobs:
           node --check extensions/mcp-bridge.js
       - name: API tests
         run: npm test
+      - name: Route sweep (all routes, sane payloads)
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 scripts/route-sweep.py
+
+  e2e:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: WS integration probe (real pi child through the full chain)
+        run: node scripts/ws-probe.mjs
 
   build:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'

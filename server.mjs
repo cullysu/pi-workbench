@@ -16,10 +16,16 @@ import {createSources} from './lib/sources.mjs';
 import {createKbSkills} from './lib/kb-skills.mjs';
 import {createBackupTerminal} from './lib/backup-terminal.mjs';
 import { spawn } from 'node:child_process';
-import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { createZip, readZip } from './zip.mjs';
+
+// soft node:sqlite import — Node < 22.13 has no such builtin and a static import
+// would kill the whole boot; only the OpenCode importer degrades (sources guards null)
+let DatabaseSync = null;
+try { ({ DatabaseSync } = await import('node:sqlite')); } catch {
+  console.log(`[boot] node:sqlite unavailable on ${process.version} — OpenCode import disabled, everything else works`);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -62,13 +68,21 @@ function loadConfig() {
       });
     }
     return cfg;
-  } catch {
+  } catch (e) {
+    // a torn config must not vanish silently: preserve it for forensics, then fall back
+    try {
+      if (fs.existsSync(CFG_FILE) && fs.statSync(CFG_FILE).size > 0) {
+        const keep = `${CFG_FILE}.corrupt-${Date.now()}`;
+        fs.copyFileSync(CFG_FILE, keep);
+        logErr(`config.json unreadable (${(e && e.message) || e}) — preserved as ${keep}`);
+      }
+    } catch { /* forensics are best-effort */ }
     return { projects: [], lang: 'zh', theme: 'dark' };
   }
 }
 function saveConfig(cfg) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
-  fs.writeFileSync(CFG_FILE, JSON.stringify(cfg, null, 2));
+  atomicWrite(CFG_FILE, JSON.stringify(cfg, null, 2));
   return cfg;
 }
 
@@ -150,9 +164,16 @@ function loadRouting() {
   r.state = r.state || {}; r.state.cooldowns = r.state.cooldowns || {};
   return r;
 }
+// atomic write: tmp+rename so a crash mid-write can never leave a torn config
+// (Windows rename replaces existing files — no unlink dance needed)
+const atomicWrite = (file, data) => {
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, data);
+  fs.renameSync(tmp, file);
+};
 const saveJson = (file, obj) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+  atomicWrite(file, JSON.stringify(obj, null, 2));
   return obj;
 };
 // ---------- cron: scheduled pi prompt runs (lib/cron.mjs) ----------
@@ -161,29 +182,63 @@ const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
 const cron = createCron({ CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, cronPiArgs, broadcast, readJson, saveJson, spawn });
 function saveRouting(r) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
-  fs.writeFileSync(ROUTING_FILE, JSON.stringify(r, null, 2));
+  atomicWrite(ROUTING_FILE, JSON.stringify(r, null, 2));
   return r;
 }
 const failover = createFailover({ SECRET_ENV, readJson, loadRouting, saveRouting, PI_MODELS });
 const { splitModel, keyEnvsFor, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
+
+// provider URLs are user-supplied: only http(s) may leave the box (no file:, ftp:, data:...)
+// Local addresses stay allowed on purpose — ollama/LM Studio on 127.0.0.1 are first-class providers.
+const assertHttpUrl = (raw) => {
+  let parsed;
+  try { parsed = new URL(String(raw || '')); } catch { return null; }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) return null;
+  return parsed;
+};
+// fetch + streaming size cap: a misbehaving endpoint must not balloon server memory
+// (content-length alone is not enough — chunked responses omit it)
+async function fetchJsonCapped(url, opts = {}, maxBytes = 2e6) {
+  const r = await fetch(url, opts);
+  let buf;
+  if (r.body && typeof r.body.getReader === 'function') {
+    const reader = r.body.getReader();
+    const chunks = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) { try { await reader.cancel(); } catch { /* already cancelled */ } throw new Error(`response too large (> ${maxBytes} bytes)`); }
+      chunks.push(value);
+    }
+    buf = Buffer.concat(chunks);
+  } else {
+    buf = Buffer.from(await r.arrayBuffer());
+    if (buf.length > maxBytes) throw new Error(`response too large (> ${maxBytes} bytes)`);
+  }
+  let j = {};
+  try { j = JSON.parse(buf.toString('utf8')); } catch { j = {}; }
+  return { r, j };
+}
 
 async function probeModel(modelId) {
   const [prov] = splitModel(modelId);
   const models = readJson(PI_MODELS) || { providers: {} };
   const p = models.providers?.[prov];
   if (!p?.baseUrl) return { ok: false, detail: 'provider has no baseUrl' };
+  if (!assertHttpUrl(p.baseUrl)) return { ok: false, detail: 'provider baseUrl 必须是 http(s) 地址' };
   const ov = envOverrideFor(prov);
   let key = ov ? Object.values(ov).find((v) => typeof v === 'string') : null;
   if (!key && hasLiteralKey(prov)) key = p.apiKey;
   const t0 = Date.now();
   try {
-    const r = await fetch(p.baseUrl.replace(/\/$/, '') + '/models', {
+    const { r, j } = await fetchJsonCapped(p.baseUrl.replace(/\/$/, '') + '/models', {
       headers: key ? { authorization: `Bearer ${key}` } : {},
       signal: AbortSignal.timeout(8000),
     });
     const ms = Date.now() - t0;
     if (!r.ok) return { ok: false, status: r.status, ms };
-    const j = await r.json().catch(() => ({}));
     return { ok: true, ms, models: Array.isArray(j.data) ? j.data.length : null };
   } catch (e) {
     return { ok: false, detail: String(e.message || e), ms: Date.now() - t0 };
@@ -194,6 +249,7 @@ async function testModelReply(modelId) {
   const models = readJson(PI_MODELS) || { providers: {} };
   const p = models.providers?.[prov];
   if (!p?.baseUrl) return { ok: false, detail: 'provider has no baseUrl' };
+  if (!assertHttpUrl(p.baseUrl)) return { ok: false, detail: 'provider baseUrl 必须是 http(s) 地址' };
   const ov = envOverrideFor(prov);
   let key = ov ? Object.values(ov).find((v) => typeof v === 'string') : null;
   if (!key && hasLiteralKey(prov)) key = p.apiKey;
@@ -203,29 +259,26 @@ async function testModelReply(modelId) {
   try {
     let r, j, txt = '';
     if (p.api === 'anthropic-messages') {
-      r = await fetch(base + '/messages', {
+      ({ r, j } = await fetchJsonCapped(base + '/messages', {
         method: 'POST', headers: { ...auth, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({ model: mid, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
         signal: AbortSignal.timeout(25000),
-      });
-      j = await r.json().catch(() => ({}));
+      }));
       txt = Array.isArray(j.content) ? j.content.map((c) => c.text || '').join('') : '';
     } else if (p.api === 'openai-responses') {
-      r = await fetch(base + '/responses', {
+      ({ r, j } = await fetchJsonCapped(base + '/responses', {
         method: 'POST', headers: { ...auth, 'content-type': 'application/json' },
         body: JSON.stringify({ model: mid, input: '只回复ok', max_output_tokens: 16 }),
         signal: AbortSignal.timeout(30000),
-      });
-      j = await r.json().catch(() => ({}));
+      }));
       txt = (j.output || []).filter((o) => o.type === 'message').flatMap((o) => (o.content || []).map((c) => c.text || '')).join('');
     } else { // openai-completions and anything else speaking the chat shape
       // no max_tokens: reasoning models spend it on thinking and some relays 400 on tiny budgets
-      r = await fetch(base + '/chat/completions', {
+      ({ r, j } = await fetchJsonCapped(base + '/chat/completions', {
         method: 'POST', headers: { ...auth, 'content-type': 'application/json' },
         body: JSON.stringify({ model: mid, messages: [{ role: 'user', content: '只回复ok' }] }),
         signal: AbortSignal.timeout(30000),
-      });
-      j = await r.json().catch(() => ({}));
+      }));
       txt = j.choices?.[0]?.message?.content || '';
     }
     const ms = Date.now() - t0;
@@ -336,6 +389,12 @@ const isJobId = (s2) => typeof s2 === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(s2
 const contains = (root, target) => {
   const rel = path.relative(path.resolve(root), path.resolve(String(target || '')));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+};
+// lexical contains() is escapable by a symlink/junction inside the project pointing
+// outside; realpath both ends so the check sees what the OS will actually open
+const realContains = (root, target) => {
+  const rp = (p2) => { try { return fs.realpathSync(p2); } catch { return path.resolve(p2); } };
+  return contains(rp(root), rp(target));
 };
 function json(res, code, obj) {
   const s = JSON.stringify(obj);
@@ -452,7 +511,7 @@ async function hModels(req, res, u) {
         return json(res, 400, { error: 'body must be {providers:{...}} — refusing to overwrite models.json' });
       }
       fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
-      fs.writeFileSync(PI_MODELS, JSON.stringify(doc, null, 2));
+      atomicWrite(PI_MODELS, JSON.stringify(doc, null, 2));
     }
     return json(res, 200, { ...(readJson(PI_MODELS) || { providers: {} }), meta: loadModelMeta() });
 }
@@ -493,14 +552,14 @@ async function hProvidersDiscover(req, res, u) {
       }
     }
     if (!url) return json(res, 200, { ok: false, detail: '请先填 API 地址' });
+    if (!assertHttpUrl(url)) return json(res, 200, { ok: false, detail: 'API 地址必须是 http(s) URL' });
     try {
       const t0 = Date.now();
-      const r = await fetch(url.replace(/\/$/, '') + '/models', {
+      const { r, j } = await fetchJsonCapped(url.replace(/\/$/, '') + '/models', {
         headers: key ? { authorization: `Bearer ${key}` } : {},
         signal: AbortSignal.timeout(10000),
       });
       if (!r.ok) return json(res, 200, { ok: false, status: r.status, ms: Date.now() - t0 });
-      const j = await r.json().catch(() => ({}));
       const ids = (j.data || j.models || []).map((m) => m.id || m.name).filter(Boolean);
       const kb = {};
       for (const id of ids) {
@@ -538,7 +597,7 @@ async function hProvidersKbfill(req, res, u) {
       }
     }
     fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
-    fs.writeFileSync(PI_MODELS, JSON.stringify(doc, null, 2));
+    atomicWrite(PI_MODELS, JSON.stringify(doc, null, 2));
     const meta = loadModelMeta();
     for (const [id, price] of Object.entries(pricing)) meta[`${provider}|${id}`] = price;
     saveModelMeta(meta);
@@ -620,6 +679,7 @@ async function hCron(req, res, u) {
       if (!Array.isArray(jobs)) return json(res, 400, { error: 'jobs array required' });
       for (const j of jobs) {
         if (!j.name || !j.prompt) return json(res, 400, { error: '每个任务需要 name 和 prompt' });
+        if (j.id != null && j.id !== '' && !isJobId(j.id)) return json(res, 400, { error: '任务 ID 只能含字母/数字/连字符，最长 64 字符' });
         if (j.kind === 'daily' && !/^\d{2}:\d{2}$/.test(j.time || '')) return json(res, 400, { error: 'daily 任务需要 HH:MM 时间' });
         if (j.kind === 'interval' && (!(Number(j.everyMin) > 0))) return json(res, 400, { error: 'interval 任务需要正的 everyMin 分钟数' });
       }
@@ -743,7 +803,7 @@ async function hFilesList(req, res, u) {
     const known = (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(root || ''));
     if (!root || !known) return json(res, 400, { error: 'unknown project root' });
     const base = path.resolve(root, rel);
-    if (!contains(root, base)) return json(res, 400, { error: 'bad path' });
+    if (!realContains(root, base)) return json(res, 400, { error: 'bad path' });
     let entries;
     try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch (e) { return json(res, 400, { error: e.message }); }
     const skip = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__']);
@@ -764,7 +824,7 @@ async function hFilesRead(req, res, u) {
     const known = (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(root || ''));
     if (!root || !known) return json(res, 400, { error: 'unknown project root' });
     const base = path.resolve(root, rel);
-    if (!contains(root, base)) return json(res, 400, { error: 'bad path' });
+    if (!realContains(root, base)) return json(res, 400, { error: 'bad path' });
     let st; try { st = fs.statSync(base); } catch { return json(res, 400, { error: 'not found' }); }
     if (st.isDirectory()) return json(res, 400, { error: 'is a directory' });
     if (st.size > 400000) return json(res, 200, { text: '', tooBig: true, size: st.size });
@@ -924,7 +984,7 @@ async function hMigrateScan(req, res, u) {
 
 async function hTermOpen(req, res, u) {
     const { cwd } = await readBody(req);
-    return json(res, 200, openExternalTerm(cwd));
+    return json(res, 200, await openExternalTerm(cwd));
 }
 
 async function hTermExec(req, res, u) {
@@ -1004,6 +1064,11 @@ const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   try {
     if (u.pathname.startsWith('/api/')) {
+      // browsers always attach Origin to cross-site fetches — a drive-by page probing
+      // 127.0.0.1 must die here even before the token check; local processes can
+      // spoof Origin but they can equally just read the token, so this is browser-only armor
+      const origin = req.headers.origin;
+      if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) { res.writeHead(403); return res.end('forbidden origin'); }
       if (req.headers['x-api-token'] !== API_TOKEN) { res.writeHead(403); return res.end('forbidden'); }
       for (const [method, path, handler] of routes) {
         if (method && method !== '*' && method !== req.method) continue; // null/regex rows match any method

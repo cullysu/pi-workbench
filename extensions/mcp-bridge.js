@@ -1,10 +1,12 @@
 /**
  * pi extension: MCP bridge.
  *
- * Reads ~/.pi/agent/mcp.json ({ "mcpServers": { name: { command, args?, env? } } })
- * and exposes every MCP tool as a native pi tool named mcp_<server>_<tool>.
- * Connections are lazy: a server process is spawned on the first call to one of
- * its tools and reused afterwards. Requires `npm install` next to this file
+ * Reads ~/.pi/agent/mcp.json ({ "mcpServers": { name: { command, args?, env?, lazy? } } })
+ * and exposes MCP tools as native pi tools named mcp_<server>_<tool>.
+ * Default servers are registered eagerly (spawn + listTools at startup) so the
+ * model sees fully typed tools. Servers marked `"lazy": true` cost nothing at
+ * startup: they get two meta-tools (mcp_<srv>_list / mcp_<srv>_call) and the
+ * process is spawned on the first call. Requires `npm install` next to this file
  * (typebox); the workbench's MCP page does that for you.
  */
 import { Type } from "typebox";
@@ -190,6 +192,63 @@ export default function mcpBridge(pi) {
   const servers = readServers();
   const registered = [];
 
+  // lazy servers (config `"lazy": true`) cost nothing at startup: no spawn, no
+  // listTools — instead two meta-tools are registered and the real connection is
+  // made on the first call. Default stays eager so the model keeps seeing fully
+  // typed tools with their real schemas.
+  const registerLazyServer = (srvName, conf) => {
+    const base = `mcp_${sanitize(srvName)}`;
+    const listName = `${base}_list`;
+    const callName = `${base}_call`;
+    try {
+      pi.registerTool({
+        name: listName,
+        label: `${srvName}: list tools`,
+        description: `List the tools available on lazy MCP server "${srvName}"`,
+        promptSnippet: `MCP server "${srvName}" is lazy-loaded — call ${listName} first to discover its tools`,
+        parameters: Type.Unsafe({ type: "object", properties: {} }),
+        async execute() {
+          const tools = await getClient(srvName, conf).listTools();
+          const brief = tools.map((t) => ({ name: t.name, description: t.description || "" }));
+          return {
+            content: [{ type: "text", text: JSON.stringify(brief, null, 2) }],
+            details: { mcp: true, server: srvName },
+          };
+        },
+      });
+      pi.registerTool({
+        name: callName,
+        label: `${srvName}: call tool`,
+        description: `Call a tool on the lazy MCP server "${srvName}". Use ${listName} first to discover tool names.`,
+        promptSnippet: `Call tools on the lazy MCP server "${srvName}"`,
+        parameters: Type.Unsafe({
+          type: "object",
+          properties: { tool: { type: "string", description: "tool name as reported by " + listName }, arguments: { type: "object", description: "tool arguments object" } },
+          required: ["tool"],
+        }),
+        async execute(_toolCallId, params) {
+          const c = getClient(srvName, conf);
+          try {
+            const r = await c.callTool(params.tool, params.arguments || {});
+            return {
+              content: [{ type: "text", text: r.text }],
+              details: { mcp: true, server: srvName, tool: params.tool, isError: r.isError },
+            };
+          } catch (e) {
+            return {
+              content: [{ type: "text", text: `MCP error (${srvName}.${params.tool}): ${e.message}` }],
+              details: { mcp: true, server: srvName, tool: params.tool, isError: true },
+            };
+          }
+        },
+      });
+      registered.push(listName, callName);
+      log(`lazy-registered ${srvName} (connects on first call)`);
+    } catch (e) {
+      log(`failed to lazy-register ${srvName}: ${e.message}`);
+    }
+  };
+
   const registerAll = async () => {
     const entries = Object.entries(servers);
     if (!entries.length) {
@@ -197,6 +256,7 @@ export default function mcpBridge(pi) {
       return;
     }
     for (const [srvName, conf] of entries) {
+      if (conf && conf.lazy) { registerLazyServer(srvName, conf); continue; }
       const client = getClient(srvName, conf);
       let tools = [];
       try {

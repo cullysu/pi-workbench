@@ -1,7 +1,9 @@
 Third-party notices for Pi Workbench
 ====================================
 
-This distribution bundles the following third-party components:
+This distribution bundles or requires the following third-party components.
+Runtime and dev dependencies are declared in package.json; the shells embed
+the toolkits below.
 
 1. pi coding agent (@earendil-works/pi-coding-agent)
    Homepage: https://github.com/earendil-works/pi
@@ -26,19 +28,25 @@ This distribution bundles the following third-party components:
    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
    SOFTWARE.
 
-2. PySide6 / Qt 6 (bundled by PyInstaller)
-   License: LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only (used under LGPL-3.0)
-   https://www.qt.io/licensing/ — Qt is used via dynamic linking; users may
-   replace or relink the Qt libraries per the LGPL-3.0 terms.
+2. Electron (desktop shell for the Windows Electron / Linux AppImage / macOS dmg builds)
+   License: MIT — https://www.electronjs.org/
+   Electron bundles Chromium and Node.js; their licenses ship inside the
+   Electron distribution (LICENSES.chromium.html / about:credits).
 
-3. python-markdown
-   License: BSD-3-Clause — https://github.com/Python-Markdown/markdown
+3. Tauri (Windows lightweight shell)
+   License: MIT OR Apache-2.0 — https://tauri.app/
+   Tauri uses the operating system WebView (WebView2 on Windows); WebView2 is
+   governed by Microsoft's own license terms.
 
-4. Pygments
-   License: BSD-2-Clause — https://pygments.org/
+4. ws (Node WebSocket server dependency)
+   License: MIT — https://github.com/websockets/ws
 
-5. marked / ws (browser-mode optional dependencies)
-   License: MIT — https://github.com/markedjs/marked , https://github.com/websockets/ws
+5. Frontend libraries (vendored / loaded from node_modules):
+   marked (MIT, https://github.com/markedjs/marked),
+   highlight.js (BSD-3-Clause, https://highlightjs.org/),
+   DOMPurify (Apache-2.0 OR MPL-2.0, https://github.com/cure53/DOMPurify),
+   uPlot (MIT, https://github.com/leeoniya/uPlot),
+   TypeBox (MIT, https://github.com/sinclairzx81/typebox)
 
 Routing/health design for the multi-provider failover feature is adapted with
 attribution from the juhe-ai project: https://github.com/huanmin123/juhe-ai

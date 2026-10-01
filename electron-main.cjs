@@ -59,12 +59,17 @@ function crc32(buf) {
   return (c ^ -1) >>> 0;
 }
 function cjsReadZip(buf) {
+  // caps mirror zip.mjs readZip — this input ships with the app, but the guard is free
+  const MAX_ENTRIES = 50000;
+  const MAX_TOTAL_UNCOMPRESSED = 1024 * 1024 * 1024;
+  let totalUncompressed = 0;
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i--) {
     if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   }
   if (eocd === -1) throw new Error('not a zip (no EOCD)');
   const count = buf.readUInt16LE(eocd + 10);
+  if (count > MAX_ENTRIES) throw new Error('zip has too many entries (' + count + ')');
   let ptr = buf.readUInt32LE(eocd + 16);
   const out = [];
   for (let n = 0; n < count; n++) {
@@ -83,6 +88,8 @@ function cjsReadZip(buf) {
     const dataStart = l + 30 + lNameLen + lExtraLen;
     const payload = buf.subarray(dataStart, dataStart + csize);
     const data = method === 0 ? Buffer.from(payload) : require('zlib').inflateRawSync(payload);
+    totalUncompressed += data.length;
+    if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED) throw new Error('zip expands beyond 1GB — refusing');
     if (crc32(data) !== crc) throw new Error('crc mismatch for ' + name);
     out.push({ name, data });
     ptr += 46 + nameLen + extraLen + commentLen;

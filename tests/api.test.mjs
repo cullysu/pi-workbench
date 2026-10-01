@@ -81,8 +81,17 @@ test.before(async () => {
 
 test.after(async () => {
   if (child) {
-    try { child.kill(); } catch { /* already exited */ }
-    await new Promise((r) => { const t = setTimeout(r, 2000); child.once('exit', () => { clearTimeout(t); r(); }); });
+    // tree kill on Windows: the server's spawned children (pi) inherit the stdio
+    // pipe handles, so killing only the server leaves the suite waiting on a pipe
+    // that stays open until the grandchild dies. Absolute path — a mangled/POSIX
+    // PATH must not turn this into a silent ENOENT.
+    try {
+      if (process.platform === 'win32') {
+        const taskkill = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+        spawn(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      } else child.kill();
+    } catch { /* already exited */ }
+    await new Promise((r) => { const t = setTimeout(r, 3000); child.once('exit', () => { clearTimeout(t); r(); }); });
   }
   for (const dir of [tmpHome, tmpProj]) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* Windows may still hold a handle */ }
@@ -352,7 +361,7 @@ test('malformed POST cannot wipe models.json', async () => {
 test('cron routes reject junk job ids before path.join', async () => {
   const r = await req('/api/cron/lastlog', { id: '..' + path.sep + '..' + path.sep + 'evil' });
   assert.equal(r.status, 400, 'traversal id rejected');
-});
+});
 test('aider import parses a real-shaped chat history (fixture)', async () => {
   fs.writeFileSync(path.join(tmpHome, '.aider.chat.history.md'), [
     '# aider chat history',

@@ -84,16 +84,21 @@ export function createZip(entries) {
   return Buffer.concat([...locals, ...centrals, eocd]);
 }
 
-/** zip Buffer → [{ name, data: Buffer }] */
+/** zip Buffer → [{ name, data: Buffer }] — extraction is capped so a crafted
+ *  backup zip (bomb) cannot exhaust memory: 50k entries, 1 GB total uncompressed */
 export function readZip(buf) {
+  const MAX_ENTRIES = 50000;
+  const MAX_TOTAL_UNCOMPRESSED = 1024 * 1024 * 1024;
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i--) {
     if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
   }
   if (eocd === -1) throw new Error('not a zip (no EOCD)');
   const count = buf.readUInt16LE(eocd + 10);
+  if (count > MAX_ENTRIES) throw new Error(`zip has too many entries (${count} > ${MAX_ENTRIES})`);
   let ptr = buf.readUInt32LE(eocd + 16);
   const out = [];
+  let totalUncompressed = 0;
   for (let n = 0; n < count; n++) {
     if (buf.readUInt32LE(ptr) !== 0x02014b50) throw new Error('bad central directory');
     const method = buf.readUInt16LE(ptr + 10);
@@ -110,6 +115,8 @@ export function readZip(buf) {
     const dataStart = l + 30 + lNameLen + lExtraLen;
     const payload = buf.subarray(dataStart, dataStart + csize);
     const data = method === 0 ? Buffer.from(payload) : zlib.inflateRawSync(payload);
+    totalUncompressed += data.length;
+    if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED) throw new Error(`zip expands beyond ${MAX_TOTAL_UNCOMPRESSED} bytes — refusing (zip bomb?)`);
     if (crc32(data) !== crc) throw new Error('crc mismatch for ' + name); // a torn backup must fail loudly, not import half-configs
     out.push({ name, data });
     ptr += 46 + nameLen + extraLen + commentLen;

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml)
 
-**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Windows 桌面应用，双壳发布通道（Tauri 轻量壳 ≈10MB，Electron 完整壳），中文界面。
+**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). 跨平台桌面应用：Windows 双壳（Electron 完整壳 + Tauri 轻量壳 ≈10MB）、Linux AppImage、macOS dmg（arm64/x64），中文界面。
 
 不 fork、不改 pi。工作台以子进程运行 `pi --mode rpc`（stdin/stdout JSONL）驱动 pi 本体：会话文件是 pi 原生格式（`~/.pi/agent/sessions`），自定义模型在 `~/.pi/agent/models.json`，与 pi CLI 完全互通。
 
@@ -24,20 +24,30 @@
 - **导入**：Codex / Claude / ZCode / OpenCode / OMP / Gemini / Grok CLI / Aider 历史会话只读浏览
 - **周边**：定时任务（每天定时 / 间隔分钟，到点无头运行提示词并逐次落日志）、Prompt 模板、目标模式自动续跑、实时事件日志、项目文件浏览、git diff、终端、会话导出 Markdown、备份恢复、配置迁移
 - **安全**：本地服务只绑 127.0.0.1，每次启动生成随机 token，HTTP API 与 WebSocket 均校验，其它本地进程无法未授权调用
-- **MCP**：内置桥接扩展，读取标准 `~/.pi/agent/mcp.json`（与 Claude/Cursor 同格式），把 MCP 工具注册为 pi 原生工具，惰性连接，配置页一键安装
+- **MCP**：内置桥接扩展，读取标准 `~/.pi/agent/mcp.json`（与 Claude/Cursor 同格式），把 MCP 工具注册为 pi 原生工具，配置页一键安装；给某个 server 加 `"lazy": true` 可改为零启动成本（首次调用才 spawn，暴露 `mcp_<srv>_list` / `mcp_<srv>_call` 两个元工具）
 
 
 ## 架构一览
 
 - **单文件服务端**：`server.mjs`（≈1000 行）= 42 个具名 handler + 一张声明式路由表 + 单派发循环；每个端点可按名检索，鉴权与 404 各归一处
 - **逻辑全部在 `lib/` 九个模块**：工厂 + ctx 显式注入，**每个工厂启动即校验接线契约**（缺一个依赖直接崩在启动，而不是某天早上静默哑火）；IO 只有三条原语（`lib/io.mjs`：有界遍历 / 头字节预览 / 分块 JSONL / 子进程收集）
-- **安全默认**：每启动随机 token + CSP nonce（无 `unsafe-inline` 脚本）、DOMPurify fail-closed 消毒、`path.relative` 路径包含校验、配置写入白名单合并、备份 zip CRC 校验
+- **安全默认**：每启动随机 token + CSP nonce（无 `unsafe-inline` 脚本）、DOMPurify fail-closed 消毒、`path.relative` + realpath 双层路径包含校验（symlink/junction 也逃不出项目根）、Origin 校验、供应商 URL 强制 http(s) 且响应限流、配置原子写入（tmp+rename，损坏自动留证）、备份 zip CRC + 解压上限、定时任务 ID 白名单
 - **四层验证体系**（全部入库可复跑）：`eslint` 全仓 0/0 → 23 条 API 测试 + 47 路由全量扫描（`scripts/route-sweep.py`）→ 集成探针（`scripts/ws-probe.mjs`：spawn 真 pi 子进程走完 WS 全链）→ 浏览器级探针（`scripts/ui-probe.mjs`：headless Chromium 加载真实面板，断言回放气泡/17 面板/零 console error 并出截图）
-- **双壳构建**：CI 在 Windows runner 上同时产出 Electron（`dist_electron/`）与 Tauri（`tauri/target/`）NSIS 安装包 artifact
+- **五通道构建**：CI 每次 push 产出 Windows Electron NSIS + Windows Tauri NSIS + Linux AppImage + macOS dmg（arm64/x64）五件安装包，AppImage 出包前在 xvfb 里真实启动并轮询 HTTP 200 才算过
 
 ## 安装
 
-从 [GitHub Releases](../../releases) 下载最新版安装包（文件名形如 `PiWorkbench-Setup-<版本>.exe`）。桌面壳依赖本机 Node.js **≥ 22.13**（旧版 Node 仅 OpenCode 导入降级，其余功能正常；安装包不含 Node）：
+从 [GitHub Releases](../../releases) 下载对应平台的安装包（以 1.1.2 为例）：
+
+| 平台 | 文件 |
+|---|---|
+| Windows (Electron) | `PiWorkbench-Setup-<版本>.exe` |
+| Windows (Tauri 轻量壳) | `PiWorkbench-<版本>-Tauri-x64-setup.exe` |
+| Linux | `PiWorkbench-<版本>-linux.AppImage` |
+| macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` |
+| macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` |
+
+桌面壳依赖本机 Node.js **≥ 22.13**（`package.json` engines 同步约束；旧版 Node 仅 OpenCode 导入降级，其余功能正常；安装包不含 Node）：
 
 - 跟随系统语言（中文 / English），可选安装路径，桌面 + 开始菜单快捷方式
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`

@@ -103,7 +103,15 @@ try {
   console.error('PROBE ERROR:', e.message);
   process.exitCode = 1;
 } finally {
-  try { child.kill(); } catch { /* already gone */ }
+  // tree kill on Windows: spawned pi children inherit the stdio pipe handles, so
+  // killing only the server would leave the probe hanging on an open pipe.
+  // Absolute path — a mangled/POSIX PATH must not turn this into a silent ENOENT.
+  try {
+    if (process.platform === 'win32') {
+      const taskkill = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'taskkill.exe');
+      spawn(taskkill, ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+    } else child.kill();
+  } catch { /* already gone */ }
   await new Promise((r) => setTimeout(r, 500));
   try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* windows may hold a handle */ }
   try { fs.rmSync(proj, { recursive: true, force: true }); } catch { /* ditto */ }

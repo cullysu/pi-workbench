@@ -78,8 +78,12 @@ const profile = fs.mkdtempSync(path.join(USERTMP, 'piwb-uichrome-'));
 const chrome = spawn(CHROME, [
   '--headless=new', '--remote-debugging-port=' + CDP_PORT,
   '--user-data-dir=' + profile, '--no-first-run', '--disable-gpu',
+  '--no-sandbox', // CI runners disable unprivileged userns — chrome's sandbox cannot start there
   '--window-size=1480,940', 'about:blank',
-], { stdio: 'ignore' });
+], { stdio: ['ignore', 'ignore', 'pipe'] });
+let chromeErr = '';
+chrome.stderr.on('data', (c) => { chromeErr = (chromeErr + c).slice(-4000); });
+chrome.on('exit', (code) => { if (!ws) console.error('chrome exited early (code ' + code + '):', chromeErr.slice(-600)); });
 
 const shots = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'ui-shots');
 fs.mkdirSync(shots, { recursive: true });
@@ -121,7 +125,7 @@ try {
     } catch { /* chrome booting */ }
     await new Promise((r) => setTimeout(r, 250));
   }
-  if (!ws) throw new Error('CDP never came up');
+  if (!ws) throw new Error('CDP never came up — chrome stderr tail: ' + chromeErr.slice(-400));
   ws.on('message', (raw) => {
     const m = JSON.parse(raw.toString());
     if (m.id && pending.has(m.id)) { pending.get(m.id).resolve(m.result); pending.delete(m.id); }

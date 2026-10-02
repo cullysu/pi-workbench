@@ -44,6 +44,13 @@ The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; m
 - Upgrades keep config and sessions; uninstall leaves `~/.pi-workbench` and `~/.pi` untouched
 - First launch extracts the bundled runtime (bundled Node + pi — works out of the box)
 
+## Docs
+
+- [Troubleshooting](docs/TROUBLESHOOTING.md): boot failures, port conflicts, MCP, empty sessions, log locations
+- [Contributing](CONTRIBUTING.md): setup, required gates, code conventions
+- [Changelog](CHANGELOG.md): behavior changes per version
+- Frontend library versions: [public/vendor/README.md](public/vendor/README.md)
+
 ## Configuration
 
 Everything is local, nothing is committed to this repo:

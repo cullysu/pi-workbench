@@ -29,10 +29,12 @@ console.log('[main] booted, electron', process.versions.electron, 'platform', pr
 const appRoot = app.isPackaged ? path.join(app.getPath('userData'), 'runtime') : path.join(__dirname, 'pkg-build');
 const runtimeZip = app.isPackaged ? path.join(process.resourcesPath, 'runtime.zip') : null;
 const IS_WIN = process.platform === 'win32';
+const WIN_PF = process.env['ProgramFiles'] || 'C:\\Program Files';
+const WIN_PF86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
 const NODE_CANDIDATES = IS_WIN ? [
   path.join(appRoot, 'node.exe'),
-  'C:\\Program Files\\nodejs\\node.exe',
-  'C:\\Program Files (x86)\\nodejs\\node.exe',
+  path.join(WIN_PF, 'nodejs', 'node.exe'),
+  path.join(WIN_PF86, 'nodejs', 'node.exe'),
 ] : [
   path.join(appRoot, 'node'),
   '/usr/bin/node',

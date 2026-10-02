@@ -132,12 +132,20 @@ function resolveSecrets() {
 
 // ---------- crash resilience: a local workbench should not die on a stray rejection ----------
 const LOG_FILE = path.join(CFG_DIR, 'server.log');
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
 let DEGRADED_AT = null; // set when an uncaughtException survives — /api/kernel surfaces it
+// error messages can carry provider errors verbatim — never let a key fragment reach the disk
+function redactSecrets(s) {
+  return String(s)
+    .replace(/sk-[A-Za-z0-9_-]{6,}/g, 'sk-***')
+    .replace(/ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[bp]-[A-Za-z0-9-]{10,}/g, '[redacted-token]')
+    .replace(/Bearer [A-Za-z0-9._-]{8,}/g, 'Bearer ***');
+}
 function logErr(line) {
   try {
     fs.mkdirSync(CFG_DIR, { recursive: true });
-    try { if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, ''); } catch { /* rotation is best-effort */ }
-    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
+    try { if (fs.statSync(LOG_FILE).size > LOG_MAX_BYTES) fs.renameSync(LOG_FILE, LOG_FILE + '.old'); } catch { /* rotation is best-effort */ }
+    fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${redactSecrets(line)}\n`);
   } catch { /* never let the error logger itself throw */ }
 }
 process.on('uncaughtException', (e) => { DEGRADED_AT = DEGRADED_AT || Date.now(); logErr('uncaughtException: ' + ((e && e.stack) || e)); });

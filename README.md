@@ -53,6 +53,13 @@
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`
 - 首次启动自动解压内置运行时（含捆绑的 Node 与 pi，开箱即用）
 
+## 文档
+
+- [故障排查](docs/TROUBLESHOOTING.md)：启动失败、端口占用、MCP 不连、会话为空、日志位置
+- [贡献指南](CONTRIBUTING.md)：环境搭建、必须跑的门禁、代码约定
+- [变更日志](CHANGELOG.md)：每个版本的行为变化
+- 前端库版本：[public/vendor/README.md](public/vendor/README.md)
+
 ## 配置
 
 所有个人配置都在本机，不进仓库：

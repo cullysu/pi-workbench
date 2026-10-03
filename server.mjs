@@ -324,6 +324,7 @@ async function testModelReply(modelId) {
 }
 
 // ---------- pi process manager ----------
+const MAX_TABS = 16; // each tab is a live pi child process — bound the resource fan-out
 const tabs = new Map(); // tabId -> {proc, cwd, sessionPath, sessionFile, model, startedAt, buffer}
 function spawnPi({ cwd, sessionPath, model, thinking, name, envExtra }) {
   const args = ['--mode', 'rpc', ...skillArgsFor(cwd)];
@@ -418,6 +419,10 @@ wss.on('connection', (ws) => {
       // pi runs inside a registered project (or HOME) — same boundary as the file browser
       if (cwd && !knownProject(cwd) && path.resolve(cwd) !== path.resolve(HOME)) {
         ws.send(JSON.stringify({ type: 'open-denied', tabId }));
+        return;
+      }
+      if (!tabs.has(tabId) && tabs.size >= MAX_TABS) {
+        ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: `too many live tabs (${MAX_TABS}) — close one first` }));
         return;
       }
       closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now

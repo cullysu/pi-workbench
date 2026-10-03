@@ -23,6 +23,8 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run lint
+      - name: Dependency audit (runtime tree)
+        run: npm audit --omit=dev --audit-level=high
 
   test:
     strategy:

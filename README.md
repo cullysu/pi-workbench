@@ -40,12 +40,13 @@
 从 [GitHub Releases](../../releases) 下载对应平台的安装包（以 1.1.3 为例）：
 
 | 平台 | 文件 |
-|---|---|
-| Windows (Electron) | `PiWorkbench-Setup-<版本>.exe` |
-| Windows (Tauri 轻量壳) | `PiWorkbench-<版本>-Tauri-x64-setup.exe` |
-| Linux | `PiWorkbench-<版本>-linux.AppImage` |
-| macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` |
-| macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` |
+|---|---|---|
+| 平台 | 文件 | 怎么选 |
+| Windows (Electron) | `PiWorkbench-Setup-<版本>.exe` | 功能最全的默认壳，不确定就选这个 |
+| Windows (Tauri 轻量壳) | `PiWorkbench-<版本>-Tauri-x64-setup.exe` | 同一功能面，体积更小（系统 WebView2） |
+| Linux | `PiWorkbench-<版本>-linux.AppImage` | 唯一 Linux 通道，`chmod +x` 后直接运行 |
+| macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` | 按 CPU 选；两个 dmg 内置同一个 x64 Node（ARM 经 Rosetta 运行的全兼容取舍） |
+| macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` | 同上 |
 
 安装包**内置 Node 运行时**（Windows/Linux 为 x64 官方二进制，macOS 为 x64 —— Apple Silicon 经 Rosetta 运行），**无需本机安装 Node.js**。`package.json` 的 `engines >= 22.13` 仅约束源码开发环境：
 

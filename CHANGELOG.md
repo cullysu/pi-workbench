@@ -2,6 +2,28 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.1.8 — 2026-10-03
+
+### Added
+- **WS heartbeat**: server pings every 30s; clients missing two beats are torn down (protocol-level pongs keep live connections untouched) — zombie sockets no longer linger holding adopted-tab state.
+- **Tiered failover cooldowns**: `429 / rate limit / quota` errors cool the model for 300s (quota windows are minutes); other failures keep the 120s chain step; 401/403 still rotate keys.
+
+## 1.1.7 — 2026-10-03
+
+### Added
+- **`MAX_TABS = 16`**: bounds the live pi child-process fan-out; an open past the cap gets `open-denied` with a reason (replacing an existing tabId stays allowed).
+- CI lint job runs `npm audit --omit=dev --audit-level=high` on the runtime dependency tree.
+
+## 1.1.6 — 2026-10-03
+
+### Added
+- `tests/failover.test.mjs`: real unit tests for the routing brain (10 cases — cooldown expiry, per-key rotation, chain walking); suite is 35 tests / 8s.
+- Docs trio: `docs/TROUBLESHOOTING.md`, `CONTRIBUTING.md`, `CHANGELOG.md`; `public/vendor/README.md` pins vendored lib versions.
+
+### Fixed
+- `logErr` redacts secrets before they reach disk (sk-* keys, GitHub/Slack token shapes, Bearer headers) and rotates to `server.log.old` instead of dropping history.
+- Windows Program Files resolved via environment variables (no hardcoded C:).
+
 ## 1.1.5 — 2026-10-02
 
 ### Added

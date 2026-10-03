@@ -401,6 +401,8 @@ function broadcast(obj) {
 wss.on('connection', (ws) => {
   ws.clientId = crypto.randomBytes(8).toString('hex');
   ws.adopted = new Set();
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
   console.log(`[ws] client connected (${ws.clientId})`);
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -450,6 +452,17 @@ wss.on('connection', (ws) => {
     for (const tab of tabs.values()) if (tab.owner === ws) tab.owner = null; // tab keeps running; frames wait for an adopt
   });
 });
+// zombie-connection sweep: browsers and the ws client answer protocol-level pings
+// automatically — a client that misses two beats is dead and gets torn down
+const WS_HEARTBEAT_MS = 30000;
+setInterval(() => {
+  for (const c of wss.clients) {
+    if (c.isAlive === false) { c.terminate(); continue; }
+    c.isAlive = false;
+    c.ping();
+  }
+}, WS_HEARTBEAT_MS).unref();
+
 function closeTab(tabId, silent = false) {
   const tab = tabs.get(tabId);
   if (tab) {
@@ -773,9 +786,12 @@ async function hRoutingFail(req, res, u) {
     if (!prov) return json(res, 400, { error: 'bad model' });
     const tab = tabId ? tabs.get(tabId) : null;
     const msg = String(error || '');
-    // auth-ish failures rotate the key; other failures cool the model (omp-style chain step)
+    // auth-ish failures rotate the key; rate limits cool longer (the quota window is
+    // usually minutes); everything else takes the standard omp-style chain step
     if (/401|403|unauthorized|invalid[ _-]*(api[ _-]*)?key|forbidden/i.test(msg)) {
       coolKey(prov, tab && tab.routeKeyIdx != null ? tab.routeKeyIdx : 0, msg, 300);
+    } else if (/\b429\b|rate[ _-]?limit|too many requests|quota/i.test(msg)) {
+      coolModel(model, msg, 300);
     } else {
       coolModel(model, msg, 120);
     }

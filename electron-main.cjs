@@ -2,11 +2,16 @@
 // Spawns the bundled node runtime (server.mjs) and loads its UI in the window.
 const { app, BrowserWindow, shell, dialog } = require('electron');
 const { spawn, exec } = require('node:child_process');
+const { randomBytes } = require('node:crypto');
 const net = require('node:net');
 const path = require('node:path');
 const fs = require('node:fs');
 
 const PORT = 32123;
+// per-launch secret: handed to the server via PIWB_TOKEN and injected into the page
+// AFTER load — the token never sits in the public HTML, so other local processes (and
+// other local users) cannot self-serve it from GET /
+const SHELL_TOKEN = randomBytes(24).toString('hex');
 let serverChild = null;
 let mainWindow = null;
 let quitting = false;
@@ -171,18 +176,18 @@ function portOpen(port) {
   });
 }
 
-// the port alone is not identity — a foreign process on 32123 must not get its UI
-// loaded into the shell; the workbench answers an unauthenticated /api/kernel with
-// a plain-text "403 ... forbidden", which is a cheap handshake to verify
+// possession of the per-launch token IS identity: only a server spawned with this
+// shell's PIWB_TOKEN answers /api/kernel with 200 — a foreign process (or an old
+// workbench instance from a previous launch) gets 403
 function isWorkbenchPort(port) {
   return new Promise((resolve) => {
     const s = net.connect(port, '127.0.0.1');
     let buf = '';
     const done = (v) => { try { s.destroy(); } catch { /* already gone */ } resolve(v); };
     s.setTimeout(1500);
-    s.once('connect', () => s.write('GET /api/kernel HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n'));
-    s.on('data', (c) => { buf += String(c); if (buf.length > 4096) done(buf.includes('403') && buf.includes('forbidden')); });
-    s.once('end', () => done(buf.includes('403') && buf.includes('forbidden')));
+    s.once('connect', () => s.write(`GET /api/kernel HTTP/1.0\r\nHost: 127.0.0.1\r\nx-api-token: ${SHELL_TOKEN}\r\n\r\n`));
+    s.on('data', (c) => { buf += String(c); if (buf.length > 4096) done(buf.startsWith('HTTP/1.') && buf.includes(' 200 ')); });
+    s.once('end', () => done(buf.startsWith('HTTP/1.') && buf.includes(' 200 ')));
     s.once('timeout', () => done(false));
     s.once('error', () => done(false));
   });
@@ -248,12 +253,15 @@ async function startServer() {
     appendLog('startServer: nodeExe=' + String(nodeExe) + ' serverJs=' + serverJs + ' exists=' + fs.existsSync(serverJs) + ' candidates: ' + seen);
     throw new Error('找不到 node 或 server.mjs (candidates: ' + seen + ')');
   }
+  // NODE_OPTIONS/NODE_PATH are stripped: a polluted parent env must not be able to
+  // redirect the server's module resolution or inject V8 flags into it
+  const { NODE_OPTIONS: _stripOpts, NODE_PATH: _stripPath, ...shellEnv } = process.env;
   serverChild = spawn(nodeExe, [serverJs], {
     cwd: appRoot,
     windowsHide: true,
     detached: !IS_WIN, // own process group on POSIX so killServer can signal the whole tree
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, PIWB_PARENT_PID: String(process.pid) },
+    env: { ...shellEnv, PIWB_TOKEN: SHELL_TOKEN, PIWB_PARENT_PID: String(process.pid) },
   });
   serverStartedAt = Date.now();
   serverChild.on('error', (err) => appendLog('server spawn error: ' + err.message));
@@ -291,6 +299,8 @@ function killServer() {
   } else {
     // the server was spawned detached with its own process group — one signal takes down the whole tree, pi grandchildren included
     try { process.kill(-pid, 'SIGTERM'); } catch { /* group may already be gone */ }
+    // escalate: a wedged tree must not survive the shell
+    setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch { /* group already gone */ } }, 3000).unref();
   }
   try { serverChild.kill(); } catch { /* teardown is best-effort */ }
   serverChild = null;
@@ -309,8 +319,12 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
   });
+  // token rides in AFTER load, never in the HTML: a reload re-injects via dom-ready
+  const injectToken = () => { mainWindow.webContents.executeJavaScript(`window.__API_TOKEN = ${JSON.stringify(SHELL_TOKEN)};`).catch(() => { /* page navigated away */ }); };
+  mainWindow.webContents.on('dom-ready', injectToken);
   // keyboard/IME need the OS focus to actually land in the window — show() alone
   // leaves focus on the previous app, which kills Ctrl+C/V, Win+V and the IME popup
   mainWindow.once('ready-to-show', () => {
@@ -342,7 +356,7 @@ function createWindow() {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
-  mainWindow.loadURL(`http://127.0.0.1:${PORT}`).catch((err) => {
+  mainWindow.loadURL(`http://127.0.0.1:${PORT}`).then(injectToken).catch((err) => {
     // the server can die between waitPort and this load — an unhandled rejection
     // here would bypass every friendly dialog above
     appendLog('FATAL loadURL: ' + err.message);

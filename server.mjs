@@ -41,7 +41,13 @@ const PI_CLI = path.join(__dirname, 'node_modules', '@earendil-works', 'pi-codin
 const PORT = Number(process.env.PIWB_PORT || 32123);
 // HTTP token auth: any local process could hit the port — random per boot, embedded
 // in the served HTML and required as x-api-token on /api/* routes
-const API_TOKEN = crypto.randomBytes(24).toString('hex');
+// Desktop shells bootstrap their own per-launch token via PIWB_TOKEN and inject it
+// into the page out-of-band — the token never sits in the public HTML. Plain
+// `node server.mjs` browser usage keeps the embedded mode via PIWB_EMBED_TOKEN=1
+// (plus a 0600 token file for tooling). See the shell repos' main entry points.
+const API_TOKEN = process.env.PIWB_TOKEN || crypto.randomBytes(24).toString('hex');
+const TOKEN_EMBED = process.env.PIWB_EMBED_TOKEN === '1';
+const TOKEN_FILE = path.join(CFG_DIR, 'token');
 const HTML_NONCE = crypto.randomBytes(16).toString('base64'); // CSP script nonce for the injected token bootstrap
 // Electron mode: self-terminate when the desktop app dies, so the port never leaks
 if (process.env.PIWB_PARENT_PID) {
@@ -378,7 +384,7 @@ function sendToPi(tabId, cmd) {
 }
 
 // ---------- ws ----------
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 }); // oversized frames are torn down by ws itself
 // A tab belongs to the connection that opened it: its pi-event/rpc/exit frames go
 // only there. When the owner connection dies the tab keeps running and frames stop
 // fanning out — a reopened window must explicitly {type:'adopt'} to reattach, so a
@@ -427,6 +433,11 @@ wss.on('connection', (ws) => {
       }
       if (!tabs.has(tabId) && tabs.size >= MAX_TABS) {
         ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: `too many live tabs (${MAX_TABS}) — close one first` }));
+        return;
+      }
+      const existingTab = tabs.get(tabId);
+      if (ownerLive(existingTab) && existingTab.owner !== ws) {
+        ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: 'tab is owned by another connection' }));
         return;
       }
       closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
@@ -1152,7 +1163,7 @@ function hStatic(req, res, u) {
     try {
       let data = fs.readFileSync(f);
       const ext = path.extname(f);
-      if (ext === '.html' || p === '/') {
+      if ((ext === '.html' || p === '/') && TOKEN_EMBED) {
         data = Buffer.from(data.toString('utf8').replace(
           '</head>',
           '<script nonce="' + HTML_NONCE + '">window.__API_TOKEN = ' + JSON.stringify(API_TOKEN) + '</scr' + 'ipt></head>'
@@ -1239,8 +1250,11 @@ const server = http.createServer(async (req, res) => {
 
 server.on('upgrade', (req, socket, head) => {
   const { pathname, searchParams } = new URL(req.url, 'http://x');
-  // WS can't carry custom headers — token rides the ?t= query param instead
-  if (hostAllowed(req.headers.host || '') && pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  // WS can't carry custom headers — token rides the ?t= query param instead;
+  // browsers always send Origin on WS, so cross-site upgrade attempts die here
+  const origin = req.headers.origin;
+  const originOk = !origin || origin === `http://127.0.0.1:${PORT}` || origin === `http://localhost:${PORT}`;
+  if (originOk && hostAllowed(req.headers.host || '') && pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   else socket.destroy();
 });
 
@@ -1253,6 +1267,11 @@ setInterval(() => { try { cron.tick(); } catch (e) { logErr('cron tick: ' + ((e 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) server.listen(PORT, '127.0.0.1', () => {
   console.log(`pi-workbench listening on http://127.0.0.1:${PORT}`);
+  // per-boot token file (0600 via atomicWrite on POSIX) for the desktop shells —
+  // written only when the server owns the token generation
+  if (!process.env.PIWB_TOKEN) {
+    try { saveJson(TOKEN_FILE, { token: API_TOKEN, at: new Date().toISOString() }); } catch { /* shells fall back to embedded mode */ }
+  }
   // warm the codex list cache in the background so the first UI click is instant
   setTimeout(() => {
     try {

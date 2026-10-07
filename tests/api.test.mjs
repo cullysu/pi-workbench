@@ -68,7 +68,7 @@ test.before(async () => {
 
   child = spawn(process.execPath, [path.join(ROOT, '..', 'server.mjs')], {
     cwd: ROOT,
-    env: { ...process.env, PIWB_PORT: String(PORT), HOME: tmpHome, USERPROFILE: tmpHome },
+    env: { ...process.env, PIWB_EMBED_TOKEN: '1', PIWB_PORT: String(PORT), HOME: tmpHome, USERPROFILE: tmpHome },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (c) => process.env.PIWB_TEST_DEBUG && process.stderr.write(c));

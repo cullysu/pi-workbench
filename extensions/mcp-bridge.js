@@ -111,6 +111,16 @@ class McpClient {
       this.proc.stdout.setEncoding("utf8");
       this.proc.stdout.on("data", (chunk) => {
         this.buffer += chunk;
+        if (this.buffer.length > 16 * 1024 * 1024) {
+          // a server flooding stdout without newlines must not balloon memory:
+          // fail the pending calls and reset for a clean retry
+          this.log(`[${this.name}] stdout overflow (>16MB without a newline) — resetting`);
+          for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error("mcp server stdout overflow")); }
+          this.pending.clear();
+          try { this.proc?.kill(); } catch { /* already dead */ }
+          this.proc = null; this.ready = null; this.tools = null; this.buffer = "";
+          return;
+        }
         let i;
         while ((i = this.buffer.indexOf("\n")) !== -1) {
           const line = this.buffer.slice(0, i).replace(/\r$/, "");

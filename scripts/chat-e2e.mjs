@@ -117,7 +117,7 @@ try {
 
   const server = spawn(process.execPath, [path.resolve('server.mjs')], {
     cwd: process.cwd(),
-    env: { ...process.env, PIWB_PORT: String(PORT), HOME: home, USERPROFILE: home },
+    env: { ...process.env, PIWB_EMBED_TOKEN: '1', PIWB_PORT: String(PORT), HOME: home, USERPROFILE: home },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   kids.push(server);

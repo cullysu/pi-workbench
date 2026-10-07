@@ -37,7 +37,7 @@ with open(codex_session, 'w', encoding='utf-8') as f:
     f.write(json.dumps({'timestamp': '2026-09-29T00:00:00Z', 'type': 'session_meta', 'payload': {'id': 'sweep', 'cwd': proj}}) + '\n')
     f.write(json.dumps({'timestamp': '2026-09-29T00:00:01Z', 'type': 'response_item', 'payload': {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': '扫一下'}]}}) + '\n')
 
-env = dict(os.environ, PIWB_PORT=str(PORT), HOME=home, USERPROFILE=home)
+env = dict(os.environ, PIWB_EMBED_TOKEN='1', PIWB_PORT=str(PORT), HOME=home, USERPROFILE=home)
 # node discovery: env override > PATH (works on CI linux runners) > the usual
 # Windows install dir (works from a bare Windows shell where PATH may not carry node)
 NODE = os.environ.get('NODE_BIN') or shutil.which('node') or r'C:\Program Files\nodejs\node.exe'

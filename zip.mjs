@@ -100,6 +100,7 @@ export function readZip(buf) {
   if (count > MAX_ENTRIES) throw new Error(`zip has too many entries (${count} > ${MAX_ENTRIES})`);
   let ptr = buf.readUInt32LE(eocd + 16);
   const out = [];
+  const seen = new Set();
   let totalUncompressed = 0;
   for (let n = 0; n < count; n++) {
     if (buf.readUInt32LE(ptr) !== 0x02014b50) throw new Error('bad central directory');
@@ -114,6 +115,9 @@ export function readZip(buf) {
     const mode = (extAttrs >>> 16) & 0xffff; // unix mode in the high 16 bits (0 = not stored)
     const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen);
     const l = localOffset;
+    if (buf.readUInt32LE(l) !== 0x04034b50) throw new Error(`bad local header for "${name}"`);
+    if (seen.has(name)) throw new Error(`duplicate entry: ${name}`);
+    seen.add(name);
     const lNameLen = buf.readUInt16LE(l + 26);
     const lExtraLen = buf.readUInt16LE(l + 28);
     const dataStart = l + 30 + lNameLen + lExtraLen;

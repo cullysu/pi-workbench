@@ -119,19 +119,48 @@ fn which_node_from_path() -> Option<PathBuf> {
 /// The port alone is not identity: a foreign process on port() must not get its page
 /// loaded into the shell. The workbench's unauthenticated index embeds a per-boot
 /// token bootstrap — requiring that marker is a cheap handshake.
-fn workbench_serving(port: u16) -> bool {
+fn workbench_serving(port: u16, token: &str) -> bool {
     use std::io::{Read, Write};
     let mut stream = match TcpStream::connect(("127.0.0.1", port)) {
         Ok(s) => s,
         Err(_) => return false,
     };
-    let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    // possession of the per-boot token IS identity: only a server spawned with this
+    // boot's token answers /api/kernel with 200 — a foreign process gets 403
+    let req = format!(
+        "GET /api/kernel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-api-token: {token}\r\nConnection: close\r\n\r\n"
+    );
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
     let mut buf = Vec::new();
     let _ = stream.take(65536).read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).contains("__API_TOKEN")
+    let head = String::from_utf8_lossy(&buf);
+    head.starts_with("HTTP/1.") && head.contains(" 200 ")
+}
+
+/// The server persists its per-boot token to ~/.pi-workbench/token (0600) for the
+/// desktop shell; retry a few seconds — the file lands when the server starts listening.
+fn read_server_token(timeout: Duration) -> Option<String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_default();
+    if home.is_empty() {
+        return None;
+    }
+    let path = Path::new(&home).join(".pi-workbench").join("token");
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(txt) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                if let Some(t) = v.get("token").and_then(|t| t.as_str()) {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
 }
 
 /// Verify the CI-written runtime manifest (sha256 per file) against the extracted
@@ -289,7 +318,7 @@ fn main() {
             ensure_runtime(&zip, &runtime_dir, &version)?;
             verify_runtime_manifest(&runtime_dir)?;
 
-            let already_up = workbench_serving(port());
+            let already_up = TcpStream::connect(("127.0.0.1", port())).is_ok();
             let mut owned = false;
             let mut child = None;
             if !already_up {
@@ -308,6 +337,13 @@ fn main() {
             if !wait_port(port(), Duration::from_secs(30)) {
                 return Err("local server did not start in time".into());
             }
+            // the server persists its per-boot token (0600) for this shell — without it
+            // the page has no credentials and the identity check below would fail
+            let shell_token = read_server_token(Duration::from_secs(10))
+                .ok_or_else(|| "server token file did not appear".to_string())?;
+            if !workbench_serving(port(), &shell_token) {
+                return Err("the service on the port did not pass identity verification (token handshake failed)".into());
+            }
 
             *app.state::<ServerChild>().child.lock().unwrap() = child;
             *app.state::<ServerChild>().owned.lock().unwrap() = owned;
@@ -316,7 +352,9 @@ fn main() {
             let handle = app.handle().clone();
             let nav_handle = handle.clone();
             let url = format!("http://127.0.0.1:{}/", port()).parse()?;
+            let init_js = format!("window.__API_TOKEN = {};\n", serde_json::to_string(&shell_token).unwrap_or_else(|_| "\"\"".into()));
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))
+                .initialization_script(&init_js)
                 .title("Pi Workbench")
                 .inner_size(1480.0, 940.0)
                 .min_inner_size(1080.0, 680.0)

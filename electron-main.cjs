@@ -11,7 +11,7 @@ const PORT = 32123;
 // per-launch secret: handed to the server via PIWB_TOKEN and injected into the page
 // AFTER load — the token never sits in the public HTML, so other local processes (and
 // other local users) cannot self-serve it from GET /
-const SHELL_TOKEN = randomBytes(24).toString('hex');
+const SHELL_TOKEN = process.env.PIWB_TOKEN || randomBytes(24).toString('hex'); // a launcher may pin the token (CI boot test, enterprise deployment)
 let serverChild = null;
 let mainWindow = null;
 let quitting = false;

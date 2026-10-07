@@ -198,6 +198,7 @@ jobs:
           RZ=squashfs-root/resources/runtime.zip
           ls -la "$RZ" || true
           if [ -f "$RZ" ]; then rm -rf /tmp/rzprobe; unzip -o "$RZ" -d /tmp/rzprobe > /tmp/unzip-probe.log 2>&1; echo "unzip exit: $?"; tail -5 /tmp/unzip-probe.log; fi
+          export PIWB_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           timeout 180 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
           ok=0
           for i in $(seq 1 150); do
@@ -208,7 +209,7 @@ jobs:
           done
           if [ "$ok" = "1" ]; then
             if curl -s http://127.0.0.1:32123/ | grep -q '__API_TOKEN'; then echo 'SECURITY FAILED: token leaked in served HTML'; ok=0; fi
-            tok=$(grep -o '"token":"[0-9a-f]*"' "$HOME/.pi-workbench/token" | cut -d'"' -f4)
+            tok=$PIWB_TOKEN
             piv=$(curl -s -H "x-api-token: $tok" http://127.0.0.1:32123/api/kernel | grep -o '"pi":"[^"]*"' || true)
             echo "kernel pi field: $piv"
             if [ -z "$piv" ]; then echo 'KERNEL CHECK FAILED: bundled pi missing from /api/kernel'; ok=0; fi

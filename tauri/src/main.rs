@@ -339,8 +339,9 @@ fn main() {
             }
             // the server persists its per-boot token (0600) for this shell — without it
             // the page has no credentials and the identity check below would fail
-            let shell_token = read_server_token(Duration::from_secs(10))
-                .ok_or_else(|| "server token file did not appear".to_string())?;
+            let shell_token = std::env::var("PIWB_TOKEN").ok()
+                .or_else(|| read_server_token(Duration::from_secs(10)))
+                .ok_or_else(|| "no bootstrap token (env or server token file)".to_string())?;
             if !workbench_serving(port(), &shell_token) {
                 return Err("the service on the port did not pass identity verification (token handshake failed)".into());
             }

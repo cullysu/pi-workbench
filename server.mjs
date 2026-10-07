@@ -184,6 +184,7 @@ const atomicWrite = (file, data) => {
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, data);
   fs.renameSync(tmp, file);
+  if (process.platform !== 'win32') { try { fs.chmodSync(file, 0o600); } catch { /* best effort */ } } // workbench configs carry keys
 };
 const saveJson = (file, obj) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -399,6 +400,7 @@ function broadcast(obj) {
 }
 
 wss.on('connection', (ws) => {
+  if (wss.clients.size >= 32) { try { ws.close(1013, 'too many clients'); } catch { /* gone */ } return; }
   ws.clientId = crypto.randomBytes(8).toString('hex');
   ws.adopted = new Set();
   ws.isAlive = true;
@@ -519,7 +521,8 @@ function readBody(req) {
   });
 }
 const runGit = (cwd, args, max = 200000) => new Promise((resolve) => {
-  const p = spawn('git', args, { cwd, windowsHide: true });
+  // 60s ceiling: a wedged repo (network mount, huge worktree) must not hang the panel forever
+  const p = spawn('git', args, { cwd, windowsHide: true, timeout: 60000 });
   let out = '', err = '';
   p.stdout.setEncoding('utf8');
   p.stderr.setEncoding('utf8');
@@ -542,17 +545,9 @@ const kb = createKbSkills({ MODEL_KB, MODEL_META_FILE, CFG_DIR, PI_SKILLS, AGENT
 const { kbLookup, kbPrice, loadModelMeta, saveModelMeta, listSkills, skillArgsFor } = kb;
 const sources = createSources({ PI_SESSIONS, CODEX_SESSIONS, CLAUDE_PROJECTS, OMP_SESSIONS, GROK_DIR, HOME, DatabaseSync, kbPrice, loadConfig });
 const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, listJsonFiles } = sources;
-const bt = createBackupTerminal({ CFG_DIR, HOME, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, VERSION: readJson(path.join(__dirname, 'package.json'))?.version || '0.0.0', listSkills, copyIfExists, createZip, readZip, spawn, fs, path });
+const bt = createBackupTerminal({ CFG_DIR, HOME, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, VERSION: readJson(path.join(__dirname, 'package.json'))?.version || '0.0.0', listSkills, createZip, readZip, spawn, fs, path });
 const { exportBackupZip, importBackupZip, migrateScan, openExternalTerm, execInCwd } = bt;
 
-function copyIfExists(src, dest) {
-  try {
-    if (!fs.existsSync(src)) return false;
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(src, dest);
-    return true;
-  } catch { return false; }
-}
 
 // ---------- api route handlers ----------
 
@@ -799,8 +794,9 @@ async function hRoutingFail(req, res, u) {
 }
 
 async function hRoutingOk(req, res, u) {
-    const { model } = await readBody(req);
-    if (model) clearCool(model);
+    const { model, tabId } = await readBody(req);
+    const tab = tabId ? tabs.get(tabId) : null;
+    if (model) clearCool(model, tab && tab.routeKeyIdx != null ? tab.routeKeyIdx : undefined);
     return json(res, 200, { ok: true });
 }
 
@@ -1022,6 +1018,7 @@ async function hImport(req, res, u, m) {
 
 async function hGitStatus(req, res, u) {
     const cwd = u.searchParams.get('cwd');
+    if (!knownProject(cwd)) return json(res, 400, { error: 'unknown project root' });
     const r = await runGit(cwd, ['status', '--porcelain=v1', '-b'], 100000);
     return json(res, 200, r);
 }
@@ -1049,6 +1046,7 @@ async function hGitWorktrees(req, res, u) {
 
 async function hSkills(req, res, u) {
     const cwd = u.searchParams.get('cwd') || null;
+    if (cwd && !knownProject(cwd)) return json(res, 400, { error: 'unknown project root' });
     if (req.method === 'POST') {
       const body = await readBody(req);
       const cfg = loadConfig();
@@ -1066,6 +1064,7 @@ async function hSkills(req, res, u) {
 async function hTemplates(req, res, u) {
     const out = [];
     const q = u.searchParams.get('cwd') || '';
+    if (q && !knownProject(q)) return json(res, 400, { error: 'unknown project root' });
     const dirs = [[path.join(HOME, '.pi', 'agent', 'prompts'), 'global']];
     if (q) dirs.push([path.join(q, '.pi', 'prompts'), 'project']);
     for (const [dir, source] of dirs) {

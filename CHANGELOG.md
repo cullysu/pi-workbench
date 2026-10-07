@@ -2,6 +2,18 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.1.9 — 2026-10-03
+
+### Fixed
+- **The bundled Node runtime was never actually used by the Electron shell**: `nodeExe` was resolved at module load, before the runtime was extracted, so the candidate list never saw the bundled node and the shell silently ran on system Node (or failed on a Node-less machine). Resolution now happens at server-start time, after extraction, with `X_OK` verification and full fallback.
+- **POSIX exec bit survived the zip round-trip**: `createZip` now stores unix modes in the central directory and the extraction chmods them back (the bundled `node` would previously extract as 644 and EACCES).
+- Single-entry decompression is capped (`maxOutputLength`), closing the inflate-before-cap memory spike.
+- Backup import: snapshot failures abort the import before any write (a silent snapshot gap made rollback destructive in edge cases); restored files and exported zips get `0600` on POSIX; all workbench configs are written `0600`.
+- `clearCool` with a key index only clears the key that succeeded — a 401'd key A no longer resurrects when key B answers.
+- git status joins diff/worktrees behind the registered-project gate; `runGit` has a 60s ceiling; templates/skills reject unknown project roots.
+- Tauri shell: port identity handshake (loads only the real workbench page), `PIWB_PORT` honored, Windows exit tree-kills the server's pi children.
+- WS client cap (32); "本地优先 · 面板数据不出本机" copy now says what it means.
+
 ## 1.1.8 — 2026-10-03
 
 ### Added

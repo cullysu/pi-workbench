@@ -29,7 +29,10 @@ const walk = (dir) => {
         console.warn('skip unreadable', rel, err.message);
         continue;
       }
-      entries.push({ name: rel, data });
+      // preserve the POSIX mode (the bundled node must stay executable through the zip round-trip)
+      const st = fs.statSync(process.platform === 'win32' ? '\\\\?\\' + full : full);
+      const mode = process.platform === 'win32' ? undefined : (st.mode & 0o7777);
+      entries.push({ name: rel, data, mode });
     }
   }
 };

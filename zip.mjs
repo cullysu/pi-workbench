@@ -23,14 +23,16 @@ const dosDateTime = (d = new Date()) => ({
   date: (((d.getFullYear() - 1980) & 0x7f) << 9) | (((d.getMonth() + 1) & 0xf) << 5) | (d.getDate() & 0x1f),
 });
 
-/** entries: [{ name: string, data: Buffer }] → zip Buffer */
+/** entries: [{ name: string, data: Buffer, mode?: number }] → zip Buffer.
+ *  mode (POSIX bits, e.g. 0o755) is stored in the unix external attributes so
+ *  executables survive a zip round-trip; omitted mode keeps the legacy DOS entry. */
 export function createZip(entries) {
   if (entries.length > 0xffff) throw new Error('too many entries for a non-zip64 archive (max 65535)'); // the 16-bit count field would silently wrap
   const { time, date } = dosDateTime();
   const locals = [];
   const centrals = [];
   let offset = 0;
-  for (const { name, data } of entries) {
+  for (const { name, data, mode } of entries) {
     const nameBuf = Buffer.from(name, 'utf8');
     const crc = crc32(data);
     let method = 8;
@@ -53,7 +55,7 @@ export function createZip(entries) {
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(mode === undefined ? 0 : (3 << 8) | 20, 6); // version made by: unix when a mode is present
     central.writeUInt16LE(0, 8);
     central.writeUInt16LE(method, 10);
     central.writeUInt16LE(time, 12);
@@ -66,7 +68,7 @@ export function createZip(entries) {
     central.writeUInt16LE(0, 32);
     central.writeUInt16LE(0, 34);
     central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(0, 38);
+    central.writeUInt32LE(mode === undefined ? 0 : (mode & 0xffff) << 16, 38); // unix mode lives in the high 16 bits
     central.writeUInt32LE(offset, 42);
     centrals.push(central, nameBuf);
     offset += 30 + nameBuf.length + payload.length;
@@ -108,17 +110,25 @@ export function readZip(buf) {
     const extraLen = buf.readUInt16LE(ptr + 30);
     const commentLen = buf.readUInt16LE(ptr + 32);
     const localOffset = buf.readUInt32LE(ptr + 42);
+    const extAttrs = buf.readUInt32LE(ptr + 38);
+    const mode = (extAttrs >>> 16) & 0xffff; // unix mode in the high 16 bits (0 = not stored)
     const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen);
     const l = localOffset;
     const lNameLen = buf.readUInt16LE(l + 26);
     const lExtraLen = buf.readUInt16LE(l + 28);
     const dataStart = l + 30 + lNameLen + lExtraLen;
     const payload = buf.subarray(dataStart, dataStart + csize);
-    const data = method === 0 ? Buffer.from(payload) : zlib.inflateRawSync(payload);
+    let data;
+    try {
+      data = method === 0 ? Buffer.from(payload) : zlib.inflateRawSync(payload, { maxOutputLength: MAX_TOTAL_UNCOMPRESSED });
+    } catch (e) {
+      if (e && e.code === 'ERR_BUFFER_TOO_LARGE') throw new Error(`entry "${name}" expands beyond ${MAX_TOTAL_UNCOMPRESSED} bytes — refusing (zip bomb?)`);
+      throw e;
+    }
     totalUncompressed += data.length;
     if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED) throw new Error(`zip expands beyond ${MAX_TOTAL_UNCOMPRESSED} bytes — refusing (zip bomb?)`);
     if (crc32(data) !== crc) throw new Error('crc mismatch for ' + name); // a torn backup must fail loudly, not import half-configs
-    out.push({ name, data });
+    out.push({ name, data, mode });
     ptr += 46 + nameLen + extraLen + commentLen;
   }
   return out;

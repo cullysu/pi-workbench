@@ -196,6 +196,11 @@ jobs:
             piv=$(curl -s -H "x-api-token: $tok" http://127.0.0.1:32123/api/kernel | grep -o '"pi":"[^"]*"' || true)
             echo "kernel pi field: $piv"
             if [ -z "$piv" ]; then echo 'KERNEL CHECK FAILED: bundled pi missing from /api/kernel'; ok=0; fi
+            ep=$(curl -s -H "x-api-token: $tok" http://127.0.0.1:32123/api/kernel | grep -o '"execPath":"[^"]*"' | head -1)
+            echo "serving node: $ep"
+            nm=$(stat -c '%a' "$HOME/.config/Pi Workbench/runtime/node" 2>/dev/null || echo missing)
+            echo "bundled node mode: $nm"
+            case "$ep" in *runtime/node*) echo 'BUNDLED NODE SERVING CONFIRMED' ;; *) echo 'KERNEL CHECK FAILED: the bundled node is not the one serving'; ok=0 ;; esac
           fi
           pkill -f appimage-extract-and-run 2>/dev/null || true
           if [ "$ok" != "1" ]; then

@@ -31,20 +31,33 @@ const runtimeZip = app.isPackaged ? path.join(process.resourcesPath, 'runtime.zi
 const IS_WIN = process.platform === 'win32';
 const WIN_PF = process.env['ProgramFiles'] || 'C:\\Program Files';
 const WIN_PF86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
-const NODE_CANDIDATES = IS_WIN ? [
-  path.join(appRoot, 'node.exe'),
-  path.join(WIN_PF, 'nodejs', 'node.exe'),
-  path.join(WIN_PF86, 'nodejs', 'node.exe'),
-] : [
-  path.join(appRoot, 'node'),
-  '/usr/bin/node',
-  '/usr/local/bin/node',
-  '/opt/homebrew/bin/node',
-];
-const nodeExe = NODE_CANDIDATES.find((p) => { try { return fs.existsSync(p); } catch { return false; } })
-  || (() => { // version managers / per-user installs: resolve node from PATH as a last resort
-    try { return require('child_process').execSync(IS_WIN ? 'where node.exe' : 'sh -c "command -v node"', { encoding: 'utf8', timeout: 5000 }).split(/\r?\n/)[0].trim(); } catch { return null; }
-  })();
+// resolved at startServer time — NOT module load: the bundled node only exists
+// after ensureRuntime() extracts it, and freezing the answer early silently
+// disabled the bundled runtime (the shell would use system node or fail)
+function resolveNodeExe() {
+  const candidates = IS_WIN ? [
+    path.join(appRoot, 'node.exe'),
+    path.join(WIN_PF, 'nodejs', 'node.exe'),
+    path.join(WIN_PF86, 'nodejs', 'node.exe'),
+  ] : [
+    path.join(appRoot, 'node'),
+    '/usr/bin/node',
+    '/usr/local/bin/node',
+    '/opt/homebrew/bin/node',
+  ];
+  const executable = (p) => {
+    try {
+      if (!fs.existsSync(p)) return false;
+      if (!IS_WIN) fs.accessSync(p, fs.constants.X_OK); // an extracted-but-not-chmodded node must fall through, not EACCES later
+      return true;
+    } catch { return false; }
+  };
+  const found = candidates.find(executable)
+    || (() => { // version managers / per-user installs: resolve node from PATH as a last resort
+      try { return require('child_process').execSync(IS_WIN ? 'where node.exe' : 'sh -c "command -v node"', { encoding: 'utf8', timeout: 5000 }).split(/\r?\n/)[0].trim(); } catch { return null; }
+    })();
+  return found;
+}
 const serverJs = path.join(appRoot, 'server.mjs');
 
 // Minimal zip reader (same format as zip.mjs): EOCD scan + central directory +
@@ -83,17 +96,25 @@ function cjsReadZip(buf) {
     const extraLen = buf.readUInt16LE(ptr + 30);
     const commentLen = buf.readUInt16LE(ptr + 32);
     const localOffset = buf.readUInt32LE(ptr + 42);
+    const extAttrs = buf.readUInt32LE(ptr + 38);
+    const mode = (extAttrs >>> 16) & 0xffff; // unix mode in the high 16 bits (0 = not stored)
     const name = buf.toString('utf8', ptr + 46, ptr + 46 + nameLen);
     const l = localOffset;
     const lNameLen = buf.readUInt16LE(l + 26);
     const lExtraLen = buf.readUInt16LE(l + 28);
     const dataStart = l + 30 + lNameLen + lExtraLen;
     const payload = buf.subarray(dataStart, dataStart + csize);
-    const data = method === 0 ? Buffer.from(payload) : require('zlib').inflateRawSync(payload);
+    let data;
+    try {
+      data = method === 0 ? Buffer.from(payload) : require('zlib').inflateRawSync(payload, { maxOutputLength: MAX_TOTAL_UNCOMPRESSED });
+    } catch (e) {
+      if (e && e.code === 'ERR_BUFFER_TOO_LARGE') throw new Error(`entry "${name}" expands beyond 1GB — refusing (zip bomb?)`);
+      throw e;
+    }
     totalUncompressed += data.length;
     if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED) throw new Error('zip expands beyond 1GB — refusing');
     if (crc32(data) !== crc) throw new Error('crc mismatch for ' + name);
-    out.push({ name, data });
+    out.push({ name, data, mode });
     ptr += 46 + nameLen + extraLen + commentLen;
   }
   return out;
@@ -134,6 +155,9 @@ function ensureRuntime() {
       if (realRoot !== appRoot && !path.resolve(dest).startsWith(realRoot + path.sep)) throw new Error('zip-slip via symlinked root blocked: ' + entry.name);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, entry.data);
+      if (!IS_WIN && entry.mode) {
+        try { fs.chmodSync(dest, entry.mode & 0o7777); } catch { /* best-effort: resolveNodeExe falls back when X_OK fails */ }
+      }
     }
     try { fs.writeFileSync(stamp, sig); } catch { /* stamp failure only costs a re-extract next boot */ }
   })();
@@ -210,9 +234,17 @@ async function startServer() {
     if (await isWorkbenchPort(PORT)) return; // our own previous instance
     throw new Error('端口 ' + PORT + ' 已被其它程序占用');
   }
+  const nodeExe = resolveNodeExe(); // AFTER ensureRuntime — the bundled node only exists now
   if (!nodeExe || !fs.existsSync(serverJs)) {
     // diagnostics for headless CI boot failures: which candidates were checked
-    const seen = NODE_CANDIDATES.map((cand) => cand + '=' + (() => { try { return fs.existsSync(cand); } catch { return 'ERR'; } })()).join(', ');
+    const seen = [
+      path.join(appRoot, IS_WIN ? 'node.exe' : 'node'),
+      path.join(WIN_PF, 'nodejs', 'node.exe'),
+      path.join(WIN_PF86, 'nodejs', 'node.exe'),
+      '/usr/bin/node',
+      '/usr/local/bin/node',
+      '/opt/homebrew/bin/node',
+    ].map((cand) => cand + '=' + (() => { try { return fs.existsSync(cand); } catch { return 'ERR'; } })()).join(', ');
     appendLog('startServer: nodeExe=' + String(nodeExe) + ' serverJs=' + serverJs + ' exists=' + fs.existsSync(serverJs) + ' candidates: ' + seen);
     throw new Error('找不到 node 或 server.mjs (candidates: ' + seen + ')');
   }

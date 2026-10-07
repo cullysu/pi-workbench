@@ -19,7 +19,7 @@ struct ServerChild {
     owned: Mutex<bool>,
 }
 
-const PORT: u16 = 32123;
+const PORT: u16 = std::env::var("PIWB_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(32123);
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 static VIEWER_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -111,6 +111,24 @@ fn which_node_from_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The port alone is not identity: a foreign process on PORT must not get its page
+/// loaded into the shell. The workbench's unauthenticated index embeds a per-boot
+/// token bootstrap — requiring that marker is a cheap handshake.
+fn workbench_serving(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let mut stream = match TcpStream::connect(("127.0.0.1", port)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    let _ = stream.take(65536).read_to_end(&mut buf);
+    String::from_utf8_lossy(&buf).contains("__API_TOKEN")
 }
 
 /// Verify the CI-written runtime manifest (sha256 per file) against the extracted
@@ -268,7 +286,7 @@ fn main() {
             ensure_runtime(&zip, &runtime_dir, &version)?;
             verify_runtime_manifest(&runtime_dir)?;
 
-            let already_up = TcpStream::connect(("127.0.0.1", PORT)).is_ok();
+            let already_up = workbench_serving(PORT);
             let mut owned = false;
             let mut child = None;
             if !already_up {
@@ -329,7 +347,20 @@ fn main() {
                 if owned {
                     if let Some(state) = app_handle.try_state::<ServerChild>() {
                         if let Some(mut child) = state.child.lock().unwrap().take() {
-                            let _ = child.kill();
+                            // the server spawns pi children (tabs, cron); on Windows kill the
+                            // whole tree so nothing outlives the shell
+                            #[cfg(windows)]
+                            {
+                                let _ = std::process::Command::new("taskkill")
+                                    .args(["/PID", &child.id().to_string(), "/T", "/F"])
+                                    .creation_flags(no_window())
+                                    .output();
+                                let _ = child.kill();
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                let _ = child.kill();
+                            }
                         }
                     }
                 }

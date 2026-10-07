@@ -124,6 +124,20 @@ test('envOverrideFor: env name from apiKey field, value from the rotated pool', 
   assert.deepEqual(failover.envOverrideFor('a'), { __keyIdx: 1, KEY_A: 'v2' }, 'same env name, rotated value');
 });
 
+test('clearCool with keyIdx clears only the successful key — a 401-rejected key stays cooled', () => {
+  const { failover } = makeCtx({
+    models: { providers: { a: { apiKey: '$KEY_A', models: [{ id: 'm1' }] } } },
+    routing: { providers: { a: { keyEnvs: ['KEY_A', 'KEY_B'] } } },
+    secretEnv: { KEY_A: 'v1', KEY_B: 'v2' },
+  });
+  failover.coolKey('a', 0, '401', 300); // key A rejects -> cooled
+  failover.coolModel('a/m1', 'x', 60);
+  failover.clearCool('a/m1', 1); // key B (never cooled) answered successfully
+  assert.equal(failover.pickKey('a')?.idx, 1, 'key B is the usable key');
+  assert.ok(failover.loadRouting().state.cooldowns['a#key0'], 'the 401 key A stays cooled under the new scoped clear');
+  assert.equal(failover.modelCooled('a/m1'), null);
+});
+
 test('clearCool clears the model and its provider keys, leaves others alone', () => {
   const { failover } = makeCtx({ models: { providers: PROVIDERS } });
   failover.coolModel('a/m1', 'x', 60);

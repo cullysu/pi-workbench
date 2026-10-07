@@ -99,6 +99,7 @@ jobs:
       - name: Assemble runtime (pi + server + public)
         shell: pwsh
         run: |
+          cp runtime-package.json runtime-package-lock.json pkg-build/
           npm ci --prefix pkg-build --omit=dev --no-fund --no-audit
           Copy-Item server.mjs pkg-build/server.mjs
           Copy-Item zip.mjs pkg-build/zip.mjs
@@ -158,6 +159,7 @@ jobs:
           node node_modules/electron/install.js
       - name: Assemble runtime (pi + server + public)
         run: |
+          cp runtime-package.json runtime-package-lock.json pkg-build/
           npm ci --prefix pkg-build --omit=dev --no-fund --no-audit
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib
@@ -265,6 +267,7 @@ jobs:
           node node_modules/electron/install.js
       - name: Assemble runtime (pi + server + public)
         run: |
+          cp runtime-package.json runtime-package-lock.json pkg-build/
           npm ci --prefix pkg-build --omit=dev --no-fund --no-audit
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib

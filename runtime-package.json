@@ -1,0 +1,10 @@
+{
+  "name": "pi-workbench-runtime",
+  "version": "1.2.1",
+  "private": true,
+  "description": "Pinned runtime dependency set shipped inside pi-workbench installers",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.0",
+    "ws": "8.21.3"
+  }
+}

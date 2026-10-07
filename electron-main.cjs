@@ -320,11 +320,21 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: path.join(__dirname, 'electron-preload.cjs'),
+      additionalArguments: [`--piwb-token=${SHELL_TOKEN}`], // sandboxed preload reads argv, not env
     },
   });
-  // token rides in AFTER load, never in the HTML: a reload re-injects via dom-ready
-  const injectToken = () => { mainWindow.webContents.executeJavaScript(`window.__API_TOKEN = ${JSON.stringify(SHELL_TOKEN)};`).catch(() => { /* page navigated away */ }); };
+  // token rides in via the preload BEFORE page scripts run; keep a dom-ready
+  // injection as belt-and-braces for the embedded-token dev mode only
+  const injectToken = () => { mainWindow.webContents.executeJavaScript(`window.__API_TOKEN = window.__PIWB_TOKEN || ${JSON.stringify(SHELL_TOKEN)};`).catch(() => { /* page navigated away */ }); };
   mainWindow.webContents.on('dom-ready', injectToken);
+  // the main window must never leave the local origin: a markdown link or script
+  // triggering navigation would otherwise receive the dom-ready token injection
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (url.startsWith(`http://127.0.0.1:${PORT}/`)) return;
+    e.preventDefault();
+    shell.openExternal(url).catch(() => { /* nothing sensible to do */ });
+  });
   // keyboard/IME need the OS focus to actually land in the window — show() alone
   // leaves focus on the previous app, which kills Ctrl+C/V, Win+V and the IME popup
   mainWindow.once('ready-to-show', () => {

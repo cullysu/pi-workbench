@@ -31,14 +31,14 @@
 ## 架构一览
 
 - **单文件服务端**：`server.mjs`（≈1000 行）= 42 个具名 handler + 一张声明式路由表 + 单派发循环；每个端点可按名检索，鉴权与 404 各归一处
-- **逻辑全部在 `lib/` 九个模块**：工厂 + ctx 显式注入，**每个工厂启动即校验接线契约**（缺一个依赖直接崩在启动，而不是某天早上静默哑火）；IO 只有三条原语（`lib/io.mjs`：有界遍历 / 头字节预览 / 分块 JSONL / 子进程收集）
+- **逻辑全部在 `lib/` 九个模块**：工厂 + ctx 显式注入，**每个工厂启动即校验接线契约**（缺一个依赖直接崩在启动，而不是某天早上静默哑火）；IO 只有四条原语（`lib/io.mjs`：有界遍历 / 头字节预览 / 分块 JSONL / 子进程收集）
 - **安全默认**：每启动随机 token + CSP nonce（无 `unsafe-inline` 脚本）、DOMPurify fail-closed 消毒、`path.relative` + realpath 双层路径包含校验（symlink/junction 也逃不出项目根）、Origin 校验、供应商 URL 强制 http(s) 且响应限流、配置原子写入（tmp+rename，损坏自动留证）、备份 zip CRC + 解压上限、定时任务 ID 白名单
 - **四层验证体系**（全部入库可复跑）：`eslint` 全仓 0/0 → 23 条 API 测试 + 47 路由全量扫描（`scripts/route-sweep.py`）→ 集成探针（`scripts/ws-probe.mjs`：spawn 真 pi 子进程走完 WS 全链）→ 浏览器级探针（`scripts/ui-probe.mjs`：headless Chromium 加载真实面板，断言回放气泡/17 面板/零 console error 并出截图）
 - **五通道构建**：CI 在 main 分支每次 push 产出 Windows Electron NSIS + Windows Tauri NSIS + Linux AppImage + macOS dmg（arm64/x64）五件安装包，AppImage 出包前在 xvfb 里真实启动并轮询 HTTP 200、并校验 /api/kernel 报告内置 pi 才算过；组装时生成 sha256 manifest，壳启动前先验运行时完整性（安装损坏会在启动时明确报错而不是半死不活）；出包同时产出 CycloneDX SBOM artifact
 
 ## 安装
 
-从 [GitHub Releases](../../releases) 下载对应平台的安装包（以 1.1.3 为例）：
+从 [GitHub Releases](../../releases) 下载对应平台的安装包（以 1.2.0 为例）：
 
 | 平台 | 文件 |
 |---|---|---|

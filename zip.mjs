@@ -26,9 +26,9 @@ const dosDateTime = (d = new Date()) => ({
 /** entries: [{ name: string, data: Buffer, mode?: number }] → zip Buffer.
  *  mode (POSIX bits, e.g. 0o755) is stored in the unix external attributes so
  *  executables survive a zip round-trip; omitted mode keeps the legacy DOS entry. */
-export function createZip(entries) {
+export function createZip(entries, { mtime } = {}) {
   if (entries.length > 0xffff) throw new Error('too many entries for a non-zip64 archive (max 65535)'); // the 16-bit count field would silently wrap
-  const { time, date } = dosDateTime();
+  const { time, date } = dosDateTime(mtime || new Date());
   const locals = [];
   const centrals = [];
   let offset = 0;

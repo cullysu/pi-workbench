@@ -27,7 +27,8 @@ const CDP_PORT = 9334;
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPLY = '1 加 1 等于 2。';
 // a Windows-directory TEMP poisons chrome profiles and fixture dirs
-const USERTMP = path.join(process.env.LOCALAPPDATA, 'Temp');
+import os from 'node:os';
+const USERTMP = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Temp') : os.tmpdir(); // linux CI has no LOCALAPPDATA
 fs.mkdirSync(USERTMP, { recursive: true });
 
 const waitPort = (port, timeoutMs) => new Promise((resolve) => {

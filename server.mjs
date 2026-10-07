@@ -419,6 +419,8 @@ wss.on('connection', (ws) => {
       const tab = tabs.get(msg.tabId);
       if (tab && !ownerLive(tab)) {
         tab.owner = ws;
+        tab.adoptedEver = true;
+        tab.orphanSince = null;
         ws.adopted.add(msg.tabId);
         try { ws.send(JSON.stringify({ type: 'adopted', tabId: msg.tabId })); } catch { /* socket gone */ }
       }
@@ -445,7 +447,7 @@ wss.on('connection', (ws) => {
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
       const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
-      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, owner: ws });
+      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, owner: ws, adoptedEver: true, orphanSince: null });
       ws.adopted.add(tabId);
       attachPiReader(tabId, proc);
       ws.send(JSON.stringify({ type: 'opened', tabId }));
@@ -468,11 +470,21 @@ wss.on('connection', (ws) => {
 // zombie-connection sweep: browsers and the ws client answer protocol-level pings
 // automatically — a client that misses two beats is dead and gets torn down
 const WS_HEARTBEAT_MS = 30000;
+const ORPHAN_TTL_MS = 30 * 60000; // an unadopted tab is a live pi child — it must not outlive its owner forever
 setInterval(() => {
   for (const c of wss.clients) {
     if (c.isAlive === false) { c.terminate(); continue; }
     c.isAlive = false;
     c.ping();
+  }
+  const now = Date.now();
+  for (const [tabId, tab] of tabs) {
+    if (ownerLive(tab) || tab.adoptedEver) continue;
+    if (!tab.orphanSince) { tab.orphanSince = now; continue; }
+    if (now - tab.orphanSince > ORPHAN_TTL_MS) {
+      logErr(`orphan tab ${tabId} reaped after ${Math.round((now - tab.orphanSince) / 60000)}m without an owner`);
+      try { closeTab(tabId); } catch { /* already gone */ }
+    }
   }
 }, WS_HEARTBEAT_MS).unref();
 
@@ -572,6 +584,8 @@ async function hConfig(req, res, u) {
     if (req.method === 'POST') {
       const body = await readBody(req);
       const cfg = loadConfig();
+      if ('projects' in body && !Array.isArray(body.projects)) return json(res, 400, { error: 'projects must be an array' });
+      if ('disabledSkills' in body && !Array.isArray(body.disabledSkills)) return json(res, 400, { error: 'disabledSkills must be an array' });
       const next = { ...cfg };
       for (const k of ['lang', 'theme', 'themeAuto', 'defaultModel', 'goals', 'disabledSkills', 'projects', 'relaySecret']) if (k in body) next[k] = body[k]; // allowlist: a stray body key must not clobber config
       saveConfig(next);
@@ -671,10 +685,11 @@ async function hModelsAvailable(req, res, u) {
 }
 
 async function hProvidersDiscover(req, res, u) {
-    const { provider, baseUrl, apiKey } = await readBody(req);
+    const { provider, baseUrl, apiKey, api: apiType } = await readBody(req);
     let url = baseUrl;
     let key = apiKey && apiKey !== KEY_SENTINEL ? apiKey : null; // masked round-trip = "use the stored key"
-    const pv = provider ? ((readJson(PI_MODELS) || { providers: {} }).providers?.[provider] || {}) : {};
+    let pv = provider ? ((readJson(PI_MODELS) || { providers: {} }).providers?.[provider] || {}) : {};
+    if (apiType) pv = { ...pv, api: apiType }; // an explicit UI selection beats stored config and hostname sniffing
     if ((!url || !key) && provider) {
       if (!url) url = pv.baseUrl;
       if (!key) {
@@ -749,7 +764,7 @@ async function hRouting(req, res, u) {
     const routing = loadRouting();
     if (req.method === 'POST') {
       const body = await readBody(req);
-      if (Array.isArray(body.chains)) routing.chains = body.chains;
+      if (Array.isArray(body.chains)) routing.chains = body.chains.filter((c) => Array.isArray(c) && c.every((x) => typeof x === 'string' && x.includes('/'))); // a malformed chain would only explode at failover time
       if (body.providers && typeof body.providers === 'object') {
         for (const [name, meta] of Object.entries(body.providers)) {
           const cur = routing.providers[name] = routing.providers[name] || {};
@@ -825,7 +840,7 @@ async function hCron(req, res, u) {
       const prev = readJson(CRON_FILE) || { jobs: [] };
       for (const j of jobs) {
         const old = prev.jobs.find((x) => x.id === j.id);
-        if (old) { j.lastRun = old.lastRun; j.lastStatus = old.lastStatus; j.lastOutput = old.lastOutput; }
+        if (old) { j.lastRun = old.lastRun; j.lastStatus = old.lastStatus; j.lastOutput = old.lastOutput; j.lastRunMs = old.lastRunMs; j.lastRunDay = old.lastRunDay; } // keep the scheduler's own state too, or toggling a switch re-runs the job now
         if (!j.id) j.id = 'job-' + crypto.randomBytes(4).toString('hex');
         if (typeof j.enabled !== 'boolean') j.enabled = true;
       }
@@ -1104,10 +1119,23 @@ async function hMcpConfig(req, res, u) {
       for (const [name, s] of Object.entries(servers)) {
         if (!s || typeof s !== 'object' || !s.command) return json(res, 400, { error: `server "${name}" needs a command` });
       }
-      fs.mkdirSync(path.dirname(MCP_FILE), { recursive: true });
-      fs.writeFileSync(MCP_FILE, JSON.stringify({ mcpServers: servers }, null, 2));
+      const prev = readJson(MCP_FILE) || { mcpServers: {} };
+      for (const s of Object.values(servers)) {
+        if (!s || typeof s.env !== 'object' || s.env === null) continue;
+        for (const k of Object.keys(s.env)) {
+          if (s.env[k] === '***') {
+            const stored = prev.mcpServers?.[Object.keys(servers).find((n2) => servers[n2] === s)]?.env?.[k];
+            if (stored !== undefined) s.env[k] = stored; else delete s.env[k];
+          }
+        }
+      }
+      atomicWrite(MCP_FILE, JSON.stringify({ mcpServers: servers }, null, 2)); // MCP env carries secrets
     }
-    return json(res, 200, readJson(MCP_FILE) || { mcpServers: {} });
+    const doc = readJson(MCP_FILE) || { mcpServers: {} };
+    for (const srv of Object.values(doc.mcpServers || {})) {
+      if (srv && typeof srv.env === 'object' && srv.env !== null) for (const k of Object.keys(srv.env)) srv.env[k] = '***'; // env values are secrets, like model keys
+    }
+    return json(res, 200, doc);
 }
 
 async function hMcpInstall(req, res, u) {

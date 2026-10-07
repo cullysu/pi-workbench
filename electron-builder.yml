@@ -10,6 +10,7 @@ directories:
   buildResources: assets
 files:
   - electron-main.cjs
+  - electron-preload.cjs
   - package.json
   - "!**/node_modules/**"
 extraResources:

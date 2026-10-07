@@ -37,7 +37,10 @@ const walk = (dir) => {
   }
 };
 walk(root);
+entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)); // stable order for reproducible archives
 
-const zip = createZip(entries);
+// SOURCE_DATE_EPOCH (unix seconds) pins the archive timestamps for byte-reproducible builds
+const epoch = Number(process.env.SOURCE_DATE_EPOCH);
+const zip = createZip(entries, epoch ? { mtime: new Date(epoch * 1000) } : {});
 fs.writeFileSync(outPath, zip);
 console.log(`pkg-runtime.zip written: ${zip.length} bytes, ${entries.length} entries`);

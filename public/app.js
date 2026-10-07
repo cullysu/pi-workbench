@@ -111,7 +111,8 @@ const api = {
   get: (p) => fetch(p, { headers: apiHeaders() }).then((r) => apiOn403(r)).then((r) => r.json()),
   post: (p, body) => fetch(p, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body || {}) }).then((r) => apiOn403(r)).then((r) => r.json()),
 };
-function apiHeaders() { return Object.assign({ 'content-type': 'application/json' }, window.__API_TOKEN ? { 'x-api-token': window.__API_TOKEN } : {}); }
+function apiToken() { return window.__API_TOKEN || window.__PIWB_TOKEN || ''; }
+function apiHeaders() { return Object.assign({ 'content-type': 'application/json' }, apiToken() ? { 'x-api-token': apiToken() } : {}); }
 // stale page (token from a previous boot) → every call 403s; reload once to pick up the fresh token
 function apiOn403(r) {
   if (r.status === 403 && !sessionStorage.getItem('pw403')) {
@@ -124,7 +125,7 @@ sessionStorage.removeItem('pw403');
 
 // ---------- websocket ----------
 function wsConnect() {
-  const ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(window.__API_TOKEN || '')}`);
+  const ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(apiToken())}`);
   state.ws = ws;
   ws.onopen = () => {
     state.wsReady = true; wsRetries = 0; $('#conn-dot').className = 'dot on';
@@ -1527,6 +1528,7 @@ $('#btn-discover').onclick = async () => {
     provider: state.editProv,
     baseUrl: $('#pf-url').value.trim(),
     apiKey: $('#pf-key').value.trim() || undefined,
+    api: $('#pf-api')?.value || undefined, // the user's chosen protocol beats hostname sniffing
   }).catch(() => null);
   btn.textContent = '获取模型列表'; btn.disabled = false;
   if (!r || !r.ok) { out.textContent = (r && (r.detail || `HTTP ${r.status}`)) || '获取失败'; return; }
@@ -2310,10 +2312,18 @@ __tl.addEventListener('mouseover', (e) => {
     const msgs = state.forkMsgs || [];
     const fm = msgs[k];
     if (!fm || !state.sessionFile) return;
-    const a = document.createElement('a');
-    a.href = '/api/session/export?path=' + encodeURIComponent(state.sessionFile);
-    a.download = 'session-export.md';
-    a.click();
+    // plain <a> navigation cannot carry x-api-token — fetch with the header and
+    // hand the blob to the downloader
+    fetch('/api/session/export?path=' + encodeURIComponent(state.sessionFile), { headers: { 'x-api-token': apiToken() } })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+      .then((blob) => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'session-export.md';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      })
+      .catch((e) => { $('#statusline').textContent = '导出失败：' + (e.message || e); });
   };
 });
 

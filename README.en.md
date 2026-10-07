@@ -9,6 +9,7 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 ## Features
 
 - **Multi-provider with real failover**: model-level fallback chains, key cooldown/rotation, auto-resend after provider failures (waits for pi's own auto-retry first)
+- **Data flow, stated plainly**: panel data (config, keys, sessions) stays on this machine; prompts, project context and tool results are sent to whichever model providers you configure
 - **Model knowledge base**: discover models from any OpenAI-compatible/Anthropic/Google upstream; context window, max output, and first-tier pricing auto-filled from a built-in KB; qualified model picker everywhere
 - **Cron jobs (built-in scheduler)**: schedule prompts daily or every N minutes; the server spawns headless pi runs and records output to per-run logs; no external scheduler needed
 - **Skills management**: scans pi Agent Skills (global + project), toggle per skill; disabled skills are excluded from new sessions
@@ -28,7 +29,7 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 
 ## Install
 
-Download the installer for your platform from [Releases](../../releases) (1.1.3 shown):
+Download the installer for your platform from [Releases](../../releases) (1.2.0 shown):
 
 | Platform | File |
 |---|---|---|

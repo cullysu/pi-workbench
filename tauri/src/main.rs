@@ -19,7 +19,10 @@ struct ServerChild {
     owned: Mutex<bool>,
 }
 
-const PORT: u16 = std::env::var("PIWB_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(32123);
+fn port() -> u16 {
+    static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    *PORT.get_or_init(|| std::env::var("PIWB_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(32123))
+}
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 static VIEWER_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -34,7 +37,7 @@ fn no_window() -> u32 {
 }
 
 fn is_local_app(u: &tauri::Url) -> bool {
-    u.host_str() == Some("127.0.0.1") && u.port() == Some(PORT)
+    u.host_str() == Some("127.0.0.1") && u.port() == Some(port())
 }
 
 /// Open an external page inside an app-owned viewer window (never the system browser).
@@ -113,7 +116,7 @@ fn which_node_from_path() -> Option<PathBuf> {
     None
 }
 
-/// The port alone is not identity: a foreign process on PORT must not get its page
+/// The port alone is not identity: a foreign process on port() must not get its page
 /// loaded into the shell. The workbench's unauthenticated index embeds a per-boot
 /// token bootstrap — requiring that marker is a cheap handshake.
 fn workbench_serving(port: u16) -> bool {
@@ -286,7 +289,7 @@ fn main() {
             ensure_runtime(&zip, &runtime_dir, &version)?;
             verify_runtime_manifest(&runtime_dir)?;
 
-            let already_up = workbench_serving(PORT);
+            let already_up = workbench_serving(port());
             let mut owned = false;
             let mut child = None;
             if !already_up {
@@ -302,7 +305,7 @@ fn main() {
                 owned = true;
             }
 
-            if !wait_port(PORT, Duration::from_secs(30)) {
+            if !wait_port(port(), Duration::from_secs(30)) {
                 return Err("local server did not start in time".into());
             }
 
@@ -312,7 +315,7 @@ fn main() {
 
             let handle = app.handle().clone();
             let nav_handle = handle.clone();
-            let url = format!("http://127.0.0.1:{PORT}/").parse()?;
+            let url = format!("http://127.0.0.1:{port()}/").parse()?;
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))
                 .title("Pi Workbench")
                 .inner_size(1480.0, 940.0)

@@ -315,7 +315,7 @@ fn main() {
 
             let handle = app.handle().clone();
             let nav_handle = handle.clone();
-            let url = format!("http://127.0.0.1:{port()}/").parse()?;
+            let url = format!("http://127.0.0.1:{}/", port()).parse()?;
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))
                 .title("Pi Workbench")
                 .inner_size(1480.0, 940.0)

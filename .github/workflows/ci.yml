@@ -167,7 +167,7 @@ jobs:
           curl -fsSL "https://nodejs.org/dist/${{ env.NODE_BUNDLE_VERSION }}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
           curl -fsSL "https://nodejs.org/dist/${{ env.NODE_BUNDLE_VERSION }}/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64.tar.xz" -o "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64.tar.xz"
           cd /tmp && grep "  node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64.tar.xz$" SHASUMS256.txt | sha256sum -c - && cd -
-          tar -xJf /tmp/node.txz -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64/bin/node"
+          tar -xJf "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64.tar.xz" -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64/bin/node"
           cp "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64/bin/node" pkg-build/node
           chmod +x pkg-build/node
           cd pkg-build && node ../scripts/write-manifest.mjs && cd ..
@@ -273,7 +273,7 @@ jobs:
           curl -fsSL "https://nodejs.org/dist/${{ env.NODE_BUNDLE_VERSION }}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
           curl -fsSL "https://nodejs.org/dist/${{ env.NODE_BUNDLE_VERSION }}/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64.tar.xz" -o "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64.tar.xz"
           cd /tmp && grep "  node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64.tar.xz$" SHASUMS256.txt | sha256sum -c - && cd -
-          tar -xJf /tmp/node.txz -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64/bin/node"
+          tar -xJf "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64.tar.xz" -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64/bin/node"
           cp "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64/bin/node" pkg-build/node
           chmod +x pkg-build/node
           cd pkg-build && node ../scripts/write-manifest.mjs && cd ..

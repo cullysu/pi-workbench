@@ -104,11 +104,11 @@ jobs:
           # into an ancestor project's node_modules, which would wipe electron
           $rt = Join-Path $env:RUNNER_TEMP 'piwb-runtime'
           New-Item -ItemType Directory -Force $rt | Out-Null
-          Copy-Item runtime-package.json -Destination $rt/package.json
-          Copy-Item runtime-package-lock.json -Destination $rt/package-lock.json
-          Set-Location $rt
+          Copy-Item runtime-package.json -Destination (Join-Path $rt 'package.json')
+          Copy-Item runtime-package-lock.json -Destination (Join-Path $rt 'package-lock.json')
+          Push-Location $rt
           npm ci --omit=dev --no-fund --no-audit
-          Set-Location ..
+          Pop-Location
           New-Item -ItemType Directory -Force pkg-build | Out-Null
           Copy-Item -Recurse -Force (Join-Path $rt 'node_modules') pkg-build/node_modules
           Copy-Item runtime-package.json,runtime-package-lock.json -Destination pkg-build/

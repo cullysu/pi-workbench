@@ -2,6 +2,22 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.2.3 — 2026-10-09
+
+### Fixed
+- **Async handler rejections no longer hang requests**: the route dispatch never awaited handler promises, so an exception after the first await escaped the error filter as an unhandledRejection and the client waited forever. Every handler error now returns a JSON 500.
+- Request bodies that parse to `null`/scalars are coerced to `{}` (handlers destructure; a `null` body used to throw the same way).
+- **WS `open` validates `sessionPath`** with the same realpath containment as every session endpoint — a crafted frame could point `pi --session` outside the sessions dir.
+- **Cron fixes**: stale `running` flags clear once at server start (a panel view used to clear a live run's lock and double-spawn); settings saves keep a live run's `running` flag; payload validation tightened (string name/prompt, unique ids, ≥0.5 min finite interval, ≤100 jobs).
+- **Orphan-tab TTL actually reaps now**: the sweep skipped tabs marked `adoptedEver` at creation, so nothing was ever reaped — ownerless pi children were immortal.
+- Failover now receives the **real provider error text** from the assistant turn (401/429 classification finally works from the UI path).
+- Ordinary prompts **no longer wipe the visible conversation history** (only the hero empty state clears).
+- 403 reload-loop source removed: the once-guard is cleared by the first successful request instead of every page load.
+- `atomicWrite` uses unique temp names (concurrent config writes shared one tmp path).
+- `readJsonl` uses StringDecoder (a multibyte char split across a 1MiB chunk boundary corrupted) and skips >32MB single lines.
+- Ledger accepts camelCase usage shapes (ZCode rollouts counted in imports but never in the ledger).
+- MCP extension pins typebox exactly and installs with `--ignore-scripts`; manifest includes the bundled node binaries; CI copies the runtime manifest anchors under their canonical names; chat-e2e self-heal only kills node/chrome images.
+
 ## 1.2.2 — 2026-10-08
 
 ### Fixed

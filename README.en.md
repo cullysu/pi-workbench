@@ -29,7 +29,7 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 
 ## Install
 
-Download the installer for your platform from [Releases](../../releases) (1.2.0 shown):
+Download the installer for your platform from [Releases](../../releases) (1.2.1 shown):
 
 | Platform | File |
 |---|---|---|

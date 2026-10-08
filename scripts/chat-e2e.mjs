@@ -127,6 +127,7 @@ try {
   const chrome = spawn(CHROME, [
     '--headless=new', '--remote-debugging-port=' + CDP_PORT,
     '--user-data-dir=' + profile, '--no-first-run', '--disable-gpu',
+    '--no-sandbox', // CI runners disable unprivileged userns — chrome's sandbox cannot start there
     '--window-size=1480,940', 'about:blank',
   ], { stdio: ['ignore', chromeLog, chromeLog] });
   kids.push(chrome);

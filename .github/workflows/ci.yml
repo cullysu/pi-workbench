@@ -160,6 +160,7 @@ jobs:
           node node_modules/electron/install.js
       - name: Assemble runtime (pi + server + public)
         run: |
+          mkdir -p pkg-build
           cp runtime-package.json runtime-package-lock.json pkg-build/
           npm ci --prefix pkg-build --omit=dev --no-fund --no-audit
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
@@ -268,6 +269,7 @@ jobs:
           node node_modules/electron/install.js
       - name: Assemble runtime (pi + server + public)
         run: |
+          mkdir -p pkg-build
           cp runtime-package.json runtime-package-lock.json pkg-build/
           npm ci --prefix pkg-build --omit=dev --no-fund --no-audit
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/

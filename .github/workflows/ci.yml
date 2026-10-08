@@ -104,7 +104,8 @@ jobs:
           # into an ancestor project's node_modules, which would wipe electron
           $rt = Join-Path $env:RUNNER_TEMP 'piwb-runtime'
           New-Item -ItemType Directory -Force $rt | Out-Null
-          Copy-Item runtime-package.json,runtime-package-lock.json -Destination $rt/
+          Copy-Item runtime-package.json -Destination $rt/package.json
+          Copy-Item runtime-package-lock.json -Destination $rt/package-lock.json
           Set-Location $rt
           npm ci --omit=dev --no-fund --no-audit
           Set-Location ..
@@ -173,7 +174,8 @@ jobs:
           # into an ancestor project's node_modules, which would wipe electron
           rt="$RUNNER_TEMP/piwb-runtime"
           mkdir -p "$rt"
-          cp runtime-package.json runtime-package-lock.json "$rt/"
+          cp runtime-package.json "$rt/package.json"
+          cp runtime-package-lock.json "$rt/package-lock.json"
           cd "$rt" && npm ci --omit=dev --no-fund --no-audit && cd -
           mkdir -p pkg-build
           cp -r "$rt/node_modules" pkg-build/node_modules
@@ -288,7 +290,8 @@ jobs:
           # into an ancestor project's node_modules, which would wipe electron
           rt="$RUNNER_TEMP/piwb-runtime"
           mkdir -p "$rt"
-          cp runtime-package.json runtime-package-lock.json "$rt/"
+          cp runtime-package.json "$rt/package.json"
+          cp runtime-package-lock.json "$rt/package-lock.json"
           cd "$rt" && npm ci --omit=dev --no-fund --no-audit && cd -
           mkdir -p pkg-build
           cp -r "$rt/node_modules" pkg-build/node_modules

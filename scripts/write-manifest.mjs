@@ -17,7 +17,7 @@ const walk = (dir) => {
     else files.push(path.relative(root, p).split(path.sep).join('/'));
   }
 };
-for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib', 'public', 'data', 'package.json']) {
+for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'node', 'node.exe', 'lib', 'public', 'data', 'package.json']) {
   const p = path.join(root, top);
   if (!fs.existsSync(p)) continue;
   if (fs.statSync(p).isDirectory()) walk(p);

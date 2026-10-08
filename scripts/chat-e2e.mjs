@@ -144,8 +144,14 @@ try {
       .map((l) => l.trim().split(/\s+/).pop()));
     for (const pid of pids) {
       try {
-        // these ports belong to this probe alone — any LISTENING holder is a leftover
-        // instance (node mock/server or a headless chrome that survived a crash)
+        // only kill a LEFTOVER COPY OF OURSELVES: verify the pid's image name is
+        // node/chrome before firing — a blind kill-by-port could hit an unrelated
+        // service that happens to hold the port
+        const img = cp.execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: 'utf8' }).trim();
+        if (!/^(node|chrome)\.exe/i.test(img.split(',')[0] || '')) {
+          console.log('self-heal: pid', pid, 'is not node/chrome — leaving it alone');
+          continue;
+        }
         console.log('self-heal: killing leftover pid', pid);
         cp.execSync('taskkill /PID ' + pid + ' /F');
       } catch { /* gone already */ }

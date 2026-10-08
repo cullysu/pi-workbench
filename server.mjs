@@ -186,8 +186,9 @@ function loadRouting() {
 }
 // atomic write: tmp+rename so a crash mid-write can never leave a torn config
 // (Windows rename replaces existing files — no unlink dance needed)
+let atomicSeq = 0;
 const atomicWrite = (file, data) => {
-  const tmp = `${file}.tmp-${process.pid}`;
+  const tmp = `${file}.tmp-${process.pid}-${++atomicSeq}`; // concurrent writes must not share one tmp path
   fs.writeFileSync(tmp, data);
   fs.renameSync(tmp, file);
   if (process.platform !== 'win32') { try { fs.chmodSync(file, 0o600); } catch { /* best effort */ } } // workbench configs carry keys
@@ -442,6 +443,20 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: 'tab is owned by another connection' }));
         return;
       }
+      if (sessionPath) {
+        // pi --session takes a filesystem path — hold it to the same boundary as
+        // every other session endpoint, or a crafted frame reads/writes outside
+        const rootReal = (() => { try { return fs.realpathSync(PI_SESSIONS); } catch { return PI_SESSIONS; } })();
+        let real;
+        try { real = fs.realpathSync(path.resolve(String(sessionPath))); } catch {
+          ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: 'sessionPath not found' }));
+          return;
+        }
+        if (real !== rootReal && !real.startsWith(rootReal + path.sep)) {
+          ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: 'sessionPath outside sessions dir' }));
+          return;
+        }
+      }
       closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
       const prov = model ? splitModel(model)[0] : null;
       const ov = prov ? envOverrideFor(prov) : null;
@@ -539,7 +554,12 @@ function readBody(req) {
     let b = '';
     req.setEncoding('utf8'); // chunkwise coercion would corrupt multibyte bodies split across packets
     req.on('data', (c) => { b += c; if (b.length > 5e6) { resolve({}); req.destroy(); } });
-    req.on('end', () => { try { resolve(JSON.parse(b || '{}')); } catch { resolve({}); } });
+    req.on('end', () => {
+      try {
+        const j = JSON.parse(b || '{}');
+        resolve(j && typeof j === 'object' ? j : {}); // 'null'/scalars must not explode handler destructuring
+      } catch { resolve({}); }
+    });
     req.on('error', () => resolve({}));
   });
 }
@@ -831,23 +851,35 @@ async function hCron(req, res, u) {
       const body = await readBody(req);
       const jobs = body.jobs;
       if (!Array.isArray(jobs)) return json(res, 400, { error: 'jobs array required' });
+      if (jobs.length > 100) return json(res, 400, { error: '定时任务最多 100 个' });
+      const seenIds = new Set();
       for (const j of jobs) {
-        if (!j.name || !j.prompt) return json(res, 400, { error: '每个任务需要 name 和 prompt' });
+        if (typeof j.name !== 'string' || !j.name || typeof j.prompt !== 'string' || !j.prompt) return json(res, 400, { error: '每个任务需要字符串类型的 name 和 prompt' });
         if (j.id != null && j.id !== '' && !isJobId(j.id)) return json(res, 400, { error: '任务 ID 只能含字母/数字/连字符，最长 64 字符' });
+        if (j.id && seenIds.has(j.id)) return json(res, 400, { error: '任务 ID 重复：' + j.id });
+        if (j.id) seenIds.add(j.id);
         if (j.kind === 'daily' && !/^\d{2}:\d{2}$/.test(j.time || '')) return json(res, 400, { error: 'daily 任务需要 HH:MM 时间' });
-        if (j.kind === 'interval' && (!(Number(j.everyMin) > 0))) return json(res, 400, { error: 'interval 任务需要正的 everyMin 分钟数' });
+        if (j.kind === 'interval') {
+          const m = Number(j.everyMin);
+          if (!(m >= 0.5) || !Number.isFinite(m)) return json(res, 400, { error: 'interval 任务需要 ≥0.5 的有限 everyMin 分钟数' });
+        }
       }
       const prev = readJson(CRON_FILE) || { jobs: [] };
       for (const j of jobs) {
         const old = prev.jobs.find((x) => x.id === j.id);
-        if (old) { j.lastRun = old.lastRun; j.lastStatus = old.lastStatus; j.lastOutput = old.lastOutput; j.lastRunMs = old.lastRunMs; j.lastRunDay = old.lastRunDay; } // keep the scheduler's own state too, or toggling a switch re-runs the job now
+        if (old) {
+          j.lastRun = old.lastRun; j.lastStatus = old.lastStatus; j.lastOutput = old.lastOutput;
+          j.lastRunMs = old.lastRunMs; j.lastRunDay = old.lastRunDay;
+          if (old.running) j.running = true; // a live run must survive a settings save, or tick double-spawns
+        }
         if (!j.id) j.id = 'job-' + crypto.randomBytes(4).toString('hex');
         if (typeof j.enabled !== 'boolean') j.enabled = true;
       }
       saveJson(CRON_FILE, { jobs });
     }
+    // bootReset deliberately does NOT run here: it clears running flags, and a
+    // panel refresh during a live run would clear the lock and double-spawn the job
     const d = readJson(CRON_FILE) || { jobs: [] };
-    if (cron.bootReset(d)) saveJson(CRON_FILE, d);
     return json(res, 200, d);
 }
 
@@ -1150,7 +1182,7 @@ async function hMcpInstall(req, res, u) {
     const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
     if (!hasDep) {
       // npm install in background — the API returns immediately
-      execInCwd(destDir, 'npm install --omit=dev --no-fund --no-audit');
+      execInCwd(destDir, 'npm install --omit=dev --no-fund --no-audit --ignore-scripts'); // lifecycle scripts are a supply-chain door; typebox needs none
     }
     return json(res, 200, { ok: true, dest: destDir, note: hasDep ? 'already installed' : 'npm install running in background' });
 }
@@ -1264,7 +1296,7 @@ const server = http.createServer(async (req, res) => {
       for (const [method, path, handler] of routes) {
         if (method && method !== '*' && method !== req.method) continue; // null/regex rows match any method
         const m = typeof path === 'string' ? (u.pathname === path ? [path] : null) : path.exec(u.pathname);
-        if (m) return handler(req, res, u, m);
+        if (m) return await handler(req, res, u, m); // await: rejections must hit the catch below, not hang the request
       }
       return json(res, 404, { error: 'not found' });
     }
@@ -1287,6 +1319,11 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 resolveSecrets();
+// cron: clear stale running flags exactly once per process lifetime (never per request)
+try {
+  const d = readJson(CRON_FILE) || { jobs: [] };
+  if (cron.bootReset(d)) saveJson(CRON_FILE, d);
+} catch { /* cron state is best-effort at boot */ }
 
 // cron scheduler heartbeat — without this tick is never called and daily/interval
 // jobs only ever run via run-now

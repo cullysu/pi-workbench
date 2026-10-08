@@ -111,7 +111,8 @@ jobs:
           Pop-Location
           New-Item -ItemType Directory -Force pkg-build | Out-Null
           Copy-Item -Recurse -Force (Join-Path $rt 'node_modules') pkg-build/node_modules
-          Copy-Item runtime-package.json,runtime-package-lock.json -Destination pkg-build/
+          Copy-Item runtime-package.json -Destination pkg-build/package.json
+          Copy-Item runtime-package-lock.json -Destination pkg-build/package-lock.json
           Copy-Item server.mjs pkg-build/server.mjs
           Copy-Item zip.mjs pkg-build/zip.mjs
           Copy-Item electron-main.cjs pkg-build/electron-main.cjs
@@ -179,7 +180,8 @@ jobs:
           cd "$rt" && npm ci --omit=dev --no-fund --no-audit && cd -
           mkdir -p pkg-build
           cp -r "$rt/node_modules" pkg-build/node_modules
-          cp runtime-package.json runtime-package-lock.json pkg-build/
+          cp runtime-package.json pkg-build/package.json
+          cp runtime-package-lock.json pkg-build/package-lock.json
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib
           cp -r data pkg-build/data
@@ -295,7 +297,8 @@ jobs:
           cd "$rt" && npm ci --omit=dev --no-fund --no-audit && cd -
           mkdir -p pkg-build
           cp -r "$rt/node_modules" pkg-build/node_modules
-          cp runtime-package.json runtime-package-lock.json pkg-build/
+          cp runtime-package.json pkg-build/package.json
+          cp runtime-package-lock.json pkg-build/package-lock.json
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib
           cp -r data pkg-build/data

@@ -115,14 +115,13 @@ function apiToken() { return window.__API_TOKEN || window.__PIWB_TOKEN || ''; }
 function apiHeaders() { return Object.assign({ 'content-type': 'application/json' }, apiToken() ? { 'x-api-token': apiToken() } : {}); }
 // stale page (token from a previous boot) → every call 403s; reload once to pick up the fresh token
 function apiOn403(r) {
+  if (r.ok) { try { sessionStorage.removeItem('pw403'); } catch { /* private mode */ } } // a working request re-arms the one-shot reload
   if (r.status === 403 && !sessionStorage.getItem('pw403')) {
     try { sessionStorage.setItem('pw403', '1'); } catch { /* private mode may block storage */ }
     location.reload();
   }
   return r;
 }
-sessionStorage.removeItem('pw403');
-
 // ---------- websocket ----------
 function wsConnect() {
   const ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(apiToken())}`);

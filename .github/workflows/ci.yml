@@ -100,10 +100,17 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force pkg-build | Out-Null
-          Copy-Item runtime-package.json,runtime-package-lock.json -Destination pkg-build/
-          Set-Location pkg-build
+          # install the pinned runtime set in a neutral dir: npm hoists nested installs
+          # into an ancestor project's node_modules, which would wipe electron
+          $rt = Join-Path $env:RUNNER_TEMP 'piwb-runtime'
+          New-Item -ItemType Directory -Force $rt | Out-Null
+          Copy-Item runtime-package.json,runtime-package-lock.json -Destination $rt/
+          Set-Location $rt
           npm ci --omit=dev --no-fund --no-audit
           Set-Location ..
+          New-Item -ItemType Directory -Force pkg-build | Out-Null
+          Copy-Item -Recurse -Force (Join-Path $rt 'node_modules') pkg-build/node_modules
+          Copy-Item runtime-package.json,runtime-package-lock.json -Destination pkg-build/
           Copy-Item server.mjs pkg-build/server.mjs
           Copy-Item zip.mjs pkg-build/zip.mjs
           Copy-Item electron-main.cjs pkg-build/electron-main.cjs
@@ -162,9 +169,15 @@ jobs:
           node node_modules/electron/install.js
       - name: Assemble runtime (pi + server + public)
         run: |
+          # install the pinned runtime set in a neutral dir: npm hoists nested installs
+          # into an ancestor project's node_modules, which would wipe electron
+          rt="$RUNNER_TEMP/piwb-runtime"
+          mkdir -p "$rt"
+          cp runtime-package.json runtime-package-lock.json "$rt/"
+          cd "$rt" && npm ci --omit=dev --no-fund --no-audit && cd -
           mkdir -p pkg-build
+          cp -r "$rt/node_modules" pkg-build/node_modules
           cp runtime-package.json runtime-package-lock.json pkg-build/
-          cd pkg-build && npm ci --omit=dev --no-fund --no-audit && cd -
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib
           cp -r data pkg-build/data
@@ -271,9 +284,15 @@ jobs:
           node node_modules/electron/install.js
       - name: Assemble runtime (pi + server + public)
         run: |
+          # install the pinned runtime set in a neutral dir: npm hoists nested installs
+          # into an ancestor project's node_modules, which would wipe electron
+          rt="$RUNNER_TEMP/piwb-runtime"
+          mkdir -p "$rt"
+          cp runtime-package.json runtime-package-lock.json "$rt/"
+          cd "$rt" && npm ci --omit=dev --no-fund --no-audit && cd -
           mkdir -p pkg-build
+          cp -r "$rt/node_modules" pkg-build/node_modules
           cp runtime-package.json runtime-package-lock.json pkg-build/
-          cd pkg-build && npm ci --omit=dev --no-fund --no-audit && cd -
           cp server.mjs zip.mjs electron-main.cjs ledger.mjs pkg-build/
           cp -r lib pkg-build/lib
           cp -r data pkg-build/data

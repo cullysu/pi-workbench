@@ -21,6 +21,7 @@ All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 - Tauri opens external pages in the system browser — app-owned viewer webviews for remote pages are gone.
 
 ### CI
+- The gate worked on its first run: the shipped runtime tree carries pi 0.85.x's pinned `undici` 8.9.0 (10 GHSAs, fixed 8.10.2+) and `brace-expansion` 5.0.9 (3 DoS GHSAs, fixed 5.0.12). The runtime lockfile now holds both at the fixed versions — npm's `overrides` engine silently ignores them on this tree (npm 11.12.1), so the lockfile is the enforcement and the audit gate is the tripwire.
 - The shipped runtime dependency tree gets its own `npm audit` gate in addition to the root tree; `cargo audit` gates the Tauri shell; same-repo PRs now run the full e2e/build gates.
 
 ## 1.2.3 — 2026-10-09

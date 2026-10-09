@@ -338,7 +338,7 @@ test('cron scheduler actually ticks: a due job is spawned without waiting for ru
     SECRET_ENV: {}, PI_CLI: 'pi-cli', cronPiArgs: () => ['-p', 'x'], broadcast: () => {},
     readJson: (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } },
     saveJson: (f, d) => { fs.writeFileSync(f, JSON.stringify(d)); },
-    spawn: () => { spawned++; const fake = { on: () => {}, stdin: { write: () => {} } }; return fake; },
+    spawn: () => { spawned++; const fake = { on: () => {}, stdin: { write: () => {} }, stdout: { on: () => {} }, stderr: { on: () => {} } }; return fake; },
   });
   engine.tick();
   await new Promise((r) => setTimeout(r, 50));
@@ -447,4 +447,18 @@ test('ws adopt: foreign tabs are invisible until explicitly adopted', { skip: !f
   ws2.send(JSON.stringify({ type: 'close', tabId: 'adopt-1' }));
   await wait((f) => f.type === 'pi-exit' && f.tabId === 'adopt-1', 15000, 'adopter can close');
   ws2.close();
+});
+
+test('cron rejects a cwd outside the registered projects', async () => {
+  const bad = await req('/api/cron', { jobs: [{ name: 'x', prompt: 'y', kind: 'interval', everyMin: 5, cwd: '/etc', enabled: false }] });
+  assert.equal(bad.status, 400);
+  const good = await req('/api/cron', { jobs: [{ name: 'x', prompt: 'y', kind: 'interval', everyMin: 5, enabled: false }] });
+  assert.equal(good.status, 200);
+});
+
+test('update/check reports the current version alongside the latest tag', async () => {
+  const r = await req('/api/update/check');
+  assert.equal(r.status, 200);
+  assert.equal(typeof r.data.current, 'string');
+  assert.ok('updateAvailable' in r.data);
 });

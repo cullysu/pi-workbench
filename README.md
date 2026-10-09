@@ -77,11 +77,12 @@
 
 ```bash
 npm install
-node server.mjs        # http://127.0.0.1:32123
-npm run electron       # 或: node_modules\.bin\electron .
+node server.mjs           # http://127.0.0.1:32123
+npm run prepare-runtime   # 组装 pkg-build/（按提交进库的 runtime 锁文件 npm ci —— 与 CI 同一套依赖集）
+npm run electron          # 或: node_modules\.bin\electron .
 ```
 
-打包：`npx electron-builder --win nsis --x64`（产物在 `dist_electron/`，不随 git 提交）。
+打包：`npx electron-builder --win nsis --x64`（产物在 `dist_electron/`，不随 git 提交）。可分发的安装包还需要捆绑 Node 的 `pkg-runtime.zip`（`scripts/make-runtime.mjs` 从 pkg-build/ 打包）——完整组装流程以 CI workflow 为准，它是组装逻辑的唯一事实源。
 
 测试：`npm test`（node:test，在隔离 HOME 里起真实服务端打全量 API）；CI：push 到 main 自动跑双平台测试并出 Windows 安装包 artifact。
 

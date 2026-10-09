@@ -13,6 +13,7 @@ import { collectProc } from './lib/io.mjs';
 import {createCron} from './lib/cron.mjs';
 import {createFailover} from './lib/failover.mjs';
 import {createSources} from './lib/sources.mjs';
+import { killTree, spawnTreeOpts } from './lib/proctree.mjs';
 import {createKbSkills} from './lib/kb-skills.mjs';
 import {createBackupTerminal} from './lib/backup-terminal.mjs';
 import { spawn } from 'node:child_process';
@@ -201,7 +202,7 @@ const saveJson = (file, obj) => {
 // ---------- cron: scheduled pi prompt runs (lib/cron.mjs) ----------
 const CRON_FILE = path.join(CFG_DIR, 'cron.json');
 const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
-const cron = createCron({ CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, cronPiArgs, broadcast, readJson, saveJson, spawn });
+const cron = createCron({ CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, cronPiArgs, broadcast, readJson, saveJson, spawn, get knownProject() { return knownProject; } });
 function saveRouting(r) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
   atomicWrite(ROUTING_FILE, JSON.stringify(r, null, 2));
@@ -343,7 +344,7 @@ function spawnPi({ cwd, sessionPath, model, thinking, name, envExtra }) {
   const proc = spawn(process.execPath, [PI_CLI, ...args], {
     cwd: cwd || HOME,
     env: { ...process.env, ...SECRET_ENV, ...(envExtra || {}) },
-    windowsHide: true,
+    ...spawnTreeOpts(),
   });
   proc.stdin.setEncoding('utf8');
   return proc;
@@ -367,6 +368,9 @@ function attachPiReader(tabId, proc) {
       }
       broadcast({ type: 'pi-event', tabId, data: ev });
     }
+    // a corrupt/flooded child emitting without any newline degrades to a tail
+    // instead of OOMing the single-threaded server
+    if (buffer.length > 16 * 1024 * 1024) buffer = buffer.slice(-65536);
   });
   proc.stderr.setEncoding('utf8');
   proc.stderr.on('data', (c) => broadcast({ type: 'pi-stderr', tabId, data: String(c).slice(0, 2000) }));
@@ -415,12 +419,15 @@ wss.on('connection', (ws) => {
   console.log(`[ws] client connected (${ws.clientId})`);
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+    // light schema gate before any lookup: a type-confused tabId/cwd must never
+    // reach path.resolve or the tabs Map as an object
+    const strField = (v) => v === undefined || v === null || typeof v === 'string';
+    if (typeof msg.type !== 'string' || !strField(msg.tabId) || !strField(msg.cwd) || !strField(msg.model) || !strField(msg.thinking) || !strField(msg.name)) return;
     console.log('[ws] frame:', msg.type, msg.tabId || '');
     if (msg.type === 'adopt') {
       const tab = tabs.get(msg.tabId);
       if (tab && !ownerLive(tab)) {
         tab.owner = ws;
-        tab.adoptedEver = true;
         tab.orphanSince = null;
         ws.adopted.add(msg.tabId);
         try { ws.send(JSON.stringify({ type: 'adopted', tabId: msg.tabId })); } catch { /* socket gone */ }
@@ -462,7 +469,7 @@ wss.on('connection', (ws) => {
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
       const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
-      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, owner: ws, adoptedEver: true, orphanSince: null });
+      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, owner: ws, orphanSince: null });
       ws.adopted.add(tabId);
       attachPiReader(tabId, proc);
       ws.send(JSON.stringify({ type: 'opened', tabId }));
@@ -494,7 +501,7 @@ setInterval(() => {
   }
   const now = Date.now();
   for (const [tabId, tab] of tabs) {
-    if (ownerLive(tab) || tab.adoptedEver) continue;
+    if (ownerLive(tab)) continue; // only a live owner protects a tab from the TTL — nothing else
     if (!tab.orphanSince) { tab.orphanSince = now; continue; }
     if (now - tab.orphanSince > ORPHAN_TTL_MS) {
       logErr(`orphan tab ${tabId} reaped after ${Math.round((now - tab.orphanSince) / 60000)}m without an owner`);
@@ -507,7 +514,7 @@ function closeTab(tabId, silent = false) {
   const tab = tabs.get(tabId);
   if (tab) {
     try { tab.proc.stdin.write(JSON.stringify({ type: 'abort' }) + '\n'); } catch { /* child may already be gone */ }
-    try { tab.proc.kill(); } catch { /* abort is best-effort */ }
+    killTree(tab.proc); // a bare kill() orphans the grandchildren (MCP servers, shell tools)
     tabs.delete(tabId);
     // whoever sees the tab disappear first owns the announcement: closeTab here,
     // or the exit handler on a crash. Exactly one pi-exit broadcast, never two, never zero.
@@ -687,7 +694,7 @@ async function hModelsAvailable(req, res, u) {
     // short-lived rpc to enumerate models (uses pi's own catalog + models.json)
     const proc = spawn(process.execPath, [PI_CLI, '--mode', 'rpc', '--no-session'], { cwd: HOME, env: { ...process.env, ...SECRET_ENV }, windowsHide: true });
     const result = await new Promise((resolve) => {
-      let buf = ''; const to = setTimeout(() => { try { proc.kill(); } catch { /* exited already */ } resolve({ models: [] }); }, 20000);
+      let buf = ''; const to = setTimeout(() => { try { killTree(proc); } catch { /* exited already */ } resolve({ models: [] }); }, 20000);
       proc.stdout.setEncoding('utf8');
       proc.stdout.on('data', (c) => {
         buf += c;
@@ -695,7 +702,7 @@ async function hModelsAvailable(req, res, u) {
         while ((i = buf.indexOf('\n')) !== -1) {
           const line = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
           let ev; try { ev = JSON.parse(line); } catch { continue; }
-          if (ev.type === 'response' && ev.command === 'get_available_models') { clearTimeout(to); try { proc.kill(); } catch { /* exited already */ }; resolve(ev.data || { models: [] }); }
+          if (ev.type === 'response' && ev.command === 'get_available_models') { clearTimeout(to); try { killTree(proc); } catch { /* exited already */ }; resolve(ev.data || { models: [] }); }
         }
       });
       proc.on('error', () => { clearTimeout(to); resolve({ models: [] }); });
@@ -863,6 +870,9 @@ async function hCron(req, res, u) {
           const m = Number(j.everyMin);
           if (!(m >= 0.5) || !Number.isFinite(m)) return json(res, 400, { error: 'interval 任务需要 ≥0.5 的有限 everyMin 分钟数' });
         }
+        if (j.cwd != null && j.cwd !== '') {
+          if (typeof j.cwd !== 'string' || !knownProject(j.cwd)) return json(res, 400, { error: 'cwd 必须是已注册的项目目录' });
+        }
       }
       const prev = readJson(CRON_FILE) || { jobs: [] };
       for (const j of jobs) {
@@ -892,11 +902,20 @@ async function hCronDelete(req, res, u) {
     return json(res, 200, d);
 }
 
+const semverGt = (a, b) => {
+  const pa = String(a).split('.').map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) { if ((pa[i] || 0) > (pb[i] || 0)) return true; if ((pa[i] || 0) < (pb[i] || 0)) return false; }
+  return false;
+};
+
 async function hUpdateCheck(req, res, u) {
     try {
       const r = await fetch('https://api.github.com/repos/cullysu/pi-workbench/releases/latest', { signal: AbortSignal.timeout(8000), headers: { 'user-agent': 'pi-workbench' } });
       const j = await r.json();
-      return json(res, 200, { latest: j.tag_name || null, url: j.html_url || null });
+      const cur = readJson(path.join(__dirname, 'package.json'))?.version || null;
+      const latest = String(j.tag_name || '').replace(/^v/, '');
+      return json(res, 200, { latest: j.tag_name || null, url: j.html_url || null, current: cur, updateAvailable: !!(cur && latest && semverGt(latest, cur)) });
     } catch (e) {
       return json(res, 200, { latest: null, error: String(e.message || e).slice(0, 100) });
     }
@@ -1181,10 +1200,19 @@ async function hMcpInstall(req, res, u) {
     // typebox is resolved from the extension's own node_modules (pi documents this flow)
     const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
     if (!hasDep) {
-      // npm install in background — the API returns immediately
-      execInCwd(destDir, 'npm install --omit=dev --no-fund --no-audit --ignore-scripts'); // lifecycle scripts are a supply-chain door; typebox needs none
+      // the committed lock pins typebox by integrity hash; npm ci enforces it.
+      // lifecycle scripts are a supply-chain door; typebox needs none.
+      const lockSrc = path.join(srcDir, 'package-lock.json');
+      if (fs.existsSync(lockSrc)) fs.copyFileSync(lockSrc, path.join(destDir, 'package-lock.json'));
+      const cmd = fs.existsSync(path.join(destDir, 'package-lock.json'))
+        ? 'npm ci --omit=dev --no-fund --no-audit --ignore-scripts'
+        : 'npm install --omit=dev --no-fund --no-audit --ignore-scripts';
+      const r = await execInCwd(destDir, cmd, { timeoutMs: 120000 }); // awaited: the UI must never claim success before the dep exists
+      if (r.code !== 0) {
+        return json(res, 500, { ok: false, dest: destDir, error: ('typebox 安装失败: ' + (r.err || r.out || ('exit ' + r.code))).slice(0, 400) });
+      }
     }
-    return json(res, 200, { ok: true, dest: destDir, note: hasDep ? 'already installed' : 'npm install running in background' });
+    return json(res, 200, { ok: true, dest: destDir, note: hasDep ? 'already installed' : 'typebox installed' });
 }
 
 async function hBackupExport(req, res, u) {

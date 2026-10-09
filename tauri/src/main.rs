@@ -6,7 +6,6 @@
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -24,7 +23,6 @@ fn port() -> u16 {
     *PORT.get_or_init(|| std::env::var("PIWB_PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(32123))
 }
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
-static VIEWER_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(windows)]
 fn no_window() -> u32 {
@@ -40,25 +38,22 @@ fn is_local_app(u: &tauri::Url) -> bool {
     u.host_str() == Some("127.0.0.1") && u.port() == Some(port())
 }
 
-/// Open an external page inside an app-owned viewer window (never the system browser).
-fn open_viewer(app: &tauri::AppHandle, url: tauri::Url) -> tauri::Result<tauri::WebviewWindow> {
-    let n = VIEWER_SEQ.fetch_add(1, Ordering::Relaxed);
-    let host = url.host_str().unwrap_or("page").to_string();
-    let mut builder = tauri::WebviewWindowBuilder::new(
-        app,
-        format!("viewer-{n}"),
-        tauri::WebviewUrl::External(url),
-    )
-    .title(format!("Pi Workbench · {host}"))
-    .inner_size(1200.0, 850.0)
-    .on_new_window(move |_u, _f| {
-        // links that want a new window also stay inside the app
-        match APP.get().and_then(|h| open_viewer(h, _u.clone()).ok()) {
-            Some(w) => tauri::webview::NewWindowResponse::Create { window: w },
-            None => tauri::webview::NewWindowResponse::Deny,
-        }
-    });
-    builder.build()
+/// Open an external page in the system's default browser — never inside an
+/// app-owned webview: remote pages must not run with the desktop shell's context.
+fn open_external(url: &tauri::Url) {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return; // only web pages; file:, javascript: and custom schemes are dropped
+    }
+    let s = url.as_str().to_string();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&s).spawn();
+    #[cfg(target_os = "linux")]
+    let _ = std::process::Command::new("xdg-open").arg(&s).spawn();
+    #[cfg(target_os = "windows")]
+    {
+        // explorer.exe rather than `cmd /c start`: no shell interpolation, the URL stays one argument
+        let _ = std::process::Command::new("explorer.exe").arg(&s).creation_flags(no_window()).spawn();
+    }
 }
 
 #[cfg(windows)]
@@ -169,7 +164,12 @@ fn read_server_token(timeout: Duration) -> Option<String> {
 fn verify_runtime_manifest(dir: &Path) -> Result<(), String> {
     let mf_path = dir.join("manifest.json");
     if !mf_path.exists() {
-        return Ok(()); // dev run without a manifest — nothing to check
+        // packaged installs always ship a manifest — absence means the runtime
+        // tree was swapped, not that there is nothing to check. Dev stays exempt.
+        if cfg!(debug_assertions) {
+            return Ok(());
+        }
+        return Err("runtime manifest missing — refusing to serve an unverifiable tree".to_string());
     }
     use sha2::{Digest, Sha256};
     let txt = std::fs::read_to_string(&mf_path).map_err(|e| format!("manifest unreadable: {e}"))?;
@@ -350,8 +350,6 @@ fn main() {
             *app.state::<ServerChild>().owned.lock().unwrap() = owned;
             let _ = APP.set(app.handle().clone());
 
-            let handle = app.handle().clone();
-            let nav_handle = handle.clone();
             let url = format!("http://127.0.0.1:{}/", port()).parse()?;
             let init_js = format!("window.__API_TOKEN = {};\n", serde_json::to_string(&shell_token).unwrap_or_else(|_| "\"\"".into()));
             tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))
@@ -360,21 +358,16 @@ fn main() {
                 .inner_size(1480.0, 940.0)
                 .min_inner_size(1080.0, 680.0)
                 .on_navigation(move |u| {
-                    // the workbench window never navigates away — external pages
-                    // open inside app-owned viewer windows instead
+                    // the workbench window never navigates away — external pages go
+                    // to the system browser, never an app-owned webview
                     if is_local_app(u) {
                         true
                     } else {
-                        let _ = open_viewer(&nav_handle, u.clone());
+                        open_external(&u);
                         false
                     }
                 })
-                .on_new_window(move |u, _f| {
-                    match open_viewer(&handle, u.clone()) {
-                        Ok(w) => tauri::webview::NewWindowResponse::Create { window: w },
-                        Err(_) => tauri::webview::NewWindowResponse::Deny,
-                    }
-                })
+                .on_new_window(|_u, _f| tauri::webview::NewWindowResponse::Deny)
                 .build()?;
             Ok(())
         })

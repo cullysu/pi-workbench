@@ -4,7 +4,8 @@
 // dom-ready-time injection would always lose). The token comes from the shell via
 // additionalArguments — sandboxed preloads can read argv but not the full env.
 const { contextBridge } = require('electron');
-const arg = (process.argv || []).find((a) => a.startsWith('--piwb-token='));
+// env first (the main process exports PIWB_TOKEN for the renderer); argv stays as a legacy fallback
+const arg = (process.argv || []).find((a) => a && a.startsWith && a.startsWith('--piwb-token='));
 const token = arg ? arg.slice('--piwb-token='.length) : (process.env.PIWB_TOKEN || null);
 try {
   contextBridge.exposeInMainWorld('__PIWB_TOKEN', token || null);

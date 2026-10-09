@@ -10,13 +10,16 @@ const DAY = 86400000;
 const deepFindUsage = (o) => {
   // 在任意嵌套结构里找带 input_tokens+output_tokens 的对象
   if (!o || typeof o !== 'object') return null;
-  if (typeof o.input_tokens === 'number' && typeof o.output_tokens === 'number') {
+  // both shapes exist in the wild: pi emits snake_case, Claude/ZCode rollouts emit camelCase
+  const inTok = typeof o.input_tokens === 'number' ? o.input_tokens : (typeof o.inputTokens === 'number' ? o.inputTokens : null);
+  const outTok = typeof o.output_tokens === 'number' ? o.output_tokens : (typeof o.outputTokens === 'number' ? o.outputTokens : null);
+  if (inTok !== null && outTok !== null) {
     return {
-      input: o.input_tokens || 0,
-      cached: o.cache_read_input_tokens ?? o.cached_input_tokens ?? 0,
-      cacheWrite: o.cache_creation_input_tokens ?? o.cache_write_input_tokens ?? 0,
-      output: o.output_tokens || 0,
-      reasoning: o.reasoning_output_tokens ?? 0,
+      input: inTok || 0,
+      cached: o.cache_read_input_tokens ?? o.cacheReadInputTokens ?? o.cached_input_tokens ?? 0,
+      cacheWrite: o.cache_creation_input_tokens ?? o.cacheCreationInputTokens ?? o.cache_write_input_tokens ?? 0,
+      output: outTok || 0,
+      reasoning: o.reasoning_output_tokens ?? o.reasoningTokens ?? 0,
     };
   }
   for (const k of Object.keys(o)) {

@@ -1,6 +1,6 @@
 {
   "name": "pi-workbench",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "type": "module",
   "description": "Unified desktop-grade workbench for the pi coding agent",
   "main": "electron-main.cjs",
@@ -9,7 +9,8 @@
     "start": "node server.mjs",
     "electron": "electron .",
     "dist": "electron-builder --win nsis --x64",
-    "test": "node --test tests/api.test.mjs tests/failover.test.mjs"
+    "test": "node --test tests/api.test.mjs tests/failover.test.mjs tests/io.test.mjs",
+    "prepare-runtime": "node scripts/prepare-runtime.mjs"
   },
   "keywords": [
     "pi",

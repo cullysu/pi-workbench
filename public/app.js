@@ -157,6 +157,7 @@ const wsQueue = [];
 let wsRetries = 0;
 function wsSend(obj) {
   if (state.wsReady) { state.ws.send(JSON.stringify(obj)); return; }
+  if (wsQueue.length >= 200) wsQueue.shift(); // bounded offline queue — an offline typing spree must not grow the heap
   wsQueue.push(obj); // flushed on open — never drop open/prompt frames
 }
 
@@ -172,7 +173,7 @@ function handlePiEvent(ev) {
     case 'agent_start': state.streaming = true; state.turnStart = Date.now(); setBusy(true); break;
     case 'agent_settled':
       state.streaming = false; setBusy(false); refreshStats(); loadTodayStats();
-      if (state.lastStop === 'error') maybeFailover('assistant ended with error after auto-retry');
+      if (state.lastStop === 'error') maybeFailover(state.lastErrorText || 'assistant ended with error after auto-retry');
       else if (state.lastStop) markRouteOk();
       maybeGoalContinue();
       break;
@@ -306,6 +307,7 @@ function onMessageEnd(message) {
   }
   if (!sawContent) {
     if (message.stopReason === 'error') {
+      state.lastErrorText = message.errorMessage || null;
       const errEl = document.createElement('div');
       errEl.className = 'msg-error';
       errEl.textContent = message.errorMessage || `上游返回错误（${state.selModel || '模型'}），已计入路由状态`;
@@ -997,7 +999,8 @@ async function submitPrompt(text, { resend = false } = {}) {
   state.lastPrompt = text;
   state.failoverDone = false;
   state.userAborted = false;
-  if (!resend) clearTimeline(false);
+  // only the hero empty state clears on send — an open conversation keeps its history
+  if (!resend && $('#topbar').classList.contains('hidden')) clearTimeline(false);
   const el = msgShell('user', Date.now(), false);
   el.querySelector('.msg-body').textContent = text;
   const cmd = { type: 'prompt', message: text };
@@ -2388,7 +2391,8 @@ $('#btn-update-check').onclick = async () => {
   const r = await api.get('/api/update/check').catch(() => ({ error: '网络失败' }));
   if (r.latest) {
     const url = /^https:\/\//.test(r.url || '') ? r.url : '#';
-    st.innerHTML = '最新版 ' + esc(String(r.latest)) + ' — <a href="' + esc(url) + '" target="_blank" rel="noopener" style="color:var(--accent)">前往下载</a>';
+    const cur = r.updateAvailable === false ? '当前已是最新（' + esc(String(r.current || '')) + '）。' : '';
+    st.innerHTML = cur + '最新版 ' + esc(String(r.latest)) + ' — <a href="' + esc(url) + '" target="_blank" rel="noopener" style="color:var(--accent)">前往下载</a>';
   } else {
     st.textContent = '暂无法获取（GitHub 不可达或无发布版本）';
   }

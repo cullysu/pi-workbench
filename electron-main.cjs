@@ -7,11 +7,14 @@ const net = require('node:net');
 const path = require('node:path');
 const fs = require('node:fs');
 
-const PORT = 32123;
+const PORT = Number(process.env.PIWB_PORT || 32123); // must match server.mjs — troubleshooting tells users to move both
 // per-launch secret: handed to the server via PIWB_TOKEN and injected into the page
 // AFTER load — the token never sits in the public HTML, so other local processes (and
 // other local users) cannot self-serve it from GET /
 const SHELL_TOKEN = process.env.PIWB_TOKEN || randomBytes(24).toString('hex'); // a launcher may pin the token (CI boot test, enterprise deployment)
+// the renderer inherits the env — the sandboxed preload reads the token from there.
+// argv (the old channel) shows up in the process command line, queryable by any process.
+process.env.PIWB_TOKEN = SHELL_TOKEN;
 let serverChild = null;
 let mainWindow = null;
 let quitting = false;
@@ -214,7 +217,11 @@ function waitPort(port, timeoutMs) {
 // v1.1.2-class assembly omission must die here loudly, not as ERR_MODULE_NOT_FOUND.
 function verifyRuntimeManifest() {
   const mfPath = path.join(appRoot, 'manifest.json');
-  if (!fs.existsSync(mfPath)) return null; // dev run — nothing to check
+  if (!fs.existsSync(mfPath)) {
+    // packaged installs always ship a manifest — its absence means the runtime
+    // tree was swapped, not that there is nothing to check. Dev stays exempt.
+    return app.isPackaged ? { total: 0, bad: ['runtime manifest missing'] } : null;
+  }
   const { createHash } = require('node:crypto');
   let mf;
   try { mf = JSON.parse(fs.readFileSync(mfPath, 'utf8')); } catch (e) {
@@ -321,7 +328,6 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       preload: path.join(__dirname, 'electron-preload.cjs'),
-      additionalArguments: [`--piwb-token=${SHELL_TOKEN}`], // sandboxed preload reads argv, not env
     },
   });
   // token rides in via the preload BEFORE page scripts run; keep a dom-ready

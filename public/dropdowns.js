@@ -83,6 +83,7 @@ document.querySelector('#model-chip').onclick = () => {
         st.selModel = key;
         __wb.updateModelChip();
         __wb.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
+        __wb.rpcTo({ type: 'get_available_thinking_levels' }); // the new model may support different levels
       },
     });
   }
@@ -92,16 +93,21 @@ document.querySelector('#model-chip').onclick = () => {
 // thinking chip → thinking levels only
 document.querySelector('#think-chip').onclick = () => {
   const levels = { off: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '特高', max: '最大' };
+  // a model that advertises its levels gets only those offered — xhigh/max exist on some models only
+  const avail = Array.isArray(__wb.state.availableLevels) ? __wb.state.availableLevels.map(String) : null;
+  if (__wb.state.tabId) __wb.rpcTo({ type: 'get_available_thinking_levels' }); // refresh for the next open
   openDropdown(document.querySelector('#think-chip'), () =>
-    Object.entries(levels).map(([lv, zh]) => ({
-      label: zh,
-      checked: lv === (__wb.state.thinkLevel || 'medium'),
-      cb: () => {
-        __wb.state.thinkLevel = lv;
-        document.querySelector('#think-chip').textContent = `思考 · ${zh}`;
-        __wb.rpcTo({ type: 'set_thinking_level', level: lv });
-      },
-    }))
+    Object.entries(levels)
+      .filter(([lv]) => !avail || avail.includes(lv))
+      .map(([lv, zh]) => ({
+        label: zh,
+        checked: lv === (__wb.state.thinkLevel || 'medium'),
+        cb: () => {
+          __wb.state.thinkLevel = lv;
+          document.querySelector('#think-chip').textContent = `思考 · ${zh}`;
+          __wb.rpcTo({ type: 'set_thinking_level', level: lv });
+        },
+      }))
   );
 };
 

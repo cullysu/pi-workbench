@@ -88,9 +88,9 @@ export function createZip(entries, { mtime } = {}) {
 
 /** zip Buffer → [{ name, data: Buffer }] — extraction is capped so a crafted
  *  backup zip (bomb) cannot exhaust memory: 50k entries, 1 GB total uncompressed */
-export function readZip(buf) {
+export function readZip(buf, opts = {}) {
   const MAX_ENTRIES = 50000;
-  const MAX_TOTAL_UNCOMPRESSED = 1024 * 1024 * 1024;
+  const MAX_TOTAL_UNCOMPRESSED = opts.maxTotal || 1024 * 1024 * 1024;
   const MAX_ENTRY_UNCOMPRESSED = 64 * 1024 * 1024; // a config backup never needs a bigger single entry; bounds one inflate before the total check sees anything
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i--) {

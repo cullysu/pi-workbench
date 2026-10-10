@@ -157,7 +157,10 @@ const wsQueue = [];
 let wsRetries = 0;
 function wsSend(obj) {
   if (state.wsReady) { state.ws.send(JSON.stringify(obj)); return; }
-  if (wsQueue.length >= 200) wsQueue.shift(); // bounded offline queue — an offline typing spree must not grow the heap
+  if (wsQueue.length >= 200) { // bounded offline queue — an offline typing spree must not grow the heap
+    wsQueue.shift();
+    const sl = $('#statusline'); if (sl) sl.textContent = '离线队列已满（200）——最早的一条待发消息被丢弃';
+  }
   wsQueue.push(obj); // flushed on open — never drop open/prompt frames
 }
 
@@ -514,6 +517,7 @@ function openPiSession({ sessionPath = null, isNew = false }) {
     $('#statusline').textContent = replaying ? t('loading') : '';
     if (replaying) rpcTo({ id: 'replay', type: 'get_entries' });
     rpcTo({ type: 'get_available_models' });
+    rpcTo({ type: 'get_available_thinking_levels' });
     rpcTo({ id: 'st-' + Date.now(), type: 'get_state' });
     setTimeout(refreshStats, 800);
   };
@@ -534,6 +538,12 @@ function openPiSession({ sessionPath = null, isNew = false }) {
 }
 // replay get_entries response
 const piEventHandlers = [handlePiEvent];
+piEventHandlers.push(function (ev) {
+  if (ev && ev.type === 'response' && ev.command === 'get_available_thinking_levels' && ev.success) {
+    const l = ev.data?.levels ?? ev.data?.thinkingLevels ?? ev.data;
+    state.availableLevels = Array.isArray(l) ? l.map(String) : null; // null = model advertises nothing; keep the full menu
+  }
+});
 piEventHandlers.push(function (ev) {
   if (ev.type === 'response' && ev.command === 'get_entries' && ev.success && ev.data?.entries) {
     renderReplay(ev.data.entries);
@@ -700,13 +710,14 @@ async function loadTodayStats() {
     const u = await api.get('/api/usage');
     const d = (u.days || {})[localToday()];
     const el = $('#today-chip');
+    if (u.truncated) el.title = `统计窗口：仅最近 ${u.sessions || 300} 个 pi 会话（磁盘上共 ${u.diskSessions} 个）——更早的会话不计入总量`;
     if (!d || (!d.input && !d.output && !d.cacheRead && !d.cacheWrite)) {
-      el.textContent = '今日 0';
+      el.textContent = '今日 0' + (u.truncated ? ' ⚠' : '');
       renderTodayPop(null);
       return;
     }
     const tot = (d.input || 0) + (d.output || 0) + (d.cacheRead || 0) + (d.cacheWrite || 0);
-    el.textContent = `今日 ${fmtTok(tot)}`;
+    el.textContent = `今日 ${fmtTok(tot)}` + (u.truncated ? ' ⚠' : '');
     const sbt = document.querySelector('#sb-today');
     if (sbt) sbt.textContent = `今日 ${fmtTok(tot)}`;
     renderTodayPop(d);

@@ -241,6 +241,29 @@ function verifyRuntimeManifest() {
   return { total: entries.length, bad };
 }
 
+// Shell-tree integrity: CI writes shell-manifest.json (sha256 per shell file) at
+// pack time; a packaged app refuses to start when its own JavaScript fails
+// verification — same fail-closed semantics as the runtime manifest. Dev exempt.
+function verifyShellManifest() {
+  const mfPath = path.join(app.getAppPath(), 'shell-manifest.json');
+  if (!fs.existsSync(mfPath)) return app.isPackaged ? { bad: ['shell manifest missing'] } : null;
+  try {
+    const { createHash } = require('node:crypto');
+    const mf = JSON.parse(fs.readFileSync(mfPath, 'utf8'));
+    const appDir = app.getAppPath();
+    const bad = [];
+    for (const [rel, want] of Object.entries(mf.files || {})) {
+      try {
+        const buf = fs.readFileSync(path.join(appDir, rel));
+        if (!(buf.length === want.size && createHash('sha256').update(buf).digest('hex') === want.sha256)) bad.push(rel);
+      } catch { bad.push(rel); }
+    }
+    return { bad };
+  } catch (e) {
+    return { bad: ['shell manifest unreadable: ' + e.message] };
+  }
+}
+
 async function startServer() {
   if (await portOpen(PORT)) {
     if (await isWorkbenchPort(PORT)) return; // our own previous instance
@@ -408,6 +431,16 @@ if (!gotLock) {
       return;
     }
     console.log('[main] ensureRuntime done');
+    const smf = verifyShellManifest();
+    if (smf) {
+      if (smf.bad.length) {
+        appendLog('FATAL shell manifest verify: ' + smf.bad.join(', '));
+        dialog.showErrorBox('Pi Workbench', '外壳文件校验失败（安装可能损坏，请重新安装）：\n' + smf.bad.join('\n'));
+        app.quit();
+        return;
+      }
+      appendLog('shell manifest verified');
+    }
     const mf = verifyRuntimeManifest();
     if (mf) {
       if (mf.bad.length) {

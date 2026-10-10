@@ -1,5 +1,7 @@
 appId: com.cullysu.piworkbench
 productName: Pi Workbench
+# pack-time integrity coverage for the shell tree (electron-main verifies at boot)
+afterPack: scripts/electron-after-pack.cjs
 # asar off: electron-main dynamically imports zip.mjs at runtime, and Node's ESM
 # loader cannot resolve modules inside an asar archive. The app carries its own
 # runtime.zip anyway - an unpacked app/ directory costs nothing here.

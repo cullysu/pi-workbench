@@ -16,7 +16,7 @@ import {createSources} from './lib/sources.mjs';
 import { killTree, spawnTreeOpts } from './lib/proctree.mjs';
 import {createKbSkills} from './lib/kb-skills.mjs';
 import {createBackupTerminal} from './lib/backup-terminal.mjs';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -327,7 +327,7 @@ async function testModelReply(modelId) {
       if (!r.ok && (r.status === 400 || r.status === 422)) {
         ({ r, j } = await fetchJsonCapped(base + '/chat/completions', {
           method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
-          body: JSON.stringify({ model: mid, messages: [{ role: 'user', content: '只回复ok' }] }),
+          body: JSON.stringify({ model: mid, max_tokens: 512, messages: [{ role: 'user', content: '只回复ok' }] }),
           signal: AbortSignal.timeout(30000),
         }));
       }
@@ -562,7 +562,7 @@ const realContains = (root, target) => {
 };
 function json(res, code, obj) {
   const s = JSON.stringify(obj);
-  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8' });
+  res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(s);
 }
 function readBody(req) {
@@ -874,7 +874,8 @@ async function hCron(req, res, u) {
         if (j.id != null && j.id !== '' && !isJobId(j.id)) return json(res, 400, { error: '任务 ID 只能含字母/数字/连字符，最长 64 字符' });
         if (j.id && seenIds.has(j.id)) return json(res, 400, { error: '任务 ID 重复：' + j.id });
         if (j.id) seenIds.add(j.id);
-        if (j.kind === 'daily' && !/^\d{2}:\d{2}$/.test(j.time || '')) return json(res, 400, { error: 'daily 任务需要 HH:MM 时间' });
+        const tm = j.kind === 'daily' ? /^(\d{2}):(\d{2})$/.exec(j.time || '') : null;
+        if (j.kind === 'daily' && (!tm || Number(tm[1]) > 23 || Number(tm[2]) > 59)) return json(res, 400, { error: 'daily 任务需要合法的 HH:MM 时间（00:00–23:59）' });
         if (j.kind === 'interval') {
           const m = Number(j.everyMin);
           if (!(m >= 0.5) || !Number.isFinite(m)) return json(res, 400, { error: 'interval 任务需要 ≥0.5 的有限 everyMin 分钟数' });
@@ -1113,7 +1114,8 @@ async function hGitStatus(req, res, u) {
 // arbitrary cwd would let any token holder diff their way through the whole disk
 const knownProject = (cwd) => {
   const cfgc = loadConfig();
-  return !!(cwd && (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(String(cwd))));
+  // case-folded compare via projectKey — on Windows a differently-cased path must still resolve to the registered project
+  return !!(cwd && (cfgc.projects || []).some((pr) => projectKey(pr.path) === projectKey(String(cwd))));
 };
 
 async function hGitDiff(req, res, u) {
@@ -1374,6 +1376,10 @@ if (isMain) server.listen(PORT, '127.0.0.1', () => {
   // written only when the server owns the token generation
   if (!process.env.PIWB_TOKEN) {
     try { saveJson(TOKEN_FILE, { token: API_TOKEN, at: new Date().toISOString() }); } catch { /* shells fall back to embedded mode */ }
+    if (process.platform === 'win32' && process.env.USERNAME) {
+      // POSIX chmods this file 0600; Windows would inherit a broad ACL — restrict to the current user
+      try { spawnSync('icacls', [TOKEN_FILE, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:F`], { windowsHide: true, stdio: 'ignore' }); } catch { /* best effort */ }
+    }
   }
   // warm the codex list cache in the background so the first UI click is instant
   setTimeout(() => {

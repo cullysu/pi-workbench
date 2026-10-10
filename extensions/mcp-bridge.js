@@ -181,7 +181,9 @@ class McpClient {
       if (item.type === "text") out.push(item.text);
       else out.push(`[${item.type} content] ` + JSON.stringify(item).slice(0, 2000));
     }
-    const text = out.join("\n") || "(empty result)";
+    let text = out.join("\n") || "(empty result)";
+    const MAX_RESULT_CHARS = 256 * 1024; // a runaway MCP server must not pour unbounded text into pi's context
+    if (text.length > MAX_RESULT_CHARS) text = text.slice(0, MAX_RESULT_CHARS) + `\n[…truncated: ${text.length} → ${MAX_RESULT_CHARS} chars]`;
     return { text, isError: res.isError === true };
   }
 

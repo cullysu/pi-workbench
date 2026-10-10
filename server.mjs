@@ -316,12 +316,21 @@ async function testModelReply(modelId) {
       }));
       txt = (j.output || []).filter((o) => o.type === 'message').flatMap((o) => (o.content || []).map((c) => c.text || '')).join('');
     } else { // openai-completions and anything else speaking the chat shape
-      // no max_tokens: reasoning models spend it on thinking and some relays 400 on tiny budgets
+      // cap the test spend: 512 keeps reasoning-model thinking in budget without
+      // the 400s a 16-token cap drew from some relays; if the relay rejects the
+      // cap itself, retry uncapped once (old behavior) rather than fail the test
       ({ r, j } = await fetchJsonCapped(base + '/chat/completions', {
         method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
-        body: JSON.stringify({ model: mid, messages: [{ role: 'user', content: '只回复ok' }] }),
+        body: JSON.stringify({ model: mid, max_tokens: 512, messages: [{ role: 'user', content: '只回复ok' }] }),
         signal: AbortSignal.timeout(30000),
       }));
+      if (!r.ok && (r.status === 400 || r.status === 422)) {
+        ({ r, j } = await fetchJsonCapped(base + '/chat/completions', {
+          method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
+          body: JSON.stringify({ model: mid, messages: [{ role: 'user', content: '只回复ok' }] }),
+          signal: AbortSignal.timeout(30000),
+        }));
+      }
       txt = j.choices?.[0]?.message?.content || '';
     }
     const ms = Date.now() - t0;
@@ -1216,7 +1225,8 @@ async function hMcpInstall(req, res, u) {
 }
 
 async function hBackupExport(req, res, u) {
-    try { return json(res, 200, await exportBackupZip(u.searchParams.get('excludeKeys') === '1')); }
+    // default to scrubbed: only an explicit excludeKeys=0 (the UI's "含密钥" button) carries keys
+    try { return json(res, 200, await exportBackupZip(u.searchParams.get('excludeKeys') !== '0')); }
     catch (e) { return json(res, 500, { error: e.message }); }
 }
 

@@ -91,6 +91,7 @@ export function createZip(entries, { mtime } = {}) {
 export function readZip(buf) {
   const MAX_ENTRIES = 50000;
   const MAX_TOTAL_UNCOMPRESSED = 1024 * 1024 * 1024;
+  const MAX_ENTRY_UNCOMPRESSED = 64 * 1024 * 1024; // a config backup never needs a bigger single entry; bounds one inflate before the total check sees anything
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65558); i--) {
     if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
@@ -124,12 +125,13 @@ export function readZip(buf) {
     const payload = buf.subarray(dataStart, dataStart + csize);
     let data;
     try {
-      data = method === 0 ? Buffer.from(payload) : zlib.inflateRawSync(payload, { maxOutputLength: MAX_TOTAL_UNCOMPRESSED });
+      data = method === 0 ? Buffer.from(payload) : zlib.inflateRawSync(payload, { maxOutputLength: MAX_ENTRY_UNCOMPRESSED });
     } catch (e) {
-      if (e && e.code === 'ERR_BUFFER_TOO_LARGE') throw new Error(`entry "${name}" expands beyond ${MAX_TOTAL_UNCOMPRESSED} bytes — refusing (zip bomb?)`);
+      if (e && e.code === 'ERR_BUFFER_TOO_LARGE') throw new Error(`entry "${name}" expands beyond ${MAX_ENTRY_UNCOMPRESSED} bytes — refusing (zip bomb?)`);
       throw e;
     }
     totalUncompressed += data.length;
+    if (data.length > MAX_ENTRY_UNCOMPRESSED) throw new Error(`entry "${name}" expands beyond ${MAX_ENTRY_UNCOMPRESSED} bytes — refusing (zip bomb?)`);
     if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED) throw new Error(`zip expands beyond ${MAX_TOTAL_UNCOMPRESSED} bytes — refusing (zip bomb?)`);
     if (crc32(data) !== crc) throw new Error('crc mismatch for ' + name); // a torn backup must fail loudly, not import half-configs
     out.push({ name, data, mode });

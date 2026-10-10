@@ -253,6 +253,7 @@ function verifyShellManifest() {
     const mf = JSON.parse(fs.readFileSync(mfPath, 'utf8'));
     const appDir = app.getAppPath();
     const bad = [];
+    if (!Object.keys(mf.files || {}).length) return { bad: ['shell manifest covers zero files'] }; // parity with the runtime manifest's empty rejection
     for (const [rel, want] of Object.entries(mf.files || {})) {
       try {
         const buf = fs.readFileSync(path.join(appDir, rel));

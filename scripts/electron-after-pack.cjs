@@ -17,12 +17,12 @@ exports.default = async function afterPack(context) {
   for (const c of candidates) {
     if (fs.existsSync(path.join(c, 'electron-main.cjs'))) { appDir = c; break; }
   }
-  if (!appDir) return; // no unpacked app dir — nothing to cover
+  if (!appDir) throw new Error(`afterPack: no app layout found under ${context.appOutDir} (looked for resources/app and *.app/Contents/Resources/app)`);
   const files = ['electron-main.cjs', 'electron-preload.cjs', 'package.json'];
   const manifest = { generatedAt: new Date().toISOString(), files: {} };
   for (const f of files) {
     const p = path.join(appDir, f);
-    if (!fs.existsSync(p)) continue;
+    if (!fs.existsSync(p)) throw new Error(`afterPack: expected shell file missing from the packaged app: ${f}`);
     const buf = fs.readFileSync(p);
     manifest.files[f] = { size: buf.length, sha256: createHash('sha256').update(buf).digest('hex') };
   }

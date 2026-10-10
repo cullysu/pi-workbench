@@ -228,7 +228,12 @@ export default function mcpBridge(pi) {
         parameters: Type.Unsafe({ type: "object", properties: {} }),
         async execute() {
           const tools = await getClient(srvName, conf).listTools();
-          const brief = tools.map((t) => ({ name: t.name, description: t.description || "" }));
+          const brief = tools.map((t) => ({
+            name: t.name,
+            description: t.description || "",
+            params: Object.keys(t.inputSchema?.properties || {}),
+            required: t.inputSchema?.required || [],
+          }));
           return {
             content: [{ type: "text", text: JSON.stringify(brief, null, 2) }],
             details: { mcp: true, server: srvName },
@@ -247,20 +252,22 @@ export default function mcpBridge(pi) {
         }),
         async execute(_toolCallId, params) {
           const c = getClient(srvName, conf);
+          let r;
           try {
-            const r = await c.callTool(params.tool, params.arguments || {});
-            // an MCP-level failure must read as one to the model — a bare text return parses as success
-            const text = r.isError ? `[MCP error] ${srvName}.${params.tool} failed: ${r.text}` : r.text;
-            return {
-              content: [{ type: "text", text }],
-              details: { mcp: true, server: srvName, tool: params.tool, isError: r.isError === true },
-            };
+            r = await c.callTool(params.tool, params.arguments || {});
           } catch (e) {
             return {
               content: [{ type: "text", text: `MCP error (${srvName}.${params.tool}): ${e.message}` }],
               details: { mcp: true, server: srvName, tool: params.tool, isError: true },
             };
           }
+          // an MCP-level failure must reach pi's execution layer as a failure — a returned
+          // result (even carrying an isError detail) parses as success, so we throw instead
+          if (r.isError) throw new Error(`MCP ${srvName}.${params.tool} failed: ${String(r.text).slice(0, 2000)}`);
+          return {
+            content: [{ type: "text", text: r.text }],
+            details: { mcp: true, server: srvName, tool: params.tool },
+          };
         },
       });
       registered.push(listName, callName);
@@ -304,19 +311,20 @@ export default function mcpBridge(pi) {
             parameters: Type.Unsafe(schema),
             async execute(_toolCallId, params) {
               const c = getClient(srvName, conf);
+              let r;
               try {
-                const r = await c.callTool(tool.name, params);
-                const text = r.isError ? `[MCP error] ${srvName}.${tool.name} failed: ${r.text}` : r.text;
-                return {
-                  content: [{ type: "text", text }],
-                  details: { mcp: true, server: srvName, tool: tool.name, isError: r.isError === true },
-                };
+                r = await c.callTool(tool.name, params);
               } catch (e) {
                 return {
                   content: [{ type: "text", text: `MCP error (${srvName}.${tool.name}): ${e.message}` }],
                   details: { mcp: true, server: srvName, tool: tool.name, isError: true },
                 };
               }
+              if (r.isError) throw new Error(`MCP ${srvName}.${tool.name} failed: ${String(r.text).slice(0, 2000)}`);
+              return {
+                content: [{ type: "text", text: r.text }],
+                details: { mcp: true, server: srvName, tool: tool.name },
+              };
             },
           });
           log(`registered ${name}`);

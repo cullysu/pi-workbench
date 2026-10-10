@@ -512,6 +512,7 @@ function openPiSession({ sessionPath = null, isNew = false }) {
     $('#proj-title').textContent = state.project.path;
     wsSend({
       type: 'open', tabId: state.tabId,
+      thinking: state.thinkLevel || undefined,
       cwd: state.project.path,
       sessionPath: isNew ? null : sessionPath,
       model: state.selModel || null,
@@ -1049,10 +1050,23 @@ async function maybeFailover(detail) {
   state.selModel = r.next;
   updateModelChip();
   $('#statusline').textContent = `路由切换：${from} → ${r.next}，自动重发…`;
+  // the resend is an execution: arm it with an immutable snapshot (session, project,
+  // prompt) and a generation token — stop, tab switch, project switch or a newer
+  // failover invalidates it, and every callback re-checks before acting
   const sp = state.sessionFile;
+  const armed = { tab: state.tabId, project: state.project && state.project.path, prompt: state.lastPrompt, seq: (state.failoverSeq = (state.failoverSeq || 0) + 1) };
+  const stale = () => state.userAborted || state.failoverSeq !== armed.seq
+    || state.tabId !== armed.tab || (state.project && state.project.path) !== armed.project;
   setTimeout(() => {
+    if (stale()) return;
     openPiSession({ sessionPath: sp, isNew: !sp });
-    setTimeout(() => submitPrompt(state.lastPrompt, { resend: true }), 1500);
+    setTimeout(() => {
+      // the failover owns the tab it just opened — re-anchor on it before the
+      // resend check, or the new tabId would read as "someone else switched"
+      if (state.tabId) armed.tab = state.tabId;
+      if (stale()) return;
+      submitPrompt(armed.prompt, { resend: true });
+    }, 1500);
   }, 300);
 }
 function markRouteOk() {
@@ -2109,6 +2123,7 @@ $('#btn-cron-save').onclick = async () => {
     job.everyMin = Number($('#cron-every').value);
     if (!(job.everyMin > 0)) { $('#cron-status').textContent = '间隔分钟数无效'; return; }
   }
+  if (!job.cwd && state.project) job.cwd = state.project.path; // a new job runs where the panel is looking
   cronJobs.push(job);
   const r = await api.post('/api/cron', { jobs: cronJobs }).catch((e) => ({ error: e.message }));
   if (r.error) { $('#cron-status').textContent = '保存失败：' + r.error; return; }

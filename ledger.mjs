@@ -45,7 +45,8 @@ function scanCodex(days, home) {
     const lines = readJsonl(f, { hot: 'token_usage' });
     if (!lines.length) continue;
     let meta = {cwd: null, ts: st.mtimeMs};
-    let usage = null, model = null;
+    let model = null;
+    let prevTotals = null; // previous cumulative total — deltas become per-day usage
     for (const l of lines) {
       // session_meta carries type at the TOP level and cwd inside payload — reading
       // pay = l.payload first was why codex cwd was always null
@@ -54,13 +55,27 @@ function scanCodex(days, home) {
         meta.ts = l.payload?.timestamp ? Date.parse(l.payload.timestamp) : meta.ts;
       }
       const pay = l.payload ?? l;
-      const u = deepFindUsage(pay?.info ?? pay);
-      if (u && pay?.info?.total_token_usage) { usage = u; model = pay?.info?.model || model; }
       if (pay?.info?.model) model = pay.info.model;
+      const tt = pay?.info?.total_token_usage;
+      if (!tt || typeof tt !== 'object') continue;
+      const cur = { input: tt.input_tokens ?? 0, output: tt.output_tokens ?? 0, cached: tt.cached_input_tokens ?? 0 };
+      if (prevTotals) {
+        const dIn = cur.input - prevTotals.input, dOut = cur.output - prevTotals.output, dCa = cur.cached - prevTotals.cached;
+        if (dIn > 0 || dOut > 0 || dCa > 0) {
+          const ts = pay.timestamp ? Date.parse(pay.timestamp) : (meta.ts || st.mtimeMs);
+          if (ts >= since) {
+            recs.push({engine: 'codex', file: path.basename(f), ts, cwd: meta.cwd, model, usage: {
+              input: dIn, output: dOut, cached: dCa, cacheWrite: 0, reasoning: 0,
+            }});
+          }
+        }
+      }
+      prevTotals = cur;
     }
     // a rollout file carries usage across many days but one timestamp — attributing it
     // outside the query window produced future/ancient buckets, so out-of-window is dropped
-    if (usage && (meta.ts || st.mtimeMs) >= since) recs.push({engine: 'codex', file: path.basename(f), ts: meta.ts || st.mtimeMs, cwd: meta.cwd, model, usage});
+    // the file-level fallback is gone: totals are diffed and bucketed per day below,
+    // and a leftover whole-file record would double-count or misdate them
   }
   return recs;
 }
@@ -76,9 +91,16 @@ function scanZCode(days, home) {
     for (const l of readJsonl(f)) {
       const ts = l.startedAt ? Date.parse(l.startedAt) : (l.completedAt ? Date.parse(l.completedAt) : st.mtimeMs);
       if (ts < since) continue;
-      const u = deepFindUsage(l.response ?? l);
-      const zm = (typeof l.model === 'string' ? l.model : l.model?.modelId || l.model?.id || '') || null; // an object here printed as [object Object]
-      if (u) recs.push({engine: 'zcode', file: path.basename(f), ts, cwd: null, model: zm, usage: u});
+      // zcode rollouts use their own field names (cacheReadTokens/cacheWriteTokens) —
+      // deepFindUsage only knows the snake/camel input/output aliases and zeroed both caches
+      const u0 = l.response?.usage || {};
+      const zin = u0.inputTokens || 0, zout = u0.outputTokens || 0;
+      if (zin || zout) {
+        const zm = (typeof l.model === 'string' ? l.model : l.model?.modelId || l.model?.id || '') || null; // an object here printed as [object Object]
+        recs.push({engine: 'zcode', file: path.basename(f), ts, cwd: null, model: zm, usage: {
+          input: zin, output: zout, cached: u0.cacheReadTokens || 0, cacheWrite: u0.cacheWriteTokens || 0, reasoning: 0,
+        }});
+      }
     }
   }
   // 2) v2 会话文件是上述逐次调用的会话级聚合——只进 recent 列表，

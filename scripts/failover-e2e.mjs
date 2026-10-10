@@ -156,13 +156,18 @@ try {
   r = await api('/api/routing/fail', { model: 'failA/m1', error: '500 mock primary down', tabId: 'fo-1' });
   check('cooled failB skipped -> next is okC/m3', r.data?.next === 'okC/m3', JSON.stringify(r.data));
 
-  // 4) auth-shaped failure takes the key path: the MODEL is not cooled (a literal-key
-  // provider has no rotation pool, so no cooldown appears) and the chain still reaches okC
+  // 4) auth-shaped failure on a LITERAL-key provider must take the provider out of the
+  // chain (regression: the old cooldown wrote a slot that literal keys never read, and
+  // the old assertion blessed exactly that — a 401'd provider stayed selectable)
   r = await api('/api/routing/fail', { model: 'okC/m3', error: '401 invalid api key', tabId: 'fo-1' });
   check('401 branch: model not cooled (key path taken), chain end -> next null',
     r.data?.next === null && r.data?.cooldown === null, JSON.stringify(r.data));
   r = await api('/api/routing/fail', { model: 'failA/m1', error: '500 mock primary down', tabId: 'fo-1' });
-  check('okC still reachable after its 401 (key cooled, not model)', r.data?.next === 'okC/m3', JSON.stringify(r.data));
+  check("401'd literal-key okC is NOT offered as the next hop", r.data?.next === null, JSON.stringify(r.data));
+  // a success re-arms the provider (the unscoped clear wipes the literal slot too)
+  await api('/api/routing/ok', { model: 'okC/m3' });
+  r = await api('/api/routing/fail', { model: 'failA/m1', error: '500 mock primary down', tabId: 'fo-1' });
+  check('after routing/ok the literal provider is reachable again', r.data?.next === 'okC/m3', JSON.stringify(r.data));
   // clear okC state so step 5 can run clean
   await api('/api/routing/ok', { model: 'okC/m3' });
 

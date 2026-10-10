@@ -11,7 +11,9 @@ const root = process.cwd();
 const files = [];
 const walk = (dir) => {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (e.name === 'node_modules' || e.name === 'manifest.json') continue;
+    // NOTE: the old `e.name === 'node_modules'` guard here skipped EVERY nested
+    // dependency tree (including the pinned undici/brace-expansion) — the manifest
+    // and the shipped zip must describe the same world, so nothing is name-skipped
     const p = path.join(dir, e.name);
     if (e.isDirectory()) {
       if (e.name === '.bin') continue; // npm symlinks — make-runtime does not ship them, so the manifest must not describe them
@@ -26,6 +28,10 @@ for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'node', 'node.exe', 'l
   else files.push(top);
 }
 files.sort();
+// the previous run's manifest inside pkg-build must not describe itself
+const manifestOnly = files.filter((f) => f !== 'manifest.json');
+files.length = 0;
+files.push(...manifestOnly);
 if (!files.length) throw new Error('manifest would cover zero files — the runtime tree is wrong');
 const manifest = { generatedAt: new Date().toISOString(), files: {} };
 for (const rel of files) {

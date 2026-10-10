@@ -1009,6 +1009,7 @@ async function sendPrompt() {
   submitPrompt(text);
 }
 async function submitPrompt(text, { resend = false } = {}) {
+  if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
   if (!text) return;
   if (!state.tabId) {
     await openPiSession({ isNew: true });

@@ -2,6 +2,25 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.2.8 — 2026-10-10
+
+### Fixed (the queued product specials from the v1.2.6 review)
+- **Clicking a session under another project now moves the panel with it**: the session's block carries its project, and the click syncs the panel project (title, tree, goal banner) before the open — title/file/git/goal context no longer describe the previous project.
+- **Imported history is a real read-only view**: an import-view flag blocks the execution entry point (composer and goal-continue both land there, with an explanatory status line), holds live pi-events and pi-exit frames out of the imported timeline, and any real session open leaves the view. The running agent keeps running — it just can't bleed into what you're reading or swallow new input.
+- **Reconnect bridges the gap**: after the socket returns, the current tab gets a `get_state` plus a full `get_entries` replay from disk — content streamed during the drop is recovered instead of leaving a busy spinner and a missing final answer (skipped while an import view is open).
+- **Escape on extension confirm/select now answers the extension** (confirmed:false / cancelled:true) — a dismissed dialog no longer leaves a timeout-less extension waiting forever.
+
+Verification: lint 0 / tests 40-40 / route sweep 47 PASS / ws-probe, failover-e2e, ui-probe, chat-e2e ALL PASS. The four behaviors are front-end state contracts — dedicated browser-level reverse tests are queued with the next probe expansion.
+
+## 1.2.7 — 2026-10-10
+
+### Fixed (verified defects from the independent v1.2.6 review)
+- **Stop semantics**: fallback resends became cancellable executions armed with an immutable snapshot (session, project, prompt) plus a generation token; stop, tab switch, project switch or a newer failover invalidates them, re-checked at fire time. New sessions receive the pre-selected thinking level.
+- **Ledger correctness**: the cost estimate no longer compounds on every read (usageCache returns the same agg object and the old fold mutated it); cacheWrite flows into model/provider/day breakdowns and day buckets carry their own estimates; the zcode ledger reads rollout's real field names (cacheReadTokens/cacheWriteTokens were zeroed); codex cumulative totals are diffed and bucketed per day.
+- **Failover**: a 401 on a LITERAL key now actually removes the provider from the chain (the old cooldown wrote a slot literal keys never read); failover-e2e assertions rewritten to demand exactly that (they used to bless the bug as PASS).
+- **Security**: DOMPurify upgraded 3.1.7 → 3.4.16 and vendored libraries enter the SBOM; the runtime manifest covers nested node_modules (13,954 entries measured — an old walk guard skipped every nested tree); afterPack fails loudly; the shell manifest rejects an empty file set.
+- **Also**: cron run-now consumes the daily window, a global concurrency budget (2) bounds unattended fan-out, UI-created jobs carry the project cwd, backup import enforces per-file field shapes, readJsonl drops an unterminated giant line mid-read, MCP failures throw into pi's execution layer, the lazy MCP catalog lists parameters.
+
 ## 1.2.6 — 2026-10-10
 
 ### Fixed (the two P1 blockers from the independent v1.2.5 review)

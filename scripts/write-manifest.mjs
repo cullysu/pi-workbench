@@ -13,8 +13,10 @@ const walk = (dir) => {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.name === 'node_modules' || e.name === 'manifest.json') continue;
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) walk(p);
-    else files.push(path.relative(root, p).split(path.sep).join('/'));
+    if (e.isDirectory()) {
+      if (e.name === '.bin') continue; // npm symlinks — make-runtime does not ship them, so the manifest must not describe them
+      walk(p);
+    } else files.push(path.relative(root, p).split(path.sep).join('/'));
   }
 };
 for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'node', 'node.exe', 'lib', 'public', 'data', 'extensions', 'node_modules', 'package.json']) {

@@ -242,7 +242,7 @@ jobs:
           export PIWB_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           timeout 180 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
           ok=0
-          for i in $(seq 1 150); do
+          for i in $(seq 1 420); do # the runtime zip now carries node_modules — extraction+verify of ~2700 files needs minutes, not the old 150s
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32123/ || true)
             echo "poll $i: $code"
             if [ "$code" = "200" ]; then ok=1; break; fi

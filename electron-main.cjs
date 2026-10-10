@@ -431,6 +431,7 @@ if (!gotLock) {
       app.quit();
       return;
     }
+    appendLog('ensureRuntime done (extract+write complete)');
     console.log('[main] ensureRuntime done');
     const smf = verifyShellManifest();
     if (smf) {

@@ -63,7 +63,9 @@ if (process.env.PIWB_PARENT_PID) {
 // path key: resolve + lowercase so Windows case variants don't create duplicate projects
 const projectKey = (p) => {
   const r = (() => { try { return path.resolve(String(p)); } catch { return String(p); } })();
-  return process.platform === 'win32' ? r.toLowerCase() : r; // fold only where the filesystem folds
+  // fold only where the default filesystem folds (Windows NTFS, macOS APFS default) —
+  // Linux keeps distinct Foo/ and foo/
+  return (process.platform === 'win32' || process.platform === 'darwin') ? r.toLowerCase() : r;
 };
 function loadConfig() {
   try {

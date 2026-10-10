@@ -178,6 +178,9 @@ fn verify_runtime_manifest(dir: &Path) -> Result<(), String> {
         .get("files")
         .and_then(|f| f.as_object())
         .ok_or_else(|| "manifest has no files map".to_string())?;
+    if files.is_empty() {
+        return Err("runtime manifest covers zero files".to_string());
+    }
     let mut bad: Vec<String> = Vec::new();
     let mut checked = 0usize;
     for (rel, meta) in files {
@@ -367,7 +370,12 @@ fn main() {
                         false
                     }
                 })
-                .on_new_window(|_u, _f| tauri::webview::NewWindowResponse::Deny)
+                .on_new_window(|u, _f| {
+                    // target=_blank must reach the system browser like a plain navigation —
+                    // denying here silently killed the update-download link
+                    open_external(&u);
+                    tauri::webview::NewWindowResponse::Deny
+                })
                 .build()?;
             Ok(())
         })

@@ -58,7 +58,9 @@ function scanCodex(days, home) {
       if (u && pay?.info?.total_token_usage) { usage = u; model = pay?.info?.model || model; }
       if (pay?.info?.model) model = pay.info.model;
     }
-    if (usage) recs.push({engine: 'codex', file: path.basename(f), ts: meta.ts || st.mtimeMs, cwd: meta.cwd, model, usage});
+    // a rollout file carries usage across many days but one timestamp — attributing it
+    // outside the query window produced future/ancient buckets, so out-of-window is dropped
+    if (usage && (meta.ts || st.mtimeMs) >= since) recs.push({engine: 'codex', file: path.basename(f), ts: meta.ts || st.mtimeMs, cwd: meta.cwd, model, usage});
   }
   return recs;
 }
@@ -75,7 +77,8 @@ function scanZCode(days, home) {
       const ts = l.startedAt ? Date.parse(l.startedAt) : (l.completedAt ? Date.parse(l.completedAt) : st.mtimeMs);
       if (ts < since) continue;
       const u = deepFindUsage(l.response ?? l);
-      if (u) recs.push({engine: 'zcode', file: path.basename(f), ts, cwd: null, model: l.model || null, usage: u});
+      const zm = (typeof l.model === 'string' ? l.model : l.model?.modelId || l.model?.id || '') || null; // an object here printed as [object Object]
+      if (u) recs.push({engine: 'zcode', file: path.basename(f), ts, cwd: null, model: zm, usage: u});
     }
   }
   // 2) v2 会话文件是上述逐次调用的会话级聚合——只进 recent 列表，
@@ -87,7 +90,8 @@ function scanZCode(days, home) {
     let d = null;
     try { d = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { continue; }
     const u = deepFindUsage(d);
-    if (u) recs.push({engine: 'zcode', file: path.basename(f), ts: st.mtimeMs, cwd: d.cwd ?? d.workspace ?? null, model: d.model ?? null, usage: u, aggregate: true});
+    const vm = (typeof d.model === 'string' ? d.model : d.model?.modelId || d.model?.id || '') || null;
+    if (u) recs.push({engine: 'zcode', file: path.basename(f), ts: st.mtimeMs, cwd: d.cwd ?? d.workspace ?? null, model: vm, usage: u, aggregate: true});
   }
   return recs;
 }

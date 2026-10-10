@@ -167,8 +167,15 @@ class McpClient {
   async listTools() {
     await this.connect();
     if (!this.tools) {
-      const res = await this._request("tools/list", {});
-      this.tools = res.tools || [];
+      let res = await this._request("tools/list", {});
+      let tools = res.tools || [];
+      let cursor = res.nextCursor; // servers may paginate — stop at page one and tools silently vanish
+      while (cursor) {
+        res = await this._request("tools/list", { cursor });
+        tools = tools.concat(res.tools || []);
+        cursor = res.nextCursor;
+      }
+      this.tools = tools;
     }
     return this.tools;
   }
@@ -242,9 +249,11 @@ export default function mcpBridge(pi) {
           const c = getClient(srvName, conf);
           try {
             const r = await c.callTool(params.tool, params.arguments || {});
+            // an MCP-level failure must read as one to the model — a bare text return parses as success
+            const text = r.isError ? `[MCP error] ${srvName}.${params.tool} failed: ${r.text}` : r.text;
             return {
-              content: [{ type: "text", text: r.text }],
-              details: { mcp: true, server: srvName, tool: params.tool, isError: r.isError },
+              content: [{ type: "text", text }],
+              details: { mcp: true, server: srvName, tool: params.tool, isError: r.isError === true },
             };
           } catch (e) {
             return {
@@ -297,9 +306,10 @@ export default function mcpBridge(pi) {
               const c = getClient(srvName, conf);
               try {
                 const r = await c.callTool(tool.name, params);
+                const text = r.isError ? `[MCP error] ${srvName}.${tool.name} failed: ${r.text}` : r.text;
                 return {
-                  content: [{ type: "text", text: r.text }],
-                  details: { mcp: true, server: srvName, tool: tool.name, isError: r.isError },
+                  content: [{ type: "text", text }],
+                  details: { mcp: true, server: srvName, tool: tool.name, isError: r.isError === true },
                 };
               } catch (e) {
                 return {

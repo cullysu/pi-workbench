@@ -282,7 +282,7 @@ test('mcp bridge install: copies extension into scratch extensions dir', { timeo
   const r = await req('/api/mcp/install', {});
   assert.equal(r.status, 200);
   assert.equal(r.data.ok, true);
-  const dest = path.join(tmpHome, '.pi', 'agent', 'extensions', 'mcp-bridge', 'mcp-bridge.js');
+  const dest = path.join(tmpHome, '.pi', 'agent', 'extensions', 'mcp-bridge', 'index.js');
   assert.equal(fs.existsSync(dest), true, 'bridge file installed');
   const src = fs.readFileSync(path.join(ROOT, '..', 'extensions', 'mcp-bridge.js'), 'utf8');
   assert.equal(fs.readFileSync(dest, 'utf8'), src);

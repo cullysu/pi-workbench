@@ -143,6 +143,7 @@ jobs:
           $actual = (Get-FileHash pkg-build/node.exe -Algorithm SHA256).Hash.ToLower()
           if ($expected -ne $actual) { throw 'bundled node.exe SHA-256 mismatch' }
           Remove-Item pkg-build/SHASUMS256.txt
+          node scripts/pin-runtime-deps.mjs pkg-build
           Set-Location pkg-build
           node ../scripts/write-manifest.mjs
           Set-Location ..
@@ -209,6 +210,7 @@ jobs:
           tar -xJf "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64.tar.xz" -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64/bin/node"
           cp "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-linux-x64/bin/node" pkg-build/node
           chmod +x pkg-build/node
+          node scripts/pin-runtime-deps.mjs pkg-build
           cd pkg-build && node ../scripts/write-manifest.mjs && cd ..
           node scripts/make-runtime.mjs
       - name: Runtime import self-check
@@ -216,7 +218,13 @@ jobs:
       - name: SBOM (CycloneDX over the shipped runtime deps)
         run: |
           node scripts/sbom.mjs pkg-build > sbom-pi-workbench.cdx.json
-          python3 -c "import json;d=json.load(open('sbom-pi-workbench.cdx.json'));print('sbom components:',len(d['components']))"
+          python3 -c "
+import json
+d=json.load(open('sbom-pi-workbench.cdx.json'))
+v={c['name']:c['version'] for c in d['components']}
+assert v.get('undici')=='8.11.2', 'undici is not pinned: '+str(v.get('undici'))
+assert v.get('brace-expansion')=='5.0.12', 'brace-expansion is not pinned: '+str(v.get('brace-expansion'))
+print('sbom components:', len(d['components']), '| pin assertion ok (undici 8.11.2 / brace-expansion 5.0.12)')"
       - name: Build Linux AppImage
         run: npx electron-builder --linux AppImage --x64 --publish never
       - name: Smoke test AppImage structure
@@ -326,6 +334,7 @@ jobs:
           tar -xJf "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64.tar.xz" -C /tmp "node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64/bin/node"
           cp "/tmp/node-${{ env.NODE_BUNDLE_VERSION }}-darwin-x64/bin/node" pkg-build/node
           chmod +x pkg-build/node
+          node scripts/pin-runtime-deps.mjs pkg-build
           cd pkg-build && node ../scripts/write-manifest.mjs && cd ..
           node scripts/make-runtime.mjs
       - name: Runtime import self-check

@@ -17,13 +17,14 @@ const walk = (dir) => {
     else files.push(path.relative(root, p).split(path.sep).join('/'));
   }
 };
-for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'node', 'node.exe', 'lib', 'public', 'data', 'extensions', 'package.json']) {
+for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'node', 'node.exe', 'lib', 'public', 'data', 'extensions', 'node_modules', 'package.json']) {
   const p = path.join(root, top);
   if (!fs.existsSync(p)) continue;
   if (fs.statSync(p).isDirectory()) walk(p);
   else files.push(top);
 }
 files.sort();
+if (!files.length) throw new Error('manifest would cover zero files — the runtime tree is wrong');
 const manifest = { generatedAt: new Date().toISOString(), files: {} };
 for (const rel of files) {
   const buf = fs.readFileSync(path.join(root, rel));

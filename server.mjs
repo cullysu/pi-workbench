@@ -61,7 +61,10 @@ if (process.env.PIWB_PARENT_PID) {
 
 // ---------- config ----------
 // path key: resolve + lowercase so Windows case variants don't create duplicate projects
-const projectKey = (p) => { try { return path.resolve(String(p)).toLowerCase(); } catch { return String(p).toLowerCase(); } };
+const projectKey = (p) => {
+  const r = (() => { try { return path.resolve(String(p)); } catch { return String(p); } })();
+  return process.platform === 'win32' ? r.toLowerCase() : r; // fold only where the filesystem folds
+};
 function loadConfig() {
   try {
     const cfg = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8'));
@@ -191,8 +194,10 @@ let atomicSeq = 0;
 const atomicWrite = (file, data) => {
   const tmp = `${file}.tmp-${process.pid}-${++atomicSeq}`; // concurrent writes must not share one tmp path
   fs.writeFileSync(tmp, data);
+  // restrictive mode goes on BEFORE the rename — workbench configs carry keys, and the
+  // old order (chmod after rename) left a 0644 window on every write
+  if (process.platform !== 'win32') { try { fs.chmodSync(tmp, 0o600); } catch { /* best effort */ } }
   fs.renameSync(tmp, file);
-  if (process.platform !== 'win32') { try { fs.chmodSync(file, 0o600); } catch { /* best effort */ } } // workbench configs carry keys
 };
 const saveJson = (file, obj) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -202,7 +207,19 @@ const saveJson = (file, obj) => {
 // ---------- cron: scheduled pi prompt runs (lib/cron.mjs) ----------
 const CRON_FILE = path.join(CFG_DIR, 'cron.json');
 const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
-const cron = createCron({ CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, cronPiArgs, broadcast, readJson, saveJson, spawn, get knownProject() { return knownProject; } });
+const cron = createCron({
+  CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, broadcast, readJson, saveJson, spawn,
+  get knownProject() { return knownProject; },
+  // unattended jobs run with the panel's skills switches (per cwd) and default model —
+  // the arrow body defers skillArgsFor/loadConfig past their definition points
+  get cronPiArgs() {
+    return (job) => {
+      const args = [...cronPiArgs(job)];
+      if (!job.model) { const dm = (loadConfig() || {}).defaultModel; if (dm) args.push('--model', dm); }
+      return [...args, ...skillArgsFor(job.cwd || HOME)];
+    };
+  },
+});
 function saveRouting(r) {
   fs.mkdirSync(CFG_DIR, { recursive: true });
   atomicWrite(ROUTING_FILE, JSON.stringify(r, null, 2));
@@ -335,6 +352,7 @@ async function testModelReply(modelId) {
     }
     const ms = Date.now() - t0;
     if (!r.ok) return { ok: false, status: r.status, detail: JSON.stringify(j).slice(0, 160), ms };
+    if (r.ok && !String(txt || '').trim()) return { ok: false, detail: 'HTTP 成功但模型没有返回内容（中继可能忽略参数或配额异常）', ms };
     return { ok: true, ms, reply: String(txt).slice(0, 60) };
   } catch (e) {
     return { ok: false, detail: String(e.message || e), ms: Date.now() - t0 };
@@ -890,7 +908,10 @@ async function hCron(req, res, u) {
         if (old) {
           j.lastRun = old.lastRun; j.lastStatus = old.lastStatus; j.lastOutput = old.lastOutput;
           j.lastRunMs = old.lastRunMs; j.lastRunDay = old.lastRunDay;
-          if (old.running) j.running = true; // a live run must survive a settings save, or tick double-spawns
+          // a live run must survive a settings save — but a flag stale past the zombie
+          // timeout is a dead marker (settle's save is best-effort) and must not resurrect
+          const stale = old.running && old.lastRunMs && (Date.now() - old.lastRunMs > 30 * 60000);
+          if (old.running && !stale) j.running = true;
         }
         if (!j.id) j.id = 'job-' + crypto.randomBytes(4).toString('hex');
         if (typeof j.enabled !== 'boolean') j.enabled = true;
@@ -1206,9 +1227,18 @@ async function hMcpInstall(req, res, u) {
     if (!fs.existsSync(bridge)) return json(res, 404, { error: 'bridge file missing' });
     const destDir = path.join(HOME, '.pi', 'agent', 'extensions', 'mcp-bridge');
     fs.mkdirSync(destDir, { recursive: true });
-    fs.copyFileSync(bridge, path.join(destDir, 'mcp-bridge.js'));
+    // pi discovers a subdirectory extension only via its index entry (dist/core/extensions/loader.js
+    // resolveExtensionEntries: index.ts | index.js) — installing it under any other name returns
+    // ok:true while the engine finds nothing
+    fs.copyFileSync(bridge, path.join(destDir, 'index.js'));
     fs.copyFileSync(path.join(srcDir, 'package.json'), path.join(destDir, 'package.json'));
-    // typebox is resolved from the extension's own node_modules (pi documents this flow)
+    // typebox is resolved from the extension's own node_modules (pi documents this flow).
+    // The packaged runtime bundles it — copy across and skip npm entirely on clean machines.
+    const bundledTypebox = path.join(__dirname, 'node_modules', 'typebox');
+    if (fs.existsSync(bundledTypebox)) {
+      fs.rmSync(path.join(destDir, 'node_modules', 'typebox'), { recursive: true, force: true });
+      fs.cpSync(bundledTypebox, path.join(destDir, 'node_modules', 'typebox'), { recursive: true });
+    }
     const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
     if (!hasDep) {
       // the committed lock pins typebox by integrity hash; npm ci enforces it.
@@ -1357,6 +1387,18 @@ server.on('upgrade', (req, socket, head) => {
   if (originOk && hostAllowed(req.headers.host || '') && pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   else socket.destroy();
 });
+
+// the shell's tree-kill is Windows-only; on POSIX a dying server must reap its own
+// pi process groups (each tab is detached — SIGTERM to the server never reaches them)
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  try {
+    process.on(sig, () => {
+      for (const t of tabs.values()) { try { killTree(t.proc); } catch { /* gone */ } }
+      process.exit(0);
+    });
+  } catch { /* handler already installed */ }
+}
+process.on('exit', () => { for (const t of tabs.values()) { try { killTree(t.proc); } catch { /* gone */ } } });
 
 resolveSecrets();
 // cron: clear stale running flags exactly once per process lifetime (never per request)

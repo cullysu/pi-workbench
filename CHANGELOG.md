@@ -2,6 +2,26 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.2.6 — 2026-10-10
+
+### Fixed (the two P1 blockers from the independent v1.2.5 review)
+- **macOS builds now generate the shell integrity manifest**: the afterPack hook only knew the Windows/Linux `resources/app` layout — on macOS it silently produced nothing while the packaged app refuses to boot without it. Both layouts are handled; the hook fails loudly if neither is found.
+- **MCP one-click install now installs something pi can discover**: pi loads a subdirectory extension only through its `index.js` entry — the bridge was installed as `mcp-bridge.js`, the API returned ok, and the engine found nothing. Installed under the entry name; the bundled typebox also ships inside the runtime, so a clean machine never needs a system npm for first install.
+- **The shipped runtime now physically carries the audited fixed deps**: CI's SBOM — which reads the actual tree — proved v1.2.4/v1.2.5 shipped undici 8.9.0 even though the lockfile said 8.11.2 (npm's overrides AND lockfile edits are ignored by its installer on this tree). A pack-time pin step overwrites the transitive copies and the SBOM step hard-asserts the pinned versions, so the audit gate and the shipped bytes can no longer disagree.
+
+### Fixed (state consistency & correctness)
+- Cron: the second boot-reset inside the first tick (which could double-spawn a manually started job) is gone; a settings save no longer resurrects a running flag stale past the zombie timeout; unattended jobs now run with the panel's skills switches and default model.
+- Key rotation: the success report carries `tabId`, so clearCool is scoped to the key that actually served (a healthy key B's success no longer unfreezes dead key A).
+- POSIX shutdown: a dying server reaps its own pi process groups (each tab is detached — SIGTERM to the server never reached them).
+- The goal auto-continue timer re-checks stop state and tab identity at fire time; a pi exit releases the dead tabId instead of letting the composer swallow sends; replay registers tool cards so tool results have somewhere to land; the session export no longer silently requires a fork list nobody fetched; session trees render from window-clipped roots; `markRouteOk` never reports a healthy-model success into a dead tab.
+- Provider "real reply" test treats an empty HTTP 200 as a failure; MCP tool failures are prefixed `[MCP error]` instead of parsing as success; `tools/list` follows `nextCursor` pagination; the lazy meta-tool describes each tool's parameters.
+- Usage: per-model cost estimates now fold into the session total (it stayed 0 while models had values); daily stats carry cacheWrite; zcode rollouts keep cacheWriteTokens and never print a model object as `[object Object]`; codex records outside the query window are dropped instead of bucketed into it.
+- readJsonl drops an unterminated oversized line immediately instead of accumulating it to EOF; config writes chmod 0600 **before** the rename (no 0644 window); backup import validates structure (syntax-valid garbage is rejected); project identity folds case only on Windows; the Electron port probe sends `Host: 127.0.0.1:port` (the portless Host made our own server look like a squatter); fresh installs create their log file; the runtime manifest covers `node_modules` and both shells reject an empty manifest; Tauri routes `target=_blank` to the system browser.
+
+### Documented limitations (unchanged, by design or awaiting users)
+- The shell→port identity probe cannot distinguish a same-user squatter (challenge data is visible to it) — same-user code execution remains the trust boundary; README states it.
+- Cross-project session restore keeps panel-side file/git/goal context of the previous project (pi itself restores the session's cwd); read-only imports still share the live composer — both are queued as product work, not patches.
+
 ## 1.2.5 — 2026-10-10
 
 ### Fixed (wave-15 review)

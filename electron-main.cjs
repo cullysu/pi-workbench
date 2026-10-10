@@ -26,7 +26,7 @@ function appendLog(line) {
   try { console.log('[app] ' + line); } catch { /* stdout mirror so headless CI sees it in app.log */ }
   try {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true }); // userData may not exist yet on a fresh/failed boot
-    if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, '');
+    try { if (fs.statSync(LOG_FILE).size > 2e6) fs.writeFileSync(LOG_FILE, ''); } catch { /* first boot: no log file yet (this was why fresh installs never got one) */ }
     fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${line}\n`);
   } catch { /* the GUI must never crash over its own log — the console mirror above still survives */
   }
@@ -188,7 +188,7 @@ function isWorkbenchPort(port) {
     let buf = '';
     const done = (v) => { try { s.destroy(); } catch { /* already gone */ } resolve(v); };
     s.setTimeout(1500);
-    s.once('connect', () => s.write(`GET /api/kernel HTTP/1.0\r\nHost: 127.0.0.1\r\nx-api-token: ${SHELL_TOKEN}\r\n\r\n`));
+    s.once('connect', () => s.write(`GET /api/kernel HTTP/1.0\r\nHost: 127.0.0.1:${port}\r\nx-api-token: ${SHELL_TOKEN}\r\n\r\n`)); // the server's Host check requires the port — a portless Host made our OWN server look like a squatter
     s.on('data', (c) => { buf += String(c); if (buf.length > 4096) done(buf.startsWith('HTTP/1.') && buf.includes(' 200 ')); });
     s.once('end', () => done(buf.startsWith('HTTP/1.') && buf.includes(' 200 ')));
     s.once('timeout', () => done(false));
@@ -229,6 +229,7 @@ function verifyRuntimeManifest() {
   }
   const bad = [];
   const entries = Object.entries(mf.files || {});
+  if (!entries.length) return { total: 0, bad: ['runtime manifest covers zero files'] };
   for (const [rel, want] of entries) {
     let ok = false;
     try {

@@ -184,7 +184,13 @@ function handlePiEvent(ev) {
   }
 }
 function handlePiExit(msg) {
-  if (msg.tabId === state.tabId) { setBusy(false); state.streaming = false; $('#statusline').textContent = `pi exited (${msg.code})`; $('#conn-dot').className = 'dot off'; }
+  if (msg.tabId === state.tabId) {
+    setBusy(false); state.streaming = false;
+    $('#statusline').textContent = `pi 已退出（code ${msg.code}）——下次发送将开新会话`;
+    $('#conn-dot').className = 'dot off';
+    state.tabId = null; // a dead tabId made the composer silently swallow sends
+    try { state.ws?.adopted?.delete?.(msg.tabId); } catch { /* socket gone */ }
+  }
 }
 
 function ensureAssistantBlock() {
@@ -610,7 +616,9 @@ function renderReplay(entries) {
         } else if (b.type === 'toolCall') {
           const w = document.createElement('div');
           w.innerHTML = toolCardHtml(b.id, b.name, JSON.stringify(b.arguments || {}), 'done');
-          wireToolCard(w.firstChild); inner.appendChild(w);
+          wireToolCard(w.firstChild);
+          state.toolCards.set(b.id, w.firstChild); // toolResult events look their card up here — unregistered ids meant lost outputs
+          inner.appendChild(w);
         }
       }
       body.appendChild(inner);
@@ -921,7 +929,12 @@ function maybeGoalContinue() {
   }
   state.goalRound = (state.goalRound || 0) + 1;
   renderGoalBanner();
-  setTimeout(() => submitPrompt(GOAL_CONTINUE_PROMPT, { resend: true }), 700);
+  const armedTab = state.tabId;
+  setTimeout(() => {
+    // re-check at fire time: the user may have stopped, switched sessions or projects
+    if (state.tabId !== armedTab || state.userAborted || state.goalStop || state.goalDone) return;
+    submitPrompt(GOAL_CONTINUE_PROMPT, { resend: true });
+  }, 700);
 }
 function updateModelChip() {
   const chip = document.querySelector('#model-chip');
@@ -1044,7 +1057,7 @@ async function maybeFailover(detail) {
 }
 function markRouteOk() {
   state.failoverDone = false;
-  if (state.selModel) api.post('/api/routing/ok', { model: state.selModel }).catch(() => {});
+  if (state.selModel) api.post('/api/routing/ok', { model: state.selModel, tabId: state.tabId }).catch(() => {}); // tabId scopes the clear to the key that actually served
 }
 $('#btn-send').onclick = sendPrompt;
 $('#btn-stop').onclick = () => {
@@ -1832,7 +1845,10 @@ $('#btn-tree').onclick = async () => {
     }
     for (const c of kids.get(id) || []) walk(c, depth + 1);
   };
-  for (const n of r.nodes) if (!n.parentId) walk(n.id, 0);
+  const nodeIds = new Set(r.nodes.map((n) => n.id));
+  // a node whose parent fell outside the returned window IS a render root — requiring a
+  // literal null parent left >4000-node sessions completely blank
+  for (const n of r.nodes) if (!n.parentId || !nodeIds.has(n.parentId)) walk(n.id, 0);
   modal(`会话分支树 · ${r.count} 节点 · ${r.branches} 处分叉`, '', [{ label: '关闭', primary: true }]);
   $('#modal-body').innerHTML = `<div class="tree-view">${html || '<span class="muted small">空会话</span>'}</div>`;
 };
@@ -2321,10 +2337,7 @@ __tl.addEventListener('mouseover', (e) => {
   bar.querySelector('[data-a="edit"]').onclick = (ev) => { ev.stopPropagation(); forkToUserBubble(bubble, 'edit'); };
   bar.querySelector('[data-a="export"]').onclick = (ev) => {
     ev.stopPropagation();
-    const k = userBubbleIndex(bubble);
-    const msgs = state.forkMsgs || [];
-    const fm = msgs[k];
-    if (!fm || !state.sessionFile) return;
+    if (!state.sessionFile) { $('#statusline').textContent = '导出需要已打开的会话'; return; }
     // plain <a> navigation cannot carry x-api-token — fetch with the header and
     // hand the blob to the downloader
     fetch('/api/session/export?path=' + encodeURIComponent(state.sessionFile), { headers: { 'x-api-token': apiToken() } })

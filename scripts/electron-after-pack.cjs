@@ -8,8 +8,16 @@ const path = require('node:path');
 const { createHash } = require('node:crypto');
 
 exports.default = async function afterPack(context) {
-  const appDir = path.join(context.appOutDir, 'resources', 'app');
-  if (!fs.existsSync(path.join(appDir, 'electron-main.cjs'))) return; // no unpacked app dir — nothing to cover
+  // win/linux: <out>/resources/app — mac: <out>/<Product>.app/Contents/Resources/app
+  const candidates = [
+    path.join(context.appOutDir, 'resources', 'app'),
+    path.join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`, 'Contents', 'Resources', 'app'),
+  ];
+  let appDir = null;
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, 'electron-main.cjs'))) { appDir = c; break; }
+  }
+  if (!appDir) return; // no unpacked app dir — nothing to cover
   const files = ['electron-main.cjs', 'electron-preload.cjs', 'package.json'];
   const manifest = { generatedAt: new Date().toISOString(), files: {} };
   for (const f of files) {

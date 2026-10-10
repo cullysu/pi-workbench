@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml)
 
-**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). 跨平台桌面应用：Windows 双壳（Electron 完整壳 + Tauri 轻量壳，安装包 ≈32MB）、Linux AppImage、macOS dmg（arm64/x64），中文界面。
+**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). 跨平台桌面应用：Windows 双壳（Electron 完整壳 + Tauri 轻量壳，安装包 ≈64MB）、Linux AppImage、macOS dmg（arm64/x64），中文界面。
 
 不 fork、不改 pi。工作台以子进程运行 `pi --mode rpc`（stdin/stdout JSONL）驱动 pi 本体：会话文件是 pi 原生格式（`~/.pi/agent/sessions`），自定义模型在 `~/.pi/agent/models.json`，与 pi CLI 完全互通。
 
@@ -49,7 +49,7 @@
 | macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` | 按 CPU 选；两个 dmg 内置同一个 x64 Node（ARM 经 Rosetta 运行的全兼容取舍） |
 | macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` | 同上 |
 
-安装包**内置 Node 运行时**（Windows/Linux 为 x64 官方二进制，macOS 为 x64 —— Apple Silicon 经 Rosetta 运行），**无需本机安装 Node.js**。`package.json` 的 `engines >= 22.13` 仅约束源码开发环境：
+安装包**内置 Node 运行时**（Windows/Linux 为 x64 官方二进制，macOS 为 x64 —— Apple Silicon 经 Rosetta 运行），**无需本机安装 Node.js**。`package.json` 的 `engines >= 22.19`（pi 0.85.0 的真实下限）仅约束源码开发环境：
 
 - 跟随系统语言（中文 / English），可选安装路径，桌面 + 开始菜单快捷方式
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`
@@ -67,7 +67,7 @@
 所有个人配置都在本机，不进仓库：
 
 - `~/.pi-workbench/config.json` — 工作台配置（项目、主题、语言、默认模型、技能开关）
-- **密钥说明**：API key 存于 `~/.pi/agent/models.json`（`$ENV` 写法可引用环境变量，面板接口对明文 key 只回 `***`，编辑时留空即保持）；备份 zip 为还原会**包含明文 key**，请妥善保管
+- **密钥说明**：API key 存于 `~/.pi/agent/models.json`（`$ENV` 写法可引用环境变量，面板接口对明文 key 只回 `***`，编辑时留空即保持）；备份 zip **默认排除 API key**（导出时可显式选择包含；包含时 zip 内为明文，请妥善保管）
 - `~/.pi-workbench/routing.json` — 回退链与冷却状态
 - `~/.pi/agent/models.json` — 供应商与模型（pi 原生格式）
 

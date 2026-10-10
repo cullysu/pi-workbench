@@ -12,8 +12,8 @@ import path from 'node:path';
 const pkgBuild = path.resolve(process.argv[2] || 'pkg-build');
 const PINS = [['undici', '8.11.2'], ['brace-expansion', '5.0.12']];
 const piNm = path.join(pkgBuild, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules');
-if (!fs.existsSync(path.join(piNm, '@earendil'))) {
-  console.error(`pin-runtime-deps: ${piNm} does not look like an assembled runtime tree`);
+if (!fs.existsSync(piNm)) {
+  console.error(`pin-runtime-deps: ${piNm} does not exist — assemble the runtime tree first`);
   process.exit(1);
 }
 const tmp = fs.mkdtempSync(path.join(path.dirname(pkgBuild), 'pins-'));

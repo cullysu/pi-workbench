@@ -48,17 +48,36 @@ class McpClient {
     this.proc.stdin.write(JSON.stringify(msg) + "\n");
   }
 
-  _request(method, params, timeoutMs = CALL_TIMEOUT_MS) {
+  _request(method, params, timeoutMs = CALL_TIMEOUT_MS, signal) {
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error(`${method} aborted before start`));
       const id = this.nextId++;
+      let onAbort = null;
+      const cleanupAbort = () => { if (onAbort && signal) signal.removeEventListener("abort", onAbort); };
       const timer = setTimeout(() => {
+        cleanupAbort();
         this.pending.delete(id);
         reject(new Error(`${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      if (signal) {
+        onAbort = () => {
+          // protocol-level cancel: tell the server to stop the work, then fail the call
+          try { this._send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "user aborted" } }); } catch { /* transport gone */ }
+          this.pending.delete(id);
+          clearTimeout(timer);
+          reject(new Error(`${method} cancelled by user abort`));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.pending.set(id, {
+        resolve: (v) => { cleanupAbort(); resolve(v); },
+        reject: (e) => { cleanupAbort(); reject(e); },
+        timer,
+      });
       try {
         this._send({ jsonrpc: "2.0", id, method, params });
       } catch (e) {
+        cleanupAbort();
         clearTimeout(timer);
         this.pending.delete(id);
         reject(e);
@@ -180,9 +199,9 @@ class McpClient {
     return this.tools;
   }
 
-  async callTool(toolName, args) {
+  async callTool(toolName, args, signal) {
     await this.connect();
-    const res = await this._request("tools/call", { name: toolName, arguments: args || {} });
+    const res = await this._request("tools/call", { name: toolName, arguments: args || {} }, CALL_TIMEOUT_MS, signal);
     const out = [];
     for (const item of res.content || []) {
       if (item.type === "text") out.push(item.text);
@@ -250,11 +269,11 @@ export default function mcpBridge(pi) {
           properties: { tool: { type: "string", description: "tool name as reported by " + listName }, arguments: { type: "object", description: "tool arguments object" } },
           required: ["tool"],
         }),
-        async execute(_toolCallId, params) {
+        async execute(_toolCallId, params, signal) {
           const c = getClient(srvName, conf);
           let r;
           try {
-            r = await c.callTool(params.tool, params.arguments || {});
+            r = await c.callTool(params.tool, params.arguments || {}, signal);
           } catch (e) {
             return {
               content: [{ type: "text", text: `MCP error (${srvName}.${params.tool}): ${e.message}` }],
@@ -309,11 +328,11 @@ export default function mcpBridge(pi) {
             description: tool.description || `MCP tool ${tool.name} from server ${srvName}`,
             promptSnippet: `${tool.description || tool.name} (MCP server: ${srvName})`,
             parameters: Type.Unsafe(schema),
-            async execute(_toolCallId, params) {
+            async execute(_toolCallId, params, signal) {
               const c = getClient(srvName, conf);
               let r;
               try {
-                r = await c.callTool(tool.name, params);
+                r = await c.callTool(tool.name, params, signal);
               } catch (e) {
                 return {
                   content: [{ type: "text", text: `MCP error (${srvName}.${tool.name}): ${e.message}` }],

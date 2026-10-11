@@ -2,7 +2,16 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
-## 1.2.8 — 2026-10-10
+## 1.2.9 — 2026-10-10
+
+### Fixed
+- **Extension confirm/select Escape answers really ship now**: the v1.2.8 wave-18 batch claimed the modalCancel wiring, but the edit was lost when that patch aborted early on a different failed anchor — the shipped build still left a dismissed extension waiting forever. The new browser-level contract probe caught it on its first run. The wiring is in, and the probe locks it.
+- **MCP user aborts reach the MCP server**: pi hands every tool execute an AbortSignal — the bridge was dropping it. The signal now threads into `tools/call`, cancels the local call, and sends the protocol-level `notifications/cancelled` so the server stops the work.
+
+### Added
+- `scripts/ui-contract-probe.mjs` — browser-level reverse tests for the front-end state contracts (import isolation blocks submission and emits zero frames; Escape on extension confirm replies on the wire; canary sanity on the frame recorder). Wired into the CI e2e job. (Cross-project session sync and reconnect replay remain covered by code review + existing probes; deeper DOM-level cases for them are queued.)
+
+## 1.2.8 — 2026-10-10## 1.2.8 — 2026-10-10
 
 ### Fixed (the queued product specials from the v1.2.6 review)
 - **Clicking a session under another project now moves the panel with it**: the session's block carries its project, and the click syncs the panel project (title, tree, goal banner) before the open — title/file/git/goal context no longer describe the previous project.

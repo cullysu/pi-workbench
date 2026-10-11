@@ -411,8 +411,10 @@ function handleUiRequest(ev) {
       { label: 'OK', primary: true, cb: () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, confirmed: true } }) },
       { label: 'Cancel', cb: () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, confirmed: false } }) },
     ]);
+    modalCancel = () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, confirmed: false } }); // Escape must answer too — extensions wait with no timeout
   } else if (method === 'select') {
     modal(ev.title || 'select', '', (ev.options || []).map((o) => ({ label: o, cb: () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, value: o } }) })));
+    modalCancel = () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, cancelled: true } });
   } else if (method === 'input' || method === 'editor') {
     modalWithInput(ev.title || method, ev.placeholder || '', ev.prefill || '', (val) => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, value: val } }),
       () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, cancelled: true } }));
@@ -2462,6 +2464,6 @@ window.addEventListener('unhandledrejection', (e) => { window.__bootErrors.push(
   api.get('/api/kernel').then((k) => {
     $('#sb-kernel').textContent = `内核 pi ${k.pi || '?'} · node ${k.node}`;
   }).catch(() => {});
-  window.__wb = { get state() { return state; }, rpcTo, updateModelChip };
+  window.__wb = { get state() { return state; }, rpcTo, updateModelChip, uiRequest: handleUiRequest }; // uiRequest is exposed for contract probes (Escape must answer extensions)
 })();
 })();

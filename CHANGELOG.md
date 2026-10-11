@@ -2,7 +2,13 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
-## 1.3.0 — 2026-10-11
+## 1.3.1 — 2026-10-11
+
+### Fixed
+- Ships the two server.mjs fixes that were accidentally reverted out of the v1.3.0 packaging commit: run-now answers accepted/rejected (503 when the concurrency budget rejects) instead of always-ok, and cron children join the server shutdown reap.
+- Version files bumped to 1.3.1 — the v1.3.0 tag carried 1.3.0-named binaries (correct there); this tag now carries 1.3.1-named binaries built from this exact commit.
+
+## 1.3.0 — 2026-10-11## 1.3.0 — 2026-10-11
 
 ### Fixed (P1, all reproduced by the independent v1.2.9 audit)
 - **Cron budget is released on every settle** — the running counter only ever incremented, so after two successful runs no job started again until a server restart ("max 2 concurrent" had become "max 2 per lifetime"; audit repro 1,2,2). Also: malformed daily times skip instead of crashing the whole tick, run-now reports accepted/rejected instead of always-ok, and cron children join the server shutdown reap.

@@ -46,7 +46,7 @@ function scanCodex(days, home) {
     if (!lines.length) continue;
     let meta = {cwd: null, ts: st.mtimeMs};
     let model = null;
-    let prevTotals = null; // previous cumulative total — deltas become per-day usage
+    let prevTotals = { input: 0, output: 0, cached: 0 }; // the FIRST total is real usage too — a null baseline dropped it
     for (const l of lines) {
       // session_meta carries type at the TOP level and cwd inside payload — reading
       // pay = l.payload first was why codex cwd was always null
@@ -59,10 +59,10 @@ function scanCodex(days, home) {
       const tt = pay?.info?.total_token_usage;
       if (!tt || typeof tt !== 'object') continue;
       const cur = { input: tt.input_tokens ?? 0, output: tt.output_tokens ?? 0, cached: tt.cached_input_tokens ?? 0 };
-      if (prevTotals) {
+      {
         const dIn = cur.input - prevTotals.input, dOut = cur.output - prevTotals.output, dCa = cur.cached - prevTotals.cached;
         if (dIn > 0 || dOut > 0 || dCa > 0) {
-          const ts = pay.timestamp ? Date.parse(pay.timestamp) : (meta.ts || st.mtimeMs);
+          const ts = l.timestamp ? Date.parse(l.timestamp) : (pay.timestamp ? Date.parse(pay.timestamp) : (meta.ts || st.mtimeMs)); // the event's own timestamp outranks the session start
           if (ts >= since) {
             recs.push({engine: 'codex', file: path.basename(f), ts, cwd: meta.cwd, model, usage: {
               input: dIn, output: dOut, cached: dCa, cacheWrite: 0, reasoning: 0,

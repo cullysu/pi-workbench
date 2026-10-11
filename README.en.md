@@ -40,7 +40,7 @@ Download the installer for your platform from [Releases](../../releases) (1.2.1 
 | macOS (Apple Silicon) | `PiWorkbench-<version>-macOS-arm64.dmg` | pick by CPU; both dmgs bundle the same x64 Node (ARM runs it via Rosetta — the both-compatible trade-off) |
 | macOS (Intel) | `PiWorkbench-<version>-macOS-x64.dmg` | same as above |
 
-The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; macOS x64 — Apple Silicon runs it via Rosetta), so **no system Node.js is needed**. `package.json` `engines >= 22.13` only constrains development from source:
+The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; macOS x64 — Apple Silicon runs it via Rosetta), so **no system Node.js is needed**. `package.json` `engines >= 22.19` (pi 0.85.0's real floor) only constrains development from source:
 
 - Windows installers follow system language (Chinese/English), per-user install, desktop + start menu shortcuts
 - Upgrades keep config and sessions; uninstall leaves `~/.pi-workbench` and `~/.pi` untouched
@@ -57,7 +57,7 @@ The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; m
 
 Everything is local, nothing is committed to this repo:
 
-- **Keys**: API keys live in `~/.pi/agent/models.json` (use `$ENV_NAME` to reference an environment variable; the API answers `***` for literal keys — leave the field empty when editing to keep the stored one). Backup zips contain keys in plaintext for restore — keep them safe.
+- **Keys**: API keys live in `~/.pi/agent/models.json` (use `$ENV_NAME` to reference an environment variable; the API answers `***` for literal keys — leave the field empty when editing to keep the stored one). Backup zips default to EXCLUDING API keys (a redacted models.json keeps provider URLs and model lists; re-enter keys after restore). Including keys is an explicit opt-in — those zips are plaintext, keep them safe.
 - `~/.pi-workbench/config.json` — workbench config (projects, theme, language, default model, skill toggles, optional `relaySecret`)
 - `~/.pi-workbench/routing.json` — fallback chains and cooldown state
 - `~/.pi/agent/models.json` — providers and models (pi-native format)

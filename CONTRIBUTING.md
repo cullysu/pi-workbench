@@ -2,7 +2,7 @@
 
 ## 环境搭建
 
-要求：Node.js ≥ 22.13（`node:sqlite` 等），git，Python 3（仅 route-sweep 用），Rust 工具链（仅改 Tauri 壳时需要）。
+要求：Node.js ≥ 22.19（`node:sqlite` 等，pi 0.85.0 的真实下限），git，Python 3（仅 route-sweep 用），Rust 工具链（仅改 Tauri 壳时需要）。
 
 ```bash
 git clone https://github.com/cullysu/pi-workbench.git

@@ -2,7 +2,20 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
-## 1.3.1 — 2026-10-11
+## 1.3.2 — 2026-10-11
+
+### Fixed (from the independent v1.3.1 audit)
+- **Cron lifecycle leak**: settled children are now removed from the shutdown set — the set grew by one exited ChildProcess per run, retaining listeners and closures forever.
+- **uncaughtException degrades into a safe restart**: the server reaps tab children and cron processes, then exits — the desktop shells restart it automatically. Continuing as a healthy service after an uncaught exception traded a diagnosable crash for silent corruption. `PIWB_NO_EXIT_ON_UNCAUGHT=1` is the debug hatch.
+- **File browsing joins the same project identity** (case folds only where the filesystem folds) — the file list used a stricter comparison than registration/git/terminal, so the same directory could read as "known" in one panel and "unknown" in another.
+- **Provider test retry actually removes the token cap now** — the "uncapped retry" resent the identical `max_tokens: 512` body, which could not succeed where the first attempt failed.
+- **Reproducibility over build-time drift**: `cargo update` removed from the audit and Windows build steps — the committed Cargo.lock is both the audited and the built tree (the audit/build lockfile split from v1.3.0 is closed).
+- **pin-runtime-deps verifies tarball integrity** against the committed lockfile (a version match alone would accept re-authored content).
+- Docs: README version examples and the Tauri size line corrected; search placeholder says what it does.
+
+Known and queued (unchanged): code signing (awaiting a certificate account), macOS arm64 native runtime split (Rosetta documented), deeper install-and-launch smoke for the Windows/macOS channels, full-release SBOM layering.
+
+## 1.3.1 — 2026-10-11## 1.3.1 — 2026-10-11
 
 ### Fixed
 - Ships the two server.mjs fixes that were accidentally reverted out of the v1.3.0 packaging commit: run-now answers accepted/rejected (503 when the concurrency budget rejects) instead of always-ok, and cron children join the server shutdown reap.

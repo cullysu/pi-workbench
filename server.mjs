@@ -1027,9 +1027,10 @@ async function hCronRunNow(req, res, u) {
     const d = readJson(CRON_FILE) || { jobs: [] };
     const job = d.jobs.find((j) => j.id === id);
     if (!job) return json(res, 404, { error: 'job not found' });
-    cron.runCronJob(job);
+    const started = cron.runCronJob(job);
     saveJson(CRON_FILE, d);
-    return json(res, 200, { ok: true, lastStatus: job.lastStatus });
+    // a budget-rejected run-now must not report ok — callers treat this as "it ran"
+    return json(res, started ? 200 : 503, { ok: started, accepted: started, lastStatus: job.lastStatus });
 }
 
 async function hUsage(req, res, u) {
@@ -1400,7 +1401,10 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
     });
   } catch { /* handler already installed */ }
 }
-process.on('exit', () => { for (const t of tabs.values()) { try { killTree(t.proc); } catch { /* gone */ } } });
+process.on('exit', () => {
+  for (const t of tabs.values()) { try { killTree(t.proc); } catch { /* gone */ } }
+  try { cron.shutdown(); } catch { /* best effort */ } // cron children are detached process groups too
+});
 
 resolveSecrets();
 // cron: clear stale running flags exactly once per process lifetime (never per request)

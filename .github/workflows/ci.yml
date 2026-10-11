@@ -43,9 +43,7 @@ jobs:
         with:
           tool: cargo-audit
       - name: Run cargo audit
-        run: |
-          cd tauri && cargo update --workspace --quiet && cd ..
-          cargo audit --file tauri/Cargo.lock
+        run: cargo audit --file tauri/Cargo.lock # the committed lock IS the audited AND built tree — no build-time updates
 
   test:
     timeout-minutes: 25
@@ -162,8 +160,7 @@ jobs:
         run: |
           cargo --version
           cd tauri
-          cargo update --workspace --quiet
-          npx tauri build
+          npx tauri build # builds from the committed Cargo.lock — reproducible; lock refreshes happen in review, not at build time
       - uses: actions/upload-artifact@v4
         with:
           name: tauri-installer

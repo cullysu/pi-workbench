@@ -160,7 +160,19 @@ function logErr(line) {
     fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${redactSecrets(line)}\n`);
   } catch { /* never let the error logger itself throw */ }
 }
-process.on('uncaughtException', (e) => { DEGRADED_AT = DEGRADED_AT || Date.now(); logErr('uncaughtException: ' + ((e && e.stack) || e)); });
+process.on('uncaughtException', (e) => {
+  DEGRADED_AT = DEGRADED_AT || Date.now();
+  logErr('uncaughtException: ' + redactSecrets((e && e.stack) || e));
+  // an uncaught exception leaves unknown state — continuing as a healthy service would
+  // trade a diagnosable crash for silent corruption. reap children and exit; the desktop
+  // shells restart the server automatically. PIWB_NO_EXIT_ON_UNCAUGHT=1 is the test hatch.
+  if (process.env.PIWB_NO_EXIT_ON_UNCAUGHT === '1') return;
+  setTimeout(() => {
+    try { for (const t of tabs.values()) { try { killTree(t.proc); } catch { /* gone */ } } } catch { /* best effort */ }
+    try { cron.shutdown(); } catch { /* best effort */ }
+    process.exit(1);
+  }, 1500); // let the error log flush first
+});
 process.on('unhandledRejection', (e) => logErr('unhandledRejection: ' + ((e && e.stack) || e)));
 
 // DNS-rebinding armor: a browser-resolved evil.com -> 127.0.0.1 would arrive with a
@@ -336,8 +348,9 @@ async function testModelReply(modelId) {
       txt = (j.output || []).filter((o) => o.type === 'message').flatMap((o) => (o.content || []).map((c) => c.text || '')).join('');
     } else { // openai-completions and anything else speaking the chat shape
       // cap the test spend: 512 keeps reasoning-model thinking in budget without
-      // the 400s a 16-token cap drew from some relays; if the relay rejects the
-      // cap itself, retry uncapped once (old behavior) rather than fail the test
+      // the 400s a 16-token cap drew from some relays; a relay that rejects the cap
+      // itself gets ONE uncapped retry — with the parameter actually removed, not
+      // the identical body resent (the old "retry" changed nothing but the latency)
       ({ r, j } = await fetchJsonCapped(base + '/chat/completions', {
         method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
         body: JSON.stringify({ model: mid, max_tokens: 512, messages: [{ role: 'user', content: '只回复ok' }] }),
@@ -346,7 +359,7 @@ async function testModelReply(modelId) {
       if (!r.ok && (r.status === 400 || r.status === 422)) {
         ({ r, j } = await fetchJsonCapped(base + '/chat/completions', {
           method: 'POST', headers: { ...authHeadersFor(p, p.baseUrl, key), 'content-type': 'application/json' },
-          body: JSON.stringify({ model: mid, max_tokens: 512, messages: [{ role: 'user', content: '只回复ok' }] }),
+          body: JSON.stringify({ model: mid, messages: [{ role: 'user', content: '只回复ok' }] }), // no max_tokens — the point of this retry
           signal: AbortSignal.timeout(30000),
         }));
       }
@@ -1047,7 +1060,7 @@ async function hFilesList(req, res, u) {
     const root = u.searchParams.get('root');
     const rel = u.searchParams.get('path') || '';
     const cfgc = loadConfig();
-    const known = (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(root || ''));
+    const known = (cfgc.projects || []).some((pr) => projectKey(pr.path) === projectKey(root || '')); // same identity as registration — case folds only where the filesystem does
     if (!root || !known) return json(res, 400, { error: 'unknown project root' });
     const base = path.resolve(root, rel);
     if (!realContains(root, base)) return json(res, 400, { error: 'bad path' });
@@ -1068,7 +1081,7 @@ async function hFilesRead(req, res, u) {
     const root = u.searchParams.get('root');
     const rel = u.searchParams.get('path') || '';
     const cfgc = loadConfig();
-    const known = (cfgc.projects || []).some((pr) => path.resolve(pr.path) === path.resolve(root || ''));
+    const known = (cfgc.projects || []).some((pr) => projectKey(pr.path) === projectKey(root || '')); // same identity as registration — case folds only where the filesystem does
     if (!root || !known) return json(res, 400, { error: 'unknown project root' });
     const base = path.resolve(root, rel);
     if (!realContains(root, base)) return json(res, 400, { error: 'bad path' });

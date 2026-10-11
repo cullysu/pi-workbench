@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml)
 
-A local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Cross-platform desktop app: Windows dual shells (Electron full + Tauri lightweight, ~32MB installer), Linux AppImage, macOS dmg (arm64/x64). Chinese UI.
+A local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Cross-platform desktop app: Windows dual shells (Electron full + Tauri lightweight, ~68MB installer — it bundles the full runtime, same as Electron), Linux AppImage, macOS dmg (arm64/x64). Chinese UI.
 
 pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout JSONL) as a subprocess: sessions are pi-native (`~/.pi/agent/sessions`), custom models live in `~/.pi/agent/models.json`, and everything is fully interoperable with the pi CLI.
 
@@ -29,7 +29,7 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 
 ## Install
 
-Download the installer for your platform from [Releases](../../releases) (1.2.1 shown):
+Download the installer for your platform from [Releases](../../releases) (1.3.2 shown):
 
 | Platform | File |
 |---|---|---|

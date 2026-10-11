@@ -57,6 +57,9 @@ class McpClient {
       const timer = setTimeout(() => {
         cleanupAbort();
         this.pending.delete(id);
+        // the timeout must cancel protocol-side too — the remote tool would keep
+        // running side effects with nobody waiting on the result
+        try { this._send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: id, reason: "timeout" } }); } catch { /* transport gone */ }
         reject(new Error(`${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       if (signal) {
@@ -275,10 +278,9 @@ export default function mcpBridge(pi) {
           try {
             r = await c.callTool(params.tool, params.arguments || {}, signal);
           } catch (e) {
-            return {
-              content: [{ type: "text", text: `MCP error (${srvName}.${params.tool}): ${e.message}` }],
-              details: { mcp: true, server: srvName, tool: params.tool, isError: true },
-            };
+            // transport/timeout/cancel are failures at pi's layer too — pi-agent-core
+            // marks the tool failed only when execute THROWS (details are UI metadata)
+            throw new Error(`MCP ${srvName}.${params.tool} failed: ${e.message}`);
           }
           // an MCP-level failure must reach pi's execution layer as a failure — a returned
           // result (even carrying an isError detail) parses as success, so we throw instead
@@ -334,10 +336,7 @@ export default function mcpBridge(pi) {
               try {
                 r = await c.callTool(tool.name, params, signal);
               } catch (e) {
-                return {
-                  content: [{ type: "text", text: `MCP error (${srvName}.${tool.name}): ${e.message}` }],
-                  details: { mcp: true, server: srvName, tool: tool.name, isError: true },
-                };
+                throw new Error(`MCP ${srvName}.${tool.name} failed: ${e.message}`); // same layer rule
               }
               if (r.isError) throw new Error(`MCP ${srvName}.${tool.name} failed: ${String(r.text).slice(0, 2000)}`);
               return {

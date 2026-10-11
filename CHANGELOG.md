@@ -2,6 +2,25 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.0 — 2026-10-11
+
+### Fixed (P1, all reproduced by the independent v1.2.9 audit)
+- **Cron budget is released on every settle** — the running counter only ever incremented, so after two successful runs no job started again until a server restart ("max 2 concurrent" had become "max 2 per lifetime"; audit repro 1,2,2). Also: malformed daily times skip instead of crashing the whole tick, run-now reports accepted/rejected instead of always-ok, and cron children join the server shutdown reap.
+- **Failover can no longer talk to a tab the user moved to** — the resend re-anchored its identity onto whatever tab was current inside the second timer, which blessed every switch; the claim now happens exactly once, right after the failover opens its own tab.
+- **Imported history is really read-only now** — the wave-18 read-only wiring was lost to a partial patch write-back (only the submit-guard survived); the real openImported entry, the live-event hold-out, the exit-on-open and the cross-project click sync are re-applied and locked by the contract probe.
+- **Modal dialogs answer exactly once** — an explicit click cleared the cancel hook before closing, so OK used to emit confirmed:false then confirmed:true for one request.
+- **CHANGELOG / CI claim honesty**: the v1.2.9 notes said the contract probe runs in CI — it did not (the workflow edit had been lost the same way). The probe is wired into the e2e job now, and packaging jobs require every quality gate.
+
+### Fixed (P2)
+- Usage aggregation: provider rows carry cacheWrite and day rows fold costEst — totals and breakdowns can no longer contradict (total $3 vs day $0); provider rows stop estimating against provider names as if they were models.
+- Codex ledger: the FIRST cumulative sample is real usage (a null baseline dropped it), and events bucket on their own timestamp before the session-start fallback.
+- Backup: excluding keys now keeps a redacted models.json (provider URLs and model lists survive; re-enter keys after restore); imports validate members, not just top-level shapes ([null] projects and time-less daily jobs used to pass — the latter crashed the whole scheduler tick); 0644 window before rename closed; compressed input capped at 128MB; rollback failures are reported.
+- readJsonl drops an unterminated giant line DURING the read (the v1.2.9 check sat inside the newline loop where a newline-less flood could never reach it).
+- MCP: transport/timeout failures now throw into pi's execution layer (matching pi-agent-core's contract: fulfilled ⇒ success), and timeouts send the protocol-level cancel so the remote tool stops.
+
+### Docs
+- README.en/CONTRIBUTING Node floor corrected to ≥22.19; English backup wording aligned with the redaction default; search placeholder now says it filters the current project's sessions.
+
 ## 1.2.9 — 2026-10-10
 
 ### Fixed

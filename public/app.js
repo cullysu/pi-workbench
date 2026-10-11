@@ -23,7 +23,7 @@ const I18N = {
     import_hint: '选择来源查看历史会话（只读浏览）', confirm_new: '当前会话进行中，开新会话？',
     yes: '开新会话', no: '取消', models_saved: '已保存 models.json（pi 自动热加载）',
     sec_ok: '已按配置读取（仅内存）', sec_no: '未配置', loading: '加载中…',
-    local_only: '本地优先 · 面板数据不出本机', search_ph: '搜索会话…', add_prov: '添加',
+    local_only: '本地优先 · 面板数据不出本机', search_ph: '过滤当前项目会话…', add_prov: '添加',
     light: '浅色', dark: '深色', zh_lang: '中文', en_lang: 'EN',
     u_sessions: '会话', u_replies: '回复', u_errors: '出错', u_in: '输入 tokens', u_out: '输出 tokens',
     u_hit: '缓存命中', u_cost: '费用', u_cw: '缓存写入', u_cr: '缓存读取',
@@ -41,7 +41,7 @@ const I18N = {
     import_hint: 'Pick a source to browse past sessions (read-only)', confirm_new: 'Session is running. Start a new one?',
     yes: 'New session', no: 'Cancel', models_saved: 'models.json saved (pi hot-reloads)',
     sec_ok: 'loaded per config (memory only)', sec_no: 'not configured', loading: 'loading…',
-    local_only: 'Local-first · panel data stays on this machine', search_ph: 'Search sessions…', add_prov: 'Add',
+    local_only: 'Local-first · panel data stays on this machine', search_ph: 'Filter current project sessions…', add_prov: 'Add',
     light: 'Light', dark: 'Dark', zh_lang: '中文', en_lang: 'EN',
     u_sessions: 'Sessions', u_replies: 'Replies', u_errors: 'Errors', u_in: 'Input tokens', u_out: 'Output tokens',
     u_hit: 'Cache hit', u_cost: 'Cost', u_cw: 'Cache write', u_cr: 'Cache read',
@@ -131,6 +131,13 @@ function wsConnect() {
     // the server-side tab survived the socket drop — reclaim it so its frames
     // flow here again (foreign connections can never silently adopt a live tab)
     if (state.tabId) { try { state.ws.send(JSON.stringify({ type: 'adopt', tabId: state.tabId })); } catch { /* queue drains below anyway */ } }
+    // bridge the drop: anything streamed while the socket was down is recovered from
+    // disk via a full replay — the old flow kept a busy spinner and a missing final answer
+    if (state.tabId && !state.importView) {
+      rpcTo({ type: 'get_state' });
+      rpcTo({ id: 'replay-' + Date.now(), type: 'get_entries' });
+      $('#statusline').textContent = '连接已恢复——正在补取掉线期间的会话内容…';
+    }
     while (wsQueue.length) { try { state.ws.send(JSON.stringify(wsQueue.shift())); } catch { break; } }
   };
   ws.onclose = () => { state.wsReady = false; $('#conn-dot').className = 'dot off'; setTimeout(wsConnect, Math.min(15000, 1500 * ++wsRetries)); };
@@ -166,6 +173,7 @@ function wsSend(obj) {
 
 // ---------- pi event handling ----------
 function handlePiEvent(ev) {
+  if (state.importView) return; // a running agent's events must not overwrite imported history
   switch (ev.type) {
     case 'message_start': onMessageStart(ev.message); break;
     case 'message_update': onMessageUpdate(ev.assistantMessageEvent); break;
@@ -184,6 +192,7 @@ function handlePiEvent(ev) {
   }
 }
 function handlePiExit(msg) {
+  if (state.importView) return;
   if (msg.tabId === state.tabId) {
     setBusy(false); state.streaming = false;
     $('#statusline').textContent = `pi 已退出（code ${msg.code}）——下次发送将开新会话`;
@@ -431,7 +440,9 @@ function modal(title, body, actions) {
   for (const a of actions) {
     const b = document.createElement('button');
     b.textContent = a.label; if (a.primary) b.className = 'primary';
-    b.onclick = () => { closeModal(); a.cb && a.cb(); };
+    // an explicit click IS the answer — clear the cancel hook first, or closeModal
+    // fires it too and the extension receives cancelled + the real reply
+    b.onclick = () => { modalCancel = null; closeModal(); a.cb && a.cb(); };
     act.appendChild(b);
   }
   $('#modal-backdrop').classList.remove('hidden');
@@ -503,6 +514,7 @@ function clearTimeline(withPlaceholder) {
 function rpcTo(data) { wsSend({ type: 'rpc', tabId: state.tabId, data }); }
 function openPiSession({ sessionPath = null, isNew = false }) {
   if (!state.project) { askAddProject(); return; }
+  state.importView = false; // opening a real session leaves the read-only import view
   const doOpen = () => {
     if (state.tabId) { wsSend({ type: 'close', tabId: state.tabId }); }
     state.tabId = 'tab-' + Math.random().toString(36).slice(2, 9);
@@ -1063,10 +1075,9 @@ async function maybeFailover(detail) {
   setTimeout(() => {
     if (stale()) return;
     openPiSession({ sessionPath: sp, isNew: !sp });
+    armed.tab = state.tabId; // claim ONCE, right after opening — the tab this failover created
     setTimeout(() => {
-      // the failover owns the tab it just opened — re-anchor on it before the
-      // resend check, or the new tabId would read as "someone else switched"
-      if (state.tabId) armed.tab = state.tabId;
+      // checks only — re-anchoring here would bless whatever tab the user moved to
       if (stale()) return;
       submitPrompt(armed.prompt, { resend: true });
     }, 1500);
@@ -1239,6 +1250,9 @@ async function renderProjectTree(useCache = false) {
           if (e.target.closest('.pa-btn')) return;
           $$('#project-tree .conv-item').forEach((x) => x.classList.remove('active'));
           d.classList.add('active');
+          // the session belongs to THIS block's project — the panel must follow before
+          // the open, or title/file/goal context keep describing the previous project
+          if (state.project?.path !== p.path) selectProject(p);
           openPiSession({ sessionPath: s.file });
         };
         d.querySelector('[data-act="del"]').onclick = (e) => {
@@ -1367,6 +1381,7 @@ async function loadImportList() {
 async function openImported(src, file) {
   const r = await api.get(`/api/import/${src}/read?path=${encodeURIComponent(file)}`).catch(() => null);
   if (!r) { $('#statusline').textContent = '加载会话失败'; return; }
+  state.importView = true; // read-only: composer blocked, live pi-events held out of this view
   clearTimeline(false);
   $('#proj-title').textContent = `${src} · ${file.split(/[\\/]/).pop()}`;
   for (const e of r.entries || []) {

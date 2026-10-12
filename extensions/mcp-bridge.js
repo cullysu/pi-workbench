@@ -115,7 +115,7 @@ class McpClient {
       const useShell = process.platform === 'win32';
       const exe = useShell ? (process.env.ComSpec || 'cmd.exe') : command;
       const argv = useShell ? ['/d', '/s', '/c', command, ...args] : args;
-      this.proc = spawn(exe, argv, {
+      const proc = this.proc = spawn(exe, argv, {
         cwd: os.homedir(),
         env: { ...process.env, ...env },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -152,16 +152,19 @@ class McpClient {
       });
       this.proc.stderr.setEncoding("utf8");
       this.proc.stderr.on("data", (c) => this.log(`[${this.name}] ${String(c).trim().slice(0, 200)}`));
+      const self = this;
       this.proc.on("exit", (code) => {
+        if (self.proc !== proc) return; // a NEWER process owns this client — a stale exit must not tear it down
         this.log(`[${this.name}] exited (code ${code})`);
+        if (this.buffer.trim()) this._handleLine(this.buffer.trim()); // flush the final newline-less line BEFORE failing the pending calls it may answer
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error(`mcp server exited (code ${code})`)); }
         this.pending.clear();
-        if (this.buffer.trim()) this._handleLine(this.buffer.trim()); // a last line without trailing newline still carries a response
         this.buffer = "";
         this.proc = null;
         this.ready = null;
         this.tools = null;
       });
+      this.proc.stdin?.on?.("error", () => {}); // an async EPIPE after the server dies must not become an unhandled stream error
 
       try {
         const init = await this._request("initialize", {
@@ -238,7 +241,9 @@ export default function mcpBridge(pi) {
   // made on the first call. Default stays eager so the model keeps seeing fully
   // typed tools with their real schemas.
   const registerLazyServer = (srvName, conf) => {
-    const base = `mcp_${sanitize(srvName)}`;
+    const base0 = `mcp_${sanitize(srvName)}`;
+    let base = base0;
+    for (let n = 2; registered.includes(`${base}_call`); n++) base = `${base0}_${n}`; // foo-bar and foo_bar sanitize identically — dedupe like the eager path
     const listName = `${base}_list`;
     const callName = `${base}_call`;
     try {

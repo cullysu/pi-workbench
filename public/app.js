@@ -581,7 +581,19 @@ piEventHandlers.push(function (ev) {
     if (state.pendingForkResolve) { const r = state.pendingForkResolve; state.pendingForkResolve = null; r(state.forkMsgs); }
     return;
   }
+  if (ev.type === 'response' && ev.command === 'fork' && ev.data?.cancelled) {
+    state.pendingRegenText = ''; state.pendingAfterReplay = null; // user aborted the fork — keep the current view
+    return;
+  }
+  if (ev.type === 'response' && ev.command === 'fork' && ev.data?.cancelled) {
+    state.pendingRegenText = ''; state.pendingAfterReplay = null; // user aborted the fork — keep the current view
+    return;
+  }
   if (ev.type === 'response' && ev.command === 'fork' && ev.success) {
+    rpcTo({ type: 'get_state' }); // the fork moved pi to a new session file — refresh the identity
+  
+    rpcTo({ type: 'get_state' }); // the fork moved pi to a new session file — refresh the identity
+  
     const text = state.pendingRegenText || '';
     state.pendingRegenText = '';
     clearTimeline(false);
@@ -682,6 +694,9 @@ piEventHandlers.push(function (ev) {
   }
   if (ev.type === 'response' && ev.command === 'get_state' && ev.success && ev.data) {
     state.sessionFile = ev.data.sessionFile;
+    // the reconnect replay restores CONTENT — this restores the RUNNING state,
+    // or the UI keeps a busy spinner over an agent that already finished
+    if (typeof ev.data.isStreaming === 'boolean') { state.streaming = ev.data.isStreaming; setBusy(state.streaming); }
     return;
   }
 });
@@ -1054,6 +1069,9 @@ async function submitPrompt(text, { resend = false } = {}) {
 async function maybeFailover(detail) {
   if (state.failoverDone || state.userAborted || !state.selModel) return;
   state.failoverDone = true;
+  // snapshot BEFORE the await — capturing after the round-trip would bless whatever
+  // project/tab/prompt the user switched to while the fail call was in flight
+  const armed = { tab: state.tabId, project: state.project && state.project.path, prompt: state.lastPrompt, seq: (state.failoverSeq = (state.failoverSeq || 0) + 1) };
   let r;
   try { r = await api.post('/api/routing/fail', { model: state.selModel, error: detail || 'assistant error', tabId: state.tabId }); }
   catch { return; }
@@ -1064,12 +1082,13 @@ async function maybeFailover(detail) {
   }
   state.selModel = r.next;
   updateModelChip();
-  $('#statusline').textContent = `路由切换：${from} → ${r.next}，自动重发…`;
-  // the resend is an execution: arm it with an immutable snapshot (session, project,
-  // prompt) and a generation token — stop, tab switch, project switch or a newer
-  // failover invalidates it, and every callback re-checks before acting
+  const sameModelNewKey = !!r.sameModelKey; // the chain answered with the SAME model on a fresh key
+  $('#statusline').textContent = sameModelNewKey
+    ? `路由切换：${from} 的备用密钥，自动重发…`
+    : `路由切换：${from} → ${r.next}，自动重发…`;
+  // the resend is an execution: armed before the await (see above); stop, tab
+  // switch, project switch or a newer failover invalidates it at every check
   const sp = state.sessionFile;
-  const armed = { tab: state.tabId, project: state.project && state.project.path, prompt: state.lastPrompt, seq: (state.failoverSeq = (state.failoverSeq || 0) + 1) };
   const stale = () => state.userAborted || state.failoverSeq !== armed.seq
     || state.tabId !== armed.tab || (state.project && state.project.path) !== armed.project;
   setTimeout(() => {
@@ -1080,7 +1099,7 @@ async function maybeFailover(detail) {
       // checks only — re-anchoring here would bless whatever tab the user moved to
       if (stale()) return;
       submitPrompt(armed.prompt, { resend: true });
-    }, 1500);
+    }, sameModelNewKey ? 600 : 1500);
   }, 300);
 }
 function markRouteOk() {
@@ -1208,6 +1227,10 @@ async function renderProjectTree(useCache = false) {
     head.onclick = (e) => {
       if (e.target.closest('.pa-btn')) return;
       state.project = p;
+      // switching the working context must detach the live tab of the previous
+      // project — otherwise the composer still targets it and prompts silently
+      // execute under the old cwd while the title shows the new project
+      if (state.tabId) { state.tabId = null; state.sessionFile = null; state.pendingNewSession = false; clearTimeline(true); }
       $('#proj-title').textContent = p.path;
       renderGoalBanner();
       state.expanded.add(p.path);
@@ -1402,9 +1425,11 @@ async function openImported(src, file) {
       wireToolCard(w.firstChild);
       body.appendChild(w);
     } else if (e.kind === 'toolresult') {
-      // merge into previous card by id if visible
+      // pair by the call id when the toolcall carried one — last-card-wins
+      // mislabels parallel tool calls
       const cards = $$('#timeline .tool-card');
-      const card = cards[cards.length - 1];
+      const byId = e.callId || e.id;
+      const card = (byId && cards.find((c) => c.dataset.callId === byId)) || cards[cards.length - 1];
       if (card) {
         const st = card.querySelector('.t-status');
         st.textContent = t('done'); st.className = 't-status ok';
@@ -2366,8 +2391,8 @@ __tl.addEventListener('mouseover', (e) => {
   bar.className = 'um-actions';
   bar.innerHTML = '<button class="um-btn" data-a="regen" title="从这条重新生成">⟳</button><button class="um-btn" data-a="edit" title="编辑这条后重发">✎</button><button class="um-btn" data-a="export" title="导出 Markdown">⤓</button>';
   bubble.appendChild(bar);
-  bar.querySelector('[data-a="regen"]').onclick = (ev) => { ev.stopPropagation(); forkToUserBubble(bubble, 'send'); };
-  bar.querySelector('[data-a="edit"]').onclick = (ev) => { ev.stopPropagation(); forkToUserBubble(bubble, 'edit'); };
+  bar.querySelector('[data-a="regen"]').onclick = (ev) => { ev.stopPropagation(); if (state.importView) { $('#statusline').textContent = '导入历史为只读视图——重新生成需要在会话中进行'; return; } forkToUserBubble(bubble, 'send'); };
+  bar.querySelector('[data-a="edit"]').onclick = (ev) => { ev.stopPropagation(); if (state.importView) { $('#statusline').textContent = '导入历史为只读视图——编辑重发需要在会话中进行'; return; } forkToUserBubble(bubble, 'edit'); };
   bar.querySelector('[data-a="export"]').onclick = (ev) => {
     ev.stopPropagation();
     if (!state.sessionFile) { $('#statusline').textContent = '导出需要已打开的会话'; return; }

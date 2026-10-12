@@ -224,6 +224,7 @@ const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
 const cron = createCron({
   CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, broadcast, readJson, saveJson, spawn,
   get knownProject() { return knownProject; },
+  get envOverrideFor() { return envOverrideFor; },
   // unattended jobs run with the panel's skills switches (per cwd) and default model —
   // the arrow body defers skillArgsFor/loadConfig past their definition points
   get cronPiArgs() {
@@ -395,7 +396,9 @@ function attachPiReader(tabId, proc) {
   const tab = tabs.get(tabId);
   let buffer = '';
   proc.stdout.setEncoding('utf8'); // chunkwise toString would corrupt multibyte chars split across packets
+  const isLive = () => { const cur = tabs.get(tabId); return !!cur && cur.proc === proc; }; // identity, not just tabId — a replaced spawn's late stdout must not reach the new owner
   proc.stdout.on('data', (chunk) => {
+    if (!isLive()) return;
     buffer += chunk;
     let i;
     while ((i = buffer.indexOf('\n')) !== -1) {
@@ -404,6 +407,12 @@ function attachPiReader(tabId, proc) {
       if (line.endsWith('\r')) line = line.slice(0, -1);
       if (!line) continue;
       let ev; try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.type === 'response' && ev.command === 'set_model' && ev.success) {
+        // a confirmed set_model re-binds the tab's routing identity — the old code kept
+        // the ORIGINAL provider, so a later 401 was cooled against the wrong provider/key
+        const mid = String(ev.data?.model || ev.data?.modelId || '');
+        if (mid.includes('/')) { tab.routeProvider = mid.split('/')[0]; tab.routeKeyIdx = null; tab.model = mid; }
+      }
       if (ev.type === 'response' && ev.success && ev.data?.sessionFile && ev.data.sessionFile !== tab.sessionFile) {
         tab.sessionFile = ev.data.sessionFile;
         broadcast({ type: 'pi-session-file', tabId, sessionFile: tab.sessionFile });
@@ -415,7 +424,7 @@ function attachPiReader(tabId, proc) {
     if (buffer.length > 16 * 1024 * 1024) buffer = buffer.slice(-65536);
   });
   proc.stderr.setEncoding('utf8');
-  proc.stderr.on('data', (c) => broadcast({ type: 'pi-stderr', tabId, data: String(c).slice(0, 2000) }));
+  proc.stderr.on('data', (c) => { if (!isLive()) return; broadcast({ type: 'pi-stderr', tabId, data: String(c).slice(0, 2000) }); });
   const isCurrent = () => { const cur = tabs.get(tabId); return cur && cur.proc === proc; };
   proc.on('error', () => { if (isCurrent()) { tabs.delete(tabId); broadcast({ type: 'pi-exit', tabId, code: -1 }); } });
   proc.on('exit', (code) => {
@@ -461,6 +470,7 @@ wss.on('connection', (ws) => {
   console.log(`[ws] client connected (${ws.clientId})`);
   ws.on('message', (raw) => {
     let msg; try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (!msg || typeof msg !== 'object') return; // a literal `null` frame is valid JSON — it must not reach property access
     // light schema gate before any lookup: a type-confused tabId/cwd must never
     // reach path.resolve or the tabs Map as an object
     const strField = (v) => v === undefined || v === null || typeof v === 'string';
@@ -707,6 +717,10 @@ const KEY_SENTINEL = '***';
 const maskApiKeys = (doc) => {
   for (const p of Object.values(doc.providers || {})) {
     if (p && typeof p.apiKey === 'string' && p.apiKey && !p.apiKey.startsWith('$')) p.apiKey = KEY_SENTINEL;
+    const h = p && p.headers;
+    if (h && typeof h === 'object') for (const k of Object.keys(h)) {
+      if (/authorization|x-api-key|api-key|token/i.test(k) && h[k]) h[k] = '***'; // credential headers are secrets too
+    }
   }
   return doc;
 };
@@ -720,6 +734,12 @@ async function hModels(req, res, u) {
       }
       const prev = readJson(PI_MODELS) || { providers: {} };
       for (const [name, p] of Object.entries(doc.providers)) {
+        // a changed baseUrl must not inherit the old endpoint's credential — the user
+        // editing the URL without re-entering a key is exactly the misdirect leak
+        const prevP = prev.providers?.[name] || {};
+        if (p && typeof p.baseUrl === 'string' && prevP.baseUrl && p.baseUrl !== prevP.baseUrl) {
+          if (!p.apiKey || p.apiKey === KEY_SENTINEL) delete p.apiKey;
+        }
         if (p && p.apiKey === KEY_SENTINEL) {
           const stored = prev.providers?.[name]?.apiKey;
           if (stored) p.apiKey = stored; // sentinel round-trip: keep the real key

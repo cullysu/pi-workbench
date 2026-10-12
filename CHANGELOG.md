@@ -2,6 +2,25 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.3 — 2026-10-12
+
+### Fixed (from the independent v1.3.2 audit, 42 items)
+- **A stale pi process can no longer speak for a replaced tab** — the stdout/stderr pump now checks process identity, not just the tab id, so a late event from an old spawn can never land in the new owner's timeline.
+- **A confirmed model switch re-binds the tab's routing identity** — after `set_model` succeeds, the tab's provider/key state follows; a later 401 cools the provider the tab actually uses, not the one it started with.
+- **Failover snapshots the armed tab BEFORE its await** — a user who switches tabs while the fail-report is in flight keeps the switch; the resend targets the tab that was armed, not "whatever is current".
+- **Project-title click detaches the live tab** — switching projects no longer leaves the composer bound to the previous project's tab/session.
+- **Reconnect restores the busy state** — a `get_state` reply with `isStreaming:false` clears a stuck streaming indicator; a fork that reports `cancelled` leaves the view alone, and a completed fork re-reads the session identity.
+- **Imported history stays inert**: regenerate/edit buttons are gated while an imported transcript is on screen, and imported tool results pair with their call by `callId ?? id` instead of always the last card.
+- **Cron: a dead project fails closed** — the job reports "project missing" instead of silently degrading to HOME; a spawn-prep throw releases the concurrency budget (two throws used to stop cron for the process lifetime); daily jobs get scheduling priority over hot interval jobs so they cannot be starved out of their window; unattended runs honor the interactive key rotation (a cooled-out key no longer arms an unattended job).
+- **JSON `null` WebSocket frames** are rejected before property access.
+- **Provider credentials do not follow a moved endpoint** — changing a provider's baseUrl with the masked sentinel clears the stored key instead of shipping it to the new URL.
+- **Backup redaction covers credential headers** (`Authorization`/`x-api-key`/`token`-like), and restore merges a redacted models.json with the current machine's stored keys instead of dropping them.
+- **Failover key envs accept `${NAME}` refs** the same way as `$NAME`.
+- **MCP bridge**: a stale child's exit no longer tears down a newer client; stdin EPIPE is swallowed; the final buffered line is flushed before pending requests are rejected; lazy tool name collisions dedup with a numeric suffix.
+- **collectProc settles 5s after a timeout kill** even if orphaned grandchildren hold the pipes.
+- Usage: Gemini imports read `m.parts` (PartListUnion), session-tree parent chains are cycle-guarded, and the merged totals layer keeps cacheWrite/costEst so breakdowns and totals agree.
+- Docs: CHANGELOG 1.3.0/1.3.1 headers un-glued (the duplicate on-line headers were a botched earlier edit).
+
 ## 1.3.2 — 2026-10-11
 
 ### Fixed (from the independent v1.3.1 audit)
@@ -15,13 +34,13 @@ All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
 Known and queued (unchanged): code signing (awaiting a certificate account), macOS arm64 native runtime split (Rosetta documented), deeper install-and-launch smoke for the Windows/macOS channels, full-release SBOM layering.
 
-## 1.3.1 — 2026-10-11## 1.3.1 — 2026-10-11
+## 1.3.1 — 2026-10-11
 
 ### Fixed
 - Ships the two server.mjs fixes that were accidentally reverted out of the v1.3.0 packaging commit: run-now answers accepted/rejected (503 when the concurrency budget rejects) instead of always-ok, and cron children join the server shutdown reap.
 - Version files bumped to 1.3.1 — the v1.3.0 tag carried 1.3.0-named binaries (correct there); this tag now carries 1.3.1-named binaries built from this exact commit.
 
-## 1.3.0 — 2026-10-11## 1.3.0 — 2026-10-11
+## 1.3.0 — 2026-10-11
 
 ### Fixed (P1, all reproduced by the independent v1.2.9 audit)
 - **Cron budget is released on every settle** — the running counter only ever incremented, so after two successful runs no job started again until a server restart ("max 2 concurrent" had become "max 2 per lifetime"; audit repro 1,2,2). Also: malformed daily times skip instead of crashing the whole tick, run-now reports accepted/rejected instead of always-ok, and cron children join the server shutdown reap.

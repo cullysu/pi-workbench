@@ -2,6 +2,48 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.4 — 2026-10-12
+
+### Fixed (from the independent v1.3.3 audit — execution identity, credential ownership, real pi protocol)
+
+**Credential ownership follows the endpoint, everywhere:**
+- **Discover no longer mails the stored key to a moved URL** — a changed `baseUrl` with an empty key field now refuses to attach the stored credential and asks for the new endpoint's key instead (the save path had this guard; the discover path didn't).
+- **Restore no longer grafts this machine's key onto a renamed endpoint** — the models.json merge compares `baseUrl` before inheriting `apiKey`/headers (same provider name + different URL = different trust domain).
+- **Credential headers survive a masked round-trip** — GET masks `Authorization`-class headers to `***`; POST now restores the stored value instead of silently destroying it, and a changed URL clears sentinel credential headers just like keys.
+- **"No-keys" backups strip cooldown/cron error text** — routing.json cooldown entries keep the first 200 chars of upstream errors, which can embed the key that triggered them; a keys-free backup redacts them (cron `lastOutput` likewise).
+
+**Execution identity:**
+- **A prompt can no longer travel to a tab running another project** — `submitPrompt` verifies the tab's open cwd against the current project and detaches on mismatch, closing the whole class (title click, add project, remove project, config reload) rather than each known entry. Project switches now **detach** the live tab (server marks it unmanaged; the 30-minute orphan TTL bounds it) and a notice bar offers **切回 / 结束** — the old behavior forgot the tab entirely, leaving an unmanaged, un-reapable child.
+- **Extension confirm/select/input replies return to the tab that ASKED**, not whichever tab is current at click time.
+- **A detached tab's session-file event no longer rebinds the composer**, and the failover response applies **only when the armed context is still current** — a stale reply can no longer re-dress the new project in the failed task's fallback model (the fail report also carries the armed tabId, cooling the right key slot).
+- **Deleting the current project ends its running tab** (stated in the confirm dialog).
+
+**Real pi protocol:**
+- **set_model rebind now actually fires** — pi 0.85 answers with the Model OBJECT (`{provider, id}`); the v1.3.3 handler read `data.model` strings that never exist, so the routing identity never re-bound and a later 401 cooled the wrong provider/key slot. Verified against the shipped rpc-types.
+- **Same-model key rotation is wired end to end** — `/api/routing/fail` answers `sameModelKey` when the failing model's provider still has a usable key; the frontend re-opens the SAME model (fresh key via `envOverrideFor`) before jumping providers.
+- **`${KEY}` rotation actually reaches pi** — the env override wrote the literal name `{KEY}`; it now writes the bare `KEY` that the models.json reference resolves.
+- **Explicit opens honor the provider kill switch** — `enabled: false` now denies `open` (it only filtered the fallback chain before).
+
+**Cron:**
+- **Default-model jobs run the default model's rotation state** (they bypassed `envOverrideFor` entirely), and an **all-cooled provider fails closed** (`keys cooled`) instead of launching on the stale env.
+- **A daily squeezed out by already-running intervals is deferred, not lost** — it stays eligible for the rest of today and fires when a slot frees (sorting alone can't fix a closed window). Window consumption moved into the spawn path, so refusals stop churning cron.json.
+
+**Frontend / import / fork:**
+- Imported view: late `get_entries` replays can't replace it; the export button refuses (it used to export the previous live session); clicking a list entry actually navigates to the workbench.
+- Tool-result pairing reads `data-id` (the attribute cards actually carry; `dataset.callId` was never set).
+- Replay keeps the tool-card map alive for tools still running when a replay lands; fork points invalidate on every prompt and after a fork; a stale 6s fork timeout can no longer settle a newer request; duplicated fork-cancel branch and double `get_state` deduped.
+- Form-save default model no longer lies on the chip while a live tab runs another model (new sessions follow the default via `openPiSession`).
+
+**MCP bridge / processes:**
+- Stale child stdout/stderr can't pollute a replaced client (identity guards, like the exit guard v1.3.3 added); a literal `null` line no longer TypeErrors; failure paths and shutdown kill the whole tree (`taskkill /T` on Windows, process group on POSIX) instead of just the cmd wrapper; the main pi stdin has an async EPIPE handler (a write during child death can't uncaughtException the server).
+- Tauri shell: the identity handshake read has a 3s timeout (a silent port-holder can't stall setup forever) and strips `NODE_OPTIONS`/`NODE_PATH` from the spawned runtime (matching Electron).
+
+**Docs/supply-chain:** README dev quickstart says how to get a working page (`PIWB_EMBED_TOKEN=1`); MCP panel text matches the real lazy/eager default; TROUBLESHOOTING points at the real Electron log file (`server.log`); SBOM parses multi-file vendor rows again (uPlot was silently missing); repo description no longer claims "10MB / data never leaves".
+
+**Contract tests:** `verify-audit-fixes.mjs` grows from 5 to 16 assertions (rotation env names, same-model key, cooled-out gates, deferred daily, restore grafting, error-text redaction, tree cycle) and now runs in CI's e2e job — the previous release shipped three claims its tests never locked (set_model shape, tree cycle guard, tool pairing) and all three were broken.
+
+Known and queued (unchanged): code signing (awaiting a certificate account), macOS arm64 native runtime split, real install-and-launch acceptance for the Windows/macOS channels, full-release SBOM layering, list pagination, a11y/i18n pass, session-identity architecture unification, Tauri-side server auto-restart parity.
+
 ## 1.3.3 — 2026-10-12
 
 ### Fixed (from the independent v1.3.2 audit, 42 items)

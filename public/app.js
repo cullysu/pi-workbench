@@ -149,9 +149,14 @@ function wsConnect() {
       if (window.__evts.length > 400) window.__evts.splice(0, window.__evts.length - 400);
     }
     if (msg.type === 'pi-session-file') {
+      if (msg.tabId !== state.tabId) return; // a detached/old tab's file must not rebind the composer's session identity (audit #12)
       state.sessionFile = msg.sessionFile;
       if (state.pendingNewSession) { state.pendingNewSession = false; renderProjectTree(true); }
       return;
+    }
+    if (msg.type === 'pi-exit') { // exits of DETACHED tabs never pass the tabId filter below — they only retire the notice bar entry
+      state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== msg.tabId);
+      renderDetachedNotice();
     }
     if (msg.tabId !== state.tabId) return;
     if (msg.type === 'pi-event') for (const h of piEventHandlers) h(msg.data);
@@ -414,19 +419,21 @@ function onToolEnd(ev) {
 // ---------- extension ui ----------
 function handleUiRequest(ev) {
   const { id, method } = ev;
+  const reqTab = state.tabId; // the answer must return to the tab that ASKED — reading the global at click time mailed confirmations to whatever tab the user had switched to (audit #14)
+  const reply = (data) => wsSend({ type: 'rpc', tabId: reqTab, data: { type: 'extension_ui_response', id, ...data } });
   if (method === 'notify') { $('#statusline').textContent = `[${ev.notifyType || 'info'}] ${ev.message || ''}`; return; }
   if (method === 'confirm') {
     modal(ev.title || 'confirm', ev.message || '', [
-      { label: 'OK', primary: true, cb: () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, confirmed: true } }) },
-      { label: 'Cancel', cb: () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, confirmed: false } }) },
+      { label: 'OK', primary: true, cb: () => reply({ confirmed: true }) },
+      { label: 'Cancel', cb: () => reply({ confirmed: false }) },
     ]);
-    modalCancel = () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, confirmed: false } }); // Escape must answer too — extensions wait with no timeout
+    modalCancel = () => reply({ confirmed: false }); // Escape must answer too — extensions wait with no timeout
   } else if (method === 'select') {
-    modal(ev.title || 'select', '', (ev.options || []).map((o) => ({ label: o, cb: () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, value: o } }) })));
-    modalCancel = () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, cancelled: true } });
+    modal(ev.title || 'select', '', (ev.options || []).map((o) => ({ label: o, cb: () => reply({ value: o }) })));
+    modalCancel = () => reply({ cancelled: true });
   } else if (method === 'input' || method === 'editor') {
-    modalWithInput(ev.title || method, ev.placeholder || '', ev.prefill || '', (val) => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, value: val } }),
-      () => wsSend({ type: 'rpc', tabId: state.tabId, data: { type: 'extension_ui_response', id, cancelled: true } }));
+    modalWithInput(ev.title || method, ev.placeholder || '', ev.prefill || '', (val) => reply({ value: val }),
+      () => reply({ cancelled: true }));
   }
 }
 
@@ -518,6 +525,7 @@ function openPiSession({ sessionPath = null, isNew = false }) {
   const doOpen = () => {
     if (state.tabId) { wsSend({ type: 'close', tabId: state.tabId }); }
     state.tabId = 'tab-' + Math.random().toString(36).slice(2, 9);
+    state.tabCwd = state.project.path; // the cwd this tab was opened under — submitPrompt refuses to send prompts across a mismatch
     state.streaming = false; state.cur = null; state.toolCards.clear();
     state.goalRound = 0; state.goalDone = false; state.goalInjected = false;
     state.sessionFile = null; state.forkMsgs = null; state.pendingForkResolve = null; state.pendingRegenText = '';
@@ -529,7 +537,9 @@ function openPiSession({ sessionPath = null, isNew = false }) {
       thinking: state.thinkLevel || undefined,
       cwd: state.project.path,
       sessionPath: isNew ? null : sessionPath,
-      model: state.selModel || null,
+      // a NEW session follows the configured default (either entry that sets it);
+      // resuming/replaying keeps the selected model that describes this tab
+      model: (isNew ? (state.cfg?.defaultModel || state.selModel) : state.selModel) || null,
     });
     $('#conn-dot').className = 'dot busy';
     // statusline 只在 setBusy(false) 时清空，而新会话不会触发 setBusy，
@@ -557,6 +567,63 @@ function openPiSession({ sessionPath = null, isNew = false }) {
   }
   return doOpen();
 }
+// ---------- detached live tabs ----------
+// Switching project must not orphan a running session into an unmanaged child
+// (v1.3.3 audit #10/#11): `detach` tells the server the tab keeps running unmanaged
+// (orphan TTL bounds it), and this bar is the way back. { close: true } kills it.
+function detachLiveTab({ close = false } = {}) {
+  if (!state.tabId) return;
+  const info = { tabId: state.tabId, projectPath: state.project?.path || null, sessionFile: state.sessionFile };
+  if (close) {
+    wsSend({ type: 'close', tabId: state.tabId });
+  } else {
+    wsSend({ type: 'detach', tabId: state.tabId });
+    state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== info.tabId);
+    state.detachedTabs.push(info);
+    if (state.detachedTabs.length > 3) state.detachedTabs.shift(); // bound the bar; oldest silently keeps running to its TTL
+  }
+  state.tabId = null; state.sessionFile = null; state.tabCwd = null; state.pendingNewSession = false;
+  state.streaming = false; setBusy(false);
+  clearTimeline(true);
+  renderDetachedNotice();
+}
+function renderDetachedNotice() {
+  const bar = $('#detached-banner');
+  if (!bar) return;
+  const list = state.detachedTabs || [];
+  const top = list[list.length - 1];
+  if (!top || state.importView) { bar.classList.add('hidden'); return; }
+  $('#detached-text').textContent =
+    `「${top.projectPath || '未知项目'}」的会话仍在后台运行（30 分钟无接管自动回收）` + (list.length > 1 ? `，共 ${list.length} 个` : '');
+  bar.classList.remove('hidden');
+}
+async function reattachDetached(info) {
+  const p = (state.cfg.projects || []).find((x) => x.path === info.projectPath);
+  if (!p || state.tabId) { // project removed, or a live tab is in the way: offer close instead of a broken switch
+    wsSend({ type: 'close', tabId: info.tabId });
+    state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== info.tabId);
+    renderDetachedNotice();
+    if (!p) $('#statusline').textContent = '该项目已从工作台移除，后台会话已结束';
+    return;
+  }
+  if (state.project?.path !== p.path) selectProject(p);
+  state.tabId = info.tabId; state.sessionFile = info.sessionFile; state.tabCwd = p.path;
+  state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== info.tabId);
+  clearTimeline(false);
+  $('#proj-title').textContent = p.path;
+  wsSend({ type: 'adopt', tabId: info.tabId }); // reclaim: server clears the orphan clock and routes frames to us again
+  rpcTo({ id: 'replay', type: 'get_entries' }); // repaint the session we just came back to
+  rpcTo({ id: 'st-' + Date.now(), type: 'get_state' });
+  renderDetachedNotice();
+}
+$('#btn-detached-attach').onclick = () => { const list = state.detachedTabs || []; if (list.length) reattachDetached(list[list.length - 1]); };
+$('#btn-detached-kill').onclick = () => {
+  const list = state.detachedTabs || [];
+  if (!list.length) return;
+  wsSend({ type: 'close', tabId: list[list.length - 1].tabId });
+  list.pop();
+  renderDetachedNotice();
+};
 // replay get_entries response
 const piEventHandlers = [handlePiEvent];
 piEventHandlers.push(function (ev) {
@@ -567,7 +634,7 @@ piEventHandlers.push(function (ev) {
 });
 piEventHandlers.push(function (ev) {
   if (ev.type === 'response' && ev.command === 'get_entries' && ev.success && ev.data?.entries) {
-    renderReplay(ev.data.entries);
+    if (!state.importView) renderReplay(ev.data.entries); // a late replay must not replace the imported read-only view (audit #20)
     if (state.pendingAfterReplay) { const f = state.pendingAfterReplay; state.pendingAfterReplay = null; setTimeout(f, 60); }
     return;
   }
@@ -578,11 +645,9 @@ piEventHandlers.push(function (ev) {
   }
   if (ev.type === 'response' && ev.command === 'get_fork_messages' && ev.success) {
     state.forkMsgs = ev.data?.messages || [];
-    if (state.pendingForkResolve) { const r = state.pendingForkResolve; state.pendingForkResolve = null; r(state.forkMsgs); }
-    return;
-  }
-  if (ev.type === 'response' && ev.command === 'fork' && ev.data?.cancelled) {
-    state.pendingRegenText = ''; state.pendingAfterReplay = null; // user aborted the fork — keep the current view
+    if (state.pendingForkResolve && state.pendingForkResolve.id === state.forkReqId) {
+      const r = state.pendingForkResolve; state.pendingForkResolve = null; r(state.forkMsgs);
+    }
     return;
   }
   if (ev.type === 'response' && ev.command === 'fork' && ev.data?.cancelled) {
@@ -591,9 +656,7 @@ piEventHandlers.push(function (ev) {
   }
   if (ev.type === 'response' && ev.command === 'fork' && ev.success) {
     rpcTo({ type: 'get_state' }); // the fork moved pi to a new session file — refresh the identity
-  
-    rpcTo({ type: 'get_state' }); // the fork moved pi to a new session file — refresh the identity
-  
+    state.forkMsgs = null; // the fork rewrote history — the cached fork points are stale
     const text = state.pendingRegenText || '';
     state.pendingRegenText = '';
     clearTimeline(false);
@@ -609,6 +672,7 @@ piEventHandlers.push(function (ev) {
 });
 function renderReplay(entries) {
   // entries: [{type:'message', id, message:{role, content|text, ...}}...]
+  state.toolCards.clear(); // clear BEFORE registering: the replayed cards must stay reachable for tools that are still running when the replay lands
   clearTimeline(false);
   for (const e of entries) {
     if (e.type !== 'message') continue;
@@ -667,7 +731,6 @@ function renderReplay(entries) {
       }
     }
   }
-  state.toolCards.clear();
   scrollBottom();
   renderHomeHero();
 }
@@ -1040,6 +1103,12 @@ async function sendPrompt() {
 async function submitPrompt(text, { resend = false } = {}) {
   if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
   if (!text) return;
+  // execution-identity backstop: whatever UI path switched state.project without
+  // detaching the tab, a prompt must never travel to a tab running another cwd
+  // (v1.3.3 audit #11 — this closes the whole class, not just the known entries)
+  if (state.tabId && state.tabCwd && state.project && state.tabCwd !== state.project.path) {
+    detachLiveTab({ close: false });
+  }
   if (!state.tabId) {
     await openPiSession({ isNew: true });
     await new Promise((r) => setTimeout(r, 400));
@@ -1054,6 +1123,7 @@ async function submitPrompt(text, { resend = false } = {}) {
   state.lastPrompt = text;
   state.failoverDone = false;
   state.userAborted = false;
+  state.forkMsgs = null; // new content invalidates cached fork points (audit #24)
   // only the hero empty state clears on send — an open conversation keeps its history
   if (!resend && $('#topbar').classList.contains('hidden')) clearTimeline(false);
   const el = msgShell('user', Date.now(), false);
@@ -1073,19 +1143,28 @@ async function maybeFailover(detail) {
   // project/tab/prompt the user switched to while the fail call was in flight
   const armed = { tab: state.tabId, project: state.project && state.project.path, prompt: state.lastPrompt, seq: (state.failoverSeq = (state.failoverSeq || 0) + 1) };
   let r;
-  try { r = await api.post('/api/routing/fail', { model: state.selModel, error: detail || 'assistant error', tabId: state.tabId }); }
+  try { r = await api.post('/api/routing/fail', { model: state.selModel, error: detail || 'assistant error', tabId: armed.tab }); }
   catch { return; }
+  // the RESPONSE also must not touch the current UI state: between the await and
+  // here the user may have switched tabs/projects/models — mutating selModel now
+  // would re-dress the NEW context in the failed task's fallback (audit #09)
+  if (state.userAborted || state.failoverSeq !== armed.seq
+    || state.tabId !== armed.tab || (state.project && state.project.path) !== armed.project) {
+    $('#statusline').textContent = '回退已取消（会话已切换）——不改动当前选择';
+    return;
+  }
   const from = state.selModel;
-  if (!r.next || r.next === from) {
+  const target = r.sameModelKey ? from : r.next; // same model, fresh key — the resend re-opens THIS model
+  if (!target || (!r.sameModelKey && target === from)) {
     $('#statusline').textContent = `${from} 失败，链上无可用备选（冷却 120s 后可重试）`;
     return;
   }
-  state.selModel = r.next;
+  state.selModel = target;
   updateModelChip();
   const sameModelNewKey = !!r.sameModelKey; // the chain answered with the SAME model on a fresh key
   $('#statusline').textContent = sameModelNewKey
     ? `路由切换：${from} 的备用密钥，自动重发…`
-    : `路由切换：${from} → ${r.next}，自动重发…`;
+    : `路由切换：${from} → ${target}，自动重发…`;
   // the resend is an execution: armed before the await (see above); stop, tab
   // switch, project switch or a newer failover invalidates it at every check
   const sp = state.sessionFile;
@@ -1166,9 +1245,13 @@ async function startInProject(p) {
   renderProjectTree();
 }
 function askRemoveProject(p) {
-  modal('移除项目', `从工作台移除「${p.name || p.path}」？只移出入口，不会删除磁盘文件。`, [
+  const hasLive = state.tabId && state.project?.path === p.path;
+  modal('移除项目', `从工作台移除「${p.name || p.path}」？只移出入口，不会删除磁盘文件。${hasLive ? '\n注意：该项目正在运行的会话将被结束。' : ''}`, [
     { label: '取消' },
     { label: '移除', primary: true, cb: async () => {
+      // the removed project's tab must die with its entry — keeping it would leave
+      // the composer aimed at a cwd the workbench no longer knows (audit #11)
+      if (hasLive) detachLiveTab({ close: true });
       await api.post('/api/projects/remove', { path: p.path });
       state.cfg = await api.get('/api/config');
       if (state.project?.path === p.path) state.project = state.cfg.projects?.[0] || null;
@@ -1226,11 +1309,10 @@ async function renderProjectTree(useCache = false) {
       </div>`;
     head.onclick = (e) => {
       if (e.target.closest('.pa-btn')) return;
+      // switching the working context detaches the previous project's live tab —
+      // the notice bar keeps [切回]/[结束] so the run stays manageable (audit #10)
+      if (state.project?.path !== p.path) detachLiveTab({ close: false });
       state.project = p;
-      // switching the working context must detach the live tab of the previous
-      // project — otherwise the composer still targets it and prompts silently
-      // execute under the old cwd while the title shows the new project
-      if (state.tabId) { state.tabId = null; state.sessionFile = null; state.pendingNewSession = false; clearTimeline(true); }
       $('#proj-title').textContent = p.path;
       renderGoalBanner();
       state.expanded.add(p.path);
@@ -1299,6 +1381,7 @@ async function loadProjects() {
   applyI18n(); applyThemeBtns();
   if (!state.project && state.cfg.projects?.length) state.project = state.cfg.projects[0];
   if (state.project && !(state.cfg.projects || []).some((p) => p.path === state.project.path)) {
+    if (state.tabId) detachLiveTab({ close: true }); // the running tab's project is no longer registered — it dies with the entry
     state.project = state.cfg.projects?.[0] || null;
   }
   if (state.project) {
@@ -1337,7 +1420,11 @@ $('#btn-add-project').onclick = () => {
     const r = await api.post('/api/projects/add', { path: val, name: val.split(/[\\/]/).pop() });
     if (r.error) { err.textContent = '目录不存在，检查路径后重试'; input.focus(); return; }
     state.cfg = r;
-    state.project = r.projects.find((p) => p.path.toLowerCase() === val.toLowerCase()) || r.projects[0];
+    const next = r.projects.find((p) => p.path.toLowerCase() === val.toLowerCase()) || r.projects[0];
+    // adding a project switches the working context — the previous project's live
+    // tab must detach first, or the composer keeps aiming at the old cwd (audit #11)
+    if (state.project?.path !== next?.path) detachLiveTab({ close: false });
+    state.project = next;
     state.expanded = state.expanded || new Set();
     if (state.project) state.expanded.add(state.project.path);
     $('#proj-title').textContent = state.project?.path || '—';
@@ -1405,6 +1492,11 @@ async function openImported(src, file) {
   const r = await api.get(`/api/import/${src}/read?path=${encodeURIComponent(file)}`).catch(() => null);
   if (!r) { $('#statusline').textContent = '加载会话失败'; return; }
   state.importView = true; // read-only: composer blocked, live pi-events held out of this view
+  state.importFile = { src, file }; // what the user is LOOKING at — export must follow this, never the stale live session (audit #22)
+  state.sessionFile = null; // while browsing imported history, no live file is described by the composer
+  // the transcript renders into the workbench timeline — actually take the user
+  // there, or the click reads as dead (audit #21)
+  if (state.view !== 'workbench') setView('workbench');
   clearTimeline(false);
   $('#proj-title').textContent = `${src} · ${file.split(/[\\/]/).pop()}`;
   for (const e of r.entries || []) {
@@ -1426,10 +1518,11 @@ async function openImported(src, file) {
       body.appendChild(w);
     } else if (e.kind === 'toolresult') {
       // pair by the call id when the toolcall carried one — last-card-wins
-      // mislabels parallel tool calls
+      // mislabels parallel tool calls. Cards carry the id in data-id (toolCardHtml);
+      // the v1.3.3 query read dataset.callId, which nothing ever sets (audit #19)
       const cards = $$('#timeline .tool-card');
       const byId = e.callId || e.id;
-      const card = (byId && cards.find((c) => c.dataset.callId === byId)) || cards[cards.length - 1];
+      const card = (byId && cards.find((c) => c.dataset.id === byId)) || cards[cards.length - 1];
       if (card) {
         const st = card.querySelector('.t-status');
         st.textContent = t('done'); st.className = 't-status ok';
@@ -1672,7 +1765,14 @@ $('#btn-prov-save').onclick = async () => {
   const def = document.querySelector('input[name="pm-default"]:checked');
   const test = document.querySelector('input[name="pm-test"]:checked');
   if (test) await api.post('/api/routing', { providers: { [state.editProv]: { testModel: test.value } } });
-  if (def) { state.cfg.defaultModel = def.value; await api.post('/api/config', { defaultModel: def.value }); state.selModel = def.value; updateModelChip(); }
+  if (def) {
+    state.cfg.defaultModel = def.value;
+    await api.post('/api/config', { defaultModel: def.value });
+    // the chip describes the RUNNING tab — with a live tab it must keep telling the
+    // truth; the new default applies from the next new session (openPiSession prefers
+    // cfg.defaultModel for isNew). Only with no live tab does the chip follow now.
+    if (!state.tabId) { state.selModel = def.value; updateModelChip(); }
+  }
   $('#models-status').textContent = t('models_saved');
   renderCurrentCfg();
   setTimeout(() => { $('#models-status').textContent = ''; }, 3000);
@@ -2395,6 +2495,10 @@ __tl.addEventListener('mouseover', (e) => {
   bar.querySelector('[data-a="edit"]').onclick = (ev) => { ev.stopPropagation(); if (state.importView) { $('#statusline').textContent = '导入历史为只读视图——编辑重发需要在会话中进行'; return; } forkToUserBubble(bubble, 'edit'); };
   bar.querySelector('[data-a="export"]').onclick = (ev) => {
     ev.stopPropagation();
+    // export must describe what the user is LOOKING at: in the imported read-only
+    // view state.sessionFile still holds the previous live session — exporting it
+    // mailed out the wrong conversation (audit #22)
+    if (state.importView) { $('#statusline').textContent = '导入历史为只读视图——导出需要在会话中进行'; return; }
     if (!state.sessionFile) { $('#statusline').textContent = '导出需要已打开的会话'; return; }
     // plain <a> navigation cannot carry x-api-token — fetch with the header and
     // hand the blob to the downloader
@@ -2423,9 +2527,16 @@ document.addEventListener('visibilitychange', () => {
 
 function getForkMsgs() {
   return new Promise((resolve) => {
-    state.pendingForkResolve = resolve;
+    const reqId = (state.forkReqId = (state.forkReqId || 0) + 1);
+    state.pendingForkResolve = { id: reqId, resolve };
     rpcTo({ type: 'get_fork_messages' });
-    setTimeout(() => { if (state.pendingForkResolve) { const r = state.pendingForkResolve; state.pendingForkResolve = null; r(null); } }, 6000);
+    setTimeout(() => {
+      // only the request that armed this timeout may be settled by it — a stale
+      // 6s expiry used to clear a NEWER pending fork (audit #24)
+      if (state.pendingForkResolve && state.pendingForkResolve.id === reqId) {
+        const r = state.pendingForkResolve; state.pendingForkResolve = null; r(null);
+      }
+    }, 6000);
   });
 }
 function userBubbleIndex(el) {

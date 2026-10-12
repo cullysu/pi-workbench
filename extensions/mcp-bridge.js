@@ -48,6 +48,20 @@ class McpClient {
     this.proc.stdin.write(JSON.stringify(msg) + "\n");
   }
 
+  _killTree() {
+    // .kill() only reaches the DIRECT child — on Windows that is the cmd.exe wrapper,
+    // and the real server (npx → node …) survives as an unmanaged orphan (audit #27)
+    const p = this.proc;
+    if (!p || p.pid === undefined) { try { p?.kill(); } catch { /* gone */ } return; }
+    try {
+      if (process.platform === "win32") {
+        spawn("taskkill", ["/pid", String(p.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => { try { p.kill(); } catch { /* gone */ } });
+      } else {
+        try { process.kill(-p.pid, "SIGTERM"); } catch { try { p.kill("SIGTERM"); } catch { /* gone */ } }
+      }
+    } catch { try { p.kill(); } catch { /* gone */ } }
+  }
+
   _request(method, params, timeoutMs = CALL_TIMEOUT_MS, signal) {
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error(`${method} aborted before start`));
@@ -92,6 +106,7 @@ class McpClient {
     if (!line.trim()) return;
     let msg;
     try { msg = JSON.parse(line); } catch { return; }
+    if (!msg || typeof msg !== "object") return; // a literal `null` line is valid JSON — msg.id must not TypeError (audit #26)
     if (msg.id !== undefined && this.pending.has(msg.id)) {
       const p = this.pending.get(msg.id);
       this.pending.delete(msg.id);
@@ -120,18 +135,20 @@ class McpClient {
         env: { ...process.env, ...env },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        detached: process.platform !== 'win32', // POSIX: own process group so _killTree can reap the whole tree
       });
       this.proc.on('error', (e) => {
         this.log(`[${this.name}] spawn failed: ${e.message}`);
         for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(e); }
         this.pending.clear();
-        try { this.proc?.kill(); } catch { /* process already dead */ }
+        this._killTree();
         this.proc = null;
         this.ready = null;
         this.tools = null;
       });
       this.proc.stdout.setEncoding("utf8");
       this.proc.stdout.on("data", (chunk) => {
+        if (this.proc !== proc) return; // a replaced client owns proc/pending/buffer now — a stale child's stdout must not pollute it (audit #25)
         this.buffer += chunk;
         if (this.buffer.length > 16 * 1024 * 1024) {
           // a server flooding stdout without newlines must not balloon memory:
@@ -139,7 +156,7 @@ class McpClient {
           this.log(`[${this.name}] stdout overflow (>16MB without a newline) — resetting`);
           for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new Error("mcp server stdout overflow")); }
           this.pending.clear();
-          try { this.proc?.kill(); } catch { /* already dead */ }
+          this._killTree();
           this.proc = null; this.ready = null; this.tools = null; this.buffer = "";
           return;
         }
@@ -151,7 +168,7 @@ class McpClient {
         }
       });
       this.proc.stderr.setEncoding("utf8");
-      this.proc.stderr.on("data", (c) => this.log(`[${this.name}] ${String(c).trim().slice(0, 200)}`));
+      this.proc.stderr.on("data", (c) => { if (this.proc !== proc) return; this.log(`[${this.name}] ${String(c).trim().slice(0, 200)}`); });
       const self = this;
       this.proc.on("exit", (code) => {
         if (self.proc !== proc) return; // a NEWER process owns this client — a stale exit must not tear it down
@@ -179,7 +196,7 @@ class McpClient {
         // process and reset, so the next tool call gets a real retry instead of the
         // cached rejection (a cold `npx` download routinely exceeds the init timeout)
         this.log(`[${this.name}] initialize failed: ${e.message} — resetting for retry`);
-        try { this.proc?.kill(); } catch { /* already gone */ }
+        this._killTree();
         this.proc = null;
         this.ready = null;
         this.tools = null;
@@ -220,7 +237,7 @@ class McpClient {
   }
 
   shutdown() {
-    try { this.proc?.kill(); } catch { /* shutdown is best-effort */ }
+    this._killTree(); // best-effort, tree-wide: the shutdown path used to leave the real server running behind the cmd wrapper
   }
 }
 

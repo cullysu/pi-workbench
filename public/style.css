@@ -532,6 +532,14 @@ select { color-scheme: light dark; }
 }
 .gb-text.done { color: var(--ok); font-weight: 600; }
 
+/* ============ detached live tab notice (switch project without losing the run) ============ */
+#detached-banner {
+  max-width: 768px; margin: 0 auto 8px; padding: 8px 16px;
+  background: var(--card); border: 1px solid var(--hairline);
+  border-radius: 16px; display: flex; align-items: center; gap: 12px;
+  font-size: 13px; color: var(--text2);
+}
+
 /* ============ log drawer (Hermes logs) ============ */
 #log-drawer {
   position: fixed; left: var(--rail-w, 220px); right: 0; bottom: 0; height: 240px;

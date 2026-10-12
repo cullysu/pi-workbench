@@ -39,8 +39,10 @@ walk(path.join(root, 'node_modules'));
 // version them from the vendor README table so advisories can match
 try {
   const readme = fs.readFileSync(path.join(root, 'public', 'vendor', 'README.md'), 'utf8');
-  for (const m of readme.matchAll(/\| `([^`]+)` \| ([^|]+) \| v?([0-9][0-9.]*) \|/g)) {
-    const name = String(m[2]).trim().toLowerCase().replace(/ \+ .*/, '').replace(/[^a-z0-9.-]/g, '');
+  for (const m of readme.matchAll(/\| `([^`]+)`(?: \+ `[^`]+`)* \| ([^|]+) \| v?([0-9][0-9.]*) \|/g)) {
+    // the optional (?: \+ `...`)* keeps multi-file rows parseable — uPlot ships js+css
+    // in one cell and the old single-file regex silently dropped it from the SBOM
+    const name = String(m[2]).trim().toLowerCase().replace(/[^a-z0-9.-]/g, '');
     if (!name || !m[3]) continue;
     comps.push({
       type: 'library', name, version: m[3],

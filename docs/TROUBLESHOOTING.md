@@ -8,7 +8,7 @@
    - **端口被占用**：日志会写 `端口 32123 已被其它程序占用`。找到占用进程（`netstat -ano | findstr 32123`）结束它，或设置环境变量 `PIWB_PORT` 换端口后从桌面快捷方式启动。
    - **运行时解压失败**：日志写 `FATAL ensureRuntime`。删除运行时目录后重装：Windows 为 `%LOCALAPPDATA%\Pi Workbench\runtime`（Electron）或 `%LOCALAPPDATA%\pi-workbench-tauri\runtime`（Tauri）。
    - **运行时校验失败**：弹窗写「运行时文件校验失败」= 安装包损坏，重新下载安装包。
-3. Electron 壳的启动日志（`[main]` 前缀）在 `%APPDATA%\Pi Workbench\app.log`。
+3. Electron 壳的启动日志（`[main]` 前缀）在 `%APPDATA%\Pi Workbench\server.log`。
 
 ### 端口 32123 是谁在用
 `netstat -ano | findstr 32123`（Windows）/ `ss -ltnp | grep 32123`（Linux/macOS）。pi-workbench 自己的旧实例会自动复用（单例锁），只有「其它程序」占用才需要处理。
@@ -48,7 +48,7 @@
 | 内容 | 位置 |
 |---|---|
 | 服务端错误（脱敏后） | `~/.pi-workbench/server.log`（+ `.old`） |
-| Electron 壳启动日志 | `%APPDATA%\Pi Workbench\app.log` |
+| Electron 壳启动日志 | `%APPDATA%\Pi Workbench\server.log` |
 | 定时任务单次输出 | `~/.pi-workbench/cron-runs/<job-id>/<时间>.log` |
 | 损坏的配置留证 | `~/.pi-workbench/config.json.corrupt-<时间戳>` |
 

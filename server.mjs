@@ -225,6 +225,8 @@ const cron = createCron({
   CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, broadcast, readJson, saveJson, spawn,
   get knownProject() { return knownProject; },
   get envOverrideFor() { return envOverrideFor; },
+  get defaultModel() { return () => (loadConfig() || {}).defaultModel || null; }, // lazy: jobs WITHOUT an explicit model run the default — its provider needs the same rotation wiring
+  get providerCooledOut() { return providerCooledOut; },
   // unattended jobs run with the panel's skills switches (per cwd) and default model —
   // the arrow body defers skillArgsFor/loadConfig past their definition points
   get cronPiArgs() {
@@ -241,7 +243,7 @@ function saveRouting(r) {
   return r;
 }
 const failover = createFailover({ SECRET_ENV, readJson, loadRouting, saveRouting, PI_MODELS });
-const { splitModel, keyEnvsFor, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain } = failover;
+const { splitModel, keyEnvsFor, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain, sameModelNewKey, providerCooledOut } = failover;
 
 // provider URLs are user-supplied: only http(s) may leave the box (no file:, ftp:, data:...)
 // Local addresses stay allowed on purpose — ollama/LM Studio on 127.0.0.1 are first-class providers.
@@ -390,6 +392,7 @@ function spawnPi({ cwd, sessionPath, model, thinking, name, envExtra }) {
     ...spawnTreeOpts(),
   });
   proc.stdin.setEncoding('utf8');
+  proc.stdin.on('error', () => {}); // an async EPIPE (prompt sent while the child dies) must not become an uncaughtException — the sync try/catch around write() cannot see stream-level errors
   return proc;
 }
 function attachPiReader(tabId, proc) {
@@ -408,10 +411,15 @@ function attachPiReader(tabId, proc) {
       if (!line) continue;
       let ev; try { ev = JSON.parse(line); } catch { continue; }
       if (ev.type === 'response' && ev.command === 'set_model' && ev.success) {
-        // a confirmed set_model re-binds the tab's routing identity — the old code kept
-        // the ORIGINAL provider, so a later 401 was cooled against the wrong provider/key
-        const mid = String(ev.data?.model || ev.data?.modelId || '');
-        if (mid.includes('/')) { tab.routeProvider = mid.split('/')[0]; tab.routeKeyIdx = null; tab.model = mid; }
+        // pi 0.85 answers set_model with the Model OBJECT ({provider, id, ...}) — the
+        // v1.3.3 handler read data.model/modelId strings that never exist, so the
+        // rebind never fired and a later 401 cooled the wrong provider/key slot
+        const m = ev.data && typeof ev.data === 'object' ? ev.data : null;
+        const prov2 = m && m.provider ? String(m.provider)
+          : (typeof ev.data === 'string' && ev.data.includes('/') ? ev.data.split('/')[0] : '');
+        const mid2 = m && m.id ? String(m.id)
+          : (typeof ev.data === 'string' && ev.data.includes('/') ? ev.data.split('/')[1] : '');
+        if (prov2 && mid2) { tab.routeProvider = prov2; tab.routeKeyIdx = null; tab.model = `${prov2}/${mid2}`; }
       }
       if (ev.type === 'response' && ev.success && ev.data?.sessionFile && ev.data.sessionFile !== tab.sessionFile) {
         tab.sessionFile = ev.data.sessionFile;
@@ -518,6 +526,13 @@ wss.on('connection', (ws) => {
       }
       closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
       const prov = model ? splitModel(model)[0] : null;
+      // enabled=false is a global kill switch, not just a fallback-chain filter — an
+      // explicit open on a disabled provider must be denied, or the toggle "works" in
+      // the routing page while new tasks keep using the provider (audit #08)
+      if (prov && loadRouting().providers?.[prov]?.enabled === false) {
+        ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: `供应商 ${prov} 已停用——在路由页重新启用后再启动` }));
+        return;
+      }
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
       const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
@@ -535,6 +550,16 @@ wss.on('connection', (ws) => {
       const mine = ownerLive(tab) ? tab.owner === ws : !!(tab && ws.adopted.has(msg.tabId));
       if (!mine) return; // only the owner (or an explicit adopter) may kill a tab
       closeTab(msg.tabId); // closeTab announces the exit itself — see the guard in closeTab
+    } else if (msg.type === 'detach') {
+      // the UI "switched project away from a running session": the tab keeps running
+      // but the connection no longer manages it — the orphan TTL (30 min) bounds its
+      // lifetime, and `adopt` reclaims it (v1.3.3 audit #10: forgetting the tabId used
+      // to leave an unmanaged, un-reapable child)
+      const tab = tabs.get(msg.tabId);
+      const mine = ownerLive(tab) ? tab.owner === ws : !!(tab && ws.adopted.has(msg.tabId));
+      if (!mine || !tab) return;
+      tab.owner = null;
+      tab.orphanSince = Date.now();
     }
   });
   ws.on('close', () => {
@@ -737,13 +762,28 @@ async function hModels(req, res, u) {
         // a changed baseUrl must not inherit the old endpoint's credential — the user
         // editing the URL without re-entering a key is exactly the misdirect leak
         const prevP = prev.providers?.[name] || {};
-        if (p && typeof p.baseUrl === 'string' && prevP.baseUrl && p.baseUrl !== prevP.baseUrl) {
+        const urlChanged = p && typeof p.baseUrl === 'string' && prevP.baseUrl && p.baseUrl !== prevP.baseUrl;
+        if (urlChanged) {
           if (!p.apiKey || p.apiKey === KEY_SENTINEL) delete p.apiKey;
+          if (p.headers && typeof p.headers === 'object') for (const k of Object.keys(p.headers)) {
+            if (/authorization|x-api-key|api-key|token/i.test(k) && (!p.headers[k] || p.headers[k] === KEY_SENTINEL)) delete p.headers[k];
+          }
         }
         if (p && p.apiKey === KEY_SENTINEL) {
           const stored = prev.providers?.[name]?.apiKey;
           if (stored) p.apiKey = stored; // sentinel round-trip: keep the real key
           else delete p.apiKey;
+        }
+        // credential HEADERS round-trip too: the GET masked them to '***' — a plain
+        // save must restore the stored value or it silently destroys the header (audit #03)
+        if (p && p.headers && typeof p.headers === 'object') {
+          const storedH = prevP.headers && typeof prevP.headers === 'object' ? prevP.headers : {};
+          for (const k of Object.keys(p.headers)) {
+            if (p.headers[k] === KEY_SENTINEL) {
+              if (storedH[k]) p.headers[k] = storedH[k];
+              else delete p.headers[k];
+            }
+          }
         }
       }
       fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
@@ -782,12 +822,23 @@ async function hProvidersDiscover(req, res, u) {
     if ((!url || !key) && provider) {
       if (!url) url = pv.baseUrl;
       if (!key) {
-        const ov = envOverrideFor(provider);
-        key = ov ? Object.values(ov).find((v) => typeof v === 'string') : null;
-        if (!key && hasLiteralKey(provider)) key = pv.apiKey;
+        // credential ownership follows the endpoint: a URL the user just typed that
+        // differs from the stored one must not inherit the stored key — the discover
+        // request would otherwise send the old credential to the new address (v1.3.3 audit #01)
+        const urlUnchanged = !baseUrl || url === pv.baseUrl;
+        if (urlUnchanged) {
+          const ov = envOverrideFor(provider);
+          key = ov ? Object.values(ov).find((v) => typeof v === 'string') : null;
+          if (!key && hasLiteralKey(provider)) key = pv.apiKey;
+        }
       }
     }
     if (!url) return json(res, 200, { ok: false, detail: '请先填 API 地址' });
+    if (!key && baseUrl && pv.baseUrl && baseUrl !== pv.baseUrl) {
+      // we suppressed a stored credential above — say so instead of letting the
+      // request 401 opaquely against the new endpoint
+      return json(res, 200, { ok: false, detail: '地址已变更：请输入新端点的密钥后再获取模型列表' });
+    }
     if (!assertHttpUrl(url)) return json(res, 200, { ok: false, detail: 'API 地址必须是 http(s) URL' });
     try {
       const t0 = Date.now();
@@ -905,7 +956,11 @@ async function hRoutingFail(req, res, u) {
     } else {
       coolModel(model, msg, 120);
     }
-    return json(res, 200, { next: nextInChain(model), cooldown: modelCooled(model) || providerCooled(prov) });
+    return json(res, 200, {
+      next: nextInChain(model),
+      sameModelKey: sameModelNewKey(model), // the same model still has a usable key — the resend re-opens THIS model, not the next provider
+      cooldown: modelCooled(model) || providerCooled(prov),
+    });
 }
 
 async function hRoutingOk(req, res, u) {

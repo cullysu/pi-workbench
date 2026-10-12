@@ -128,6 +128,9 @@ fn workbench_serving(port: u16, token: &str) -> bool {
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
+    // a byte cap is not a time cap: a process holding the port that accepts but
+    // never answers would stall setup forever — 3s and move on (audit #32)
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let mut buf = Vec::new();
     let _ = stream.take(65536).read_to_end(&mut buf);
     let head = String::from_utf8_lossy(&buf);
@@ -326,10 +329,16 @@ fn main() {
             let mut child = None;
             if !already_up {
                 let node = find_node(&runtime_dir).ok_or_else(|| "node.exe not found".to_string())?;
+                // NODE_OPTIONS/NODE_PATH must not leak into the bundled runtime: a
+                // planted NODE_OPTIONS would inject modules into server.mjs before
+                // any of our checks run — Electron strips these, so does the Tauri
+                // shell now (audit #33)
                 let c = Command::new(&node)
                     .arg(runtime_dir.join("server.mjs"))
                     .current_dir(&runtime_dir)
                     .env("PIWB_PARENT_PID", std::process::id().to_string())
+                    .env_remove("NODE_OPTIONS")
+                    .env_remove("NODE_PATH")
                     .creation_flags(no_window())
                     .spawn()
                     .map_err(|e| format!("node spawn failed: {e}"))?;

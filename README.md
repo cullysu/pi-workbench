@@ -78,6 +78,9 @@
 ```bash
 npm install
 node server.mjs           # http://127.0.0.1:32123
+```
+
+> 默认浏览器打开时**不带凭据**（这是有意的安全默认）：开发模式请用 `PIWB_EMBED_TOKEN=1 node server.mjs` 让首页内嵌本机 token，否则页面会因 403 空凭据而不可用（桌面壳和测试都显式带 token）。
 npm run prepare-runtime   # 组装 pkg-build/（按提交进库的 runtime 锁文件 npm ci —— 与 CI 同一套依赖集）
 npm run electron          # 或: node_modules\.bin\electron .
 ```

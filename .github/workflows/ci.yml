@@ -88,6 +88,8 @@ jobs:
         run: node scripts/ws-probe.mjs
       - name: Failover chain probe (real pi, 3 mock providers)
         run: node scripts/failover-e2e.mjs
+      - name: Audit fix contracts (cron budget/rotation, failover env names, restore grafting, tree cycle)
+        run: node scripts/verify-audit-fixes.mjs
       - name: UI probe (headless Chromium via CDP)
         run: |
           npx -y playwright@1.49.1 install --with-deps chromium

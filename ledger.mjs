@@ -60,7 +60,11 @@ function scanCodex(days, home) {
       if (!tt || typeof tt !== 'object') continue;
       const cur = { input: tt.input_tokens ?? 0, output: tt.output_tokens ?? 0, cached: tt.cached_input_tokens ?? 0 };
       {
-        const dIn = cur.input - prevTotals.input, dOut = cur.output - prevTotals.output, dCa = cur.cached - prevTotals.cached;
+        // per-dimension clamp: a counter reset/restart can send input DOWN while
+        // output rises — the old any-positive gate booked negative input/cached (audit #26)
+        const dIn = Math.max(0, cur.input - prevTotals.input);
+        const dOut = Math.max(0, cur.output - prevTotals.output);
+        const dCa = Math.max(0, cur.cached - prevTotals.cached);
         if (dIn > 0 || dOut > 0 || dCa > 0) {
           const ts = l.timestamp ? Date.parse(l.timestamp) : (pay.timestamp ? Date.parse(pay.timestamp) : (meta.ts || st.mtimeMs)); // the event's own timestamp outranks the session start
           if (ts >= since) {
@@ -125,9 +129,15 @@ function scanClaude(days, home) {
   for (const f of walkFiles(root)) {
     let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
+    const seenMsg = new Set(); // the SAME api message id can appear in several jsonl rows (block + update) — counting each row billed one call twice (audit #25)
     for (const l of readJsonl(f, { hot: '"usage"' })) {
       const u = deepFindUsage(l.message ?? l);
       if (!u) continue;
+      const msgId = l.message?.id ?? l.uuid ?? null;
+      if (msgId) {
+        if (seenMsg.has(msgId)) continue;
+        seenMsg.add(msgId);
+      }
       const ts = l.timestamp ? Date.parse(l.timestamp) : st.mtimeMs;
       if (ts < since) continue;
       recs.push({engine: 'claude', file: path.basename(f), ts, cwd: l.cwd ?? null, model: l.message?.model ?? null, usage: u});

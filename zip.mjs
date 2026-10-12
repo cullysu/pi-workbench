@@ -54,8 +54,8 @@ export function createZip(entries, { mtime } = {}) {
 
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(20, 4);
-    central.writeUInt16LE(mode === undefined ? 0 : (3 << 8) | 20, 6); // version made by: unix when a mode is present
+    central.writeUInt16LE((3 << 8) | 20, 4);  // version MADE BY: unix/PKZIP 2.0 (offset 4) — writing the unix marker into "version needed" (offset 6) demanded an absurd 788 extractor version (audit #24)
+    central.writeUInt16LE(20, 6);             // version NEEDED: 2.0 — the unix mode rides in external attrs, not here
     central.writeUInt16LE(0, 8);
     central.writeUInt16LE(method, 10);
     central.writeUInt16LE(time, 12);

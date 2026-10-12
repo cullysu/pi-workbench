@@ -108,9 +108,17 @@ function applyI18n() {
 // token auth: server injects a per-boot random token into the page; every /api
 // request must echo it or the server answers 403 (blocks other local processes)
 const api = {
-  get: (p) => fetch(p, { headers: apiHeaders() }).then((r) => apiOn403(r)).then((r) => r.json()),
-  post: (p, body) => fetch(p, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body || {}) }).then((r) => apiOn403(r)).then((r) => r.json()),
+  get: (p) => fetch(p, { headers: apiHeaders() }).then((r) => apiOn403(r)).then(apiParse),
+  post: (p, body) => fetch(p, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body || {}) }).then((r) => apiOn403(r)).then(apiParse),
 };
+// non-2xx resolves to {error} instead of a parsed body the caller reads as success —
+// "backend refused" and "backend accepted" must not be indistinguishable (audit #33)
+async function apiParse(r) {
+  let data = null;
+  try { data = await r.json(); } catch { /* empty body */ }
+  if (!r.ok) return { ...(data && typeof data === 'object' ? data : null), error: (data && data.error) || `HTTP ${r.status}` };
+  return data;
+}
 function apiToken() { return window.__API_TOKEN || window.__PIWB_TOKEN || ''; }
 function apiHeaders() { return Object.assign({ 'content-type': 'application/json' }, apiToken() ? { 'x-api-token': apiToken() } : {}); }
 // stale page (token from a previous boot) → every call 403s; reload once to pick up the fresh token
@@ -158,6 +166,19 @@ function wsConnect() {
       state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== msg.tabId);
       renderDetachedNotice();
     }
+    if (msg.type === 'open-denied') {
+      // the server refused the spawn (disabled provider / tab budget / bad cwd): the
+      // optimistic tabId must die here, or the composer keeps "sending" into nothing
+      // while the bubble sits there answered by no one (audit #29)
+      if (state.tabId === msg.tabId) { state.tabId = null; state.tabCwd = null; state.pendingNewSession = false; setBusy(false); }
+      $('#statusline').textContent = '会话被拒绝：' + (msg.reason || '未知原因');
+      renderProjectTree(true);
+      return;
+    }
+    if (msg.type === 'rpc-denied') {
+      $('#statusline').textContent = '请求被拒绝：' + (msg.reason || '会话不属于此连接或已关闭');
+      return;
+    }
     if (msg.tabId !== state.tabId) return;
     if (msg.type === 'pi-event') for (const h of piEventHandlers) h(msg.data);
     else if (msg.type === 'pi-exit') handlePiExit(msg);
@@ -204,6 +225,12 @@ function handlePiExit(msg) {
     $('#conn-dot').className = 'dot off';
     state.tabId = null; // a dead tabId made the composer silently swallow sends
     try { state.ws?.adopted?.delete?.(msg.tabId); } catch { /* socket gone */ }
+    // an abnormal exit IS a routable failure — the chain may still serve this prompt.
+    // the v1.3.4 trigger lived in a pi-event listener that can never see WS frames (audit #28)
+    if (msg.code !== 0 && !state.userAborted && state.lastPrompt && !state.failoverDone) {
+      state.lastStop = 'error';
+      maybeFailover(`pi exited with code ${msg.code}`);
+    }
   }
 }
 
@@ -440,6 +467,7 @@ function handleUiRequest(ev) {
 // ---------- modal ----------
 let modalCancel = null; // pending onCancel for the open modal — Escape must fire it, pi extensions wait on the reply
 function modal(title, body, actions) {
+  if (modalCancel) { const stale = modalCancel; modalCancel = null; stale(); } // one modal slot: a NEW dialog must answer the waiting extension first, or it waits forever under the newer UI (audit #32)
   modalCancel = null;
   $('#modal-title').textContent = title;
   $('#modal-body').textContent = body;
@@ -455,6 +483,7 @@ function modal(title, body, actions) {
   $('#modal-backdrop').classList.remove('hidden');
 }
 function modalWithInput(title, placeholder, prefill, onOk, onCancel) {
+  if (modalCancel && modalCancel !== onCancel) { const stale = modalCancel; modalCancel = null; stale(); } // same single-slot rule (audit #32)
   modalCancel = onCancel || null;
   $('#modal-title').textContent = title;
   $('#modal-body').innerHTML = `<input id="modal-input" placeholder="${esc(placeholder)}">`;
@@ -526,6 +555,12 @@ function openPiSession({ sessionPath = null, isNew = false }) {
     if (state.tabId) { wsSend({ type: 'close', tabId: state.tabId }); }
     state.tabId = 'tab-' + Math.random().toString(36).slice(2, 9);
     state.tabCwd = state.project.path; // the cwd this tab was opened under — submitPrompt refuses to send prompts across a mismatch
+    // a NEW session follows the configured default (either entry that sets it);
+    // resuming/replaying keeps the selected model that describes this tab. Whatever
+    // model the open carries IS the tab's model — selModel must say the same thing,
+    // or the chip and every failure report describe a model that is not running (audit #30)
+    const openModel = (isNew ? (state.cfg?.defaultModel || state.selModel) : state.selModel) || null;
+    if (openModel && openModel !== state.selModel) { state.selModel = openModel; updateModelChip(); }
     state.streaming = false; state.cur = null; state.toolCards.clear();
     state.goalRound = 0; state.goalDone = false; state.goalInjected = false;
     state.sessionFile = null; state.forkMsgs = null; state.pendingForkResolve = null; state.pendingRegenText = '';
@@ -537,9 +572,7 @@ function openPiSession({ sessionPath = null, isNew = false }) {
       thinking: state.thinkLevel || undefined,
       cwd: state.project.path,
       sessionPath: isNew ? null : sessionPath,
-      // a NEW session follows the configured default (either entry that sets it);
-      // resuming/replaying keeps the selected model that describes this tab
-      model: (isNew ? (state.cfg?.defaultModel || state.selModel) : state.selModel) || null,
+      model: openModel,
     });
     $('#conn-dot').className = 'dot busy';
     // statusline 只在 setBusy(false) 时清空，而新会话不会触发 setBusy，
@@ -580,7 +613,14 @@ function detachLiveTab({ close = false } = {}) {
     wsSend({ type: 'detach', tabId: state.tabId });
     state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== info.tabId);
     state.detachedTabs.push(info);
-    if (state.detachedTabs.length > 3) state.detachedTabs.shift(); // bound the bar; oldest silently keeps running to its TTL
+    if (state.detachedTabs.length > 3) {
+      // the bar is the ONLY control surface for a detached tab — dropping the oldest
+      // entry silently used to leave it unmanaged until the TTL; it now ends, and the
+      // user is told (audit #37)
+      const dropped = state.detachedTabs.shift();
+      wsSend({ type: 'close', tabId: dropped.tabId });
+      $('#statusline').textContent = `后台会话已达 3 个——最早的「${dropped.projectPath || '未知项目'}」已结束`;
+    }
   }
   state.tabId = null; state.sessionFile = null; state.tabCwd = null; state.pendingNewSession = false;
   state.streaming = false; setBusy(false);
@@ -599,13 +639,17 @@ function renderDetachedNotice() {
 }
 async function reattachDetached(info) {
   const p = (state.cfg.projects || []).find((x) => x.path === info.projectPath);
-  if (!p || state.tabId) { // project removed, or a live tab is in the way: offer close instead of a broken switch
+  if (!p) { // project removed — the only honest option left is to end it, and SAY so
     wsSend({ type: 'close', tabId: info.tabId });
     state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== info.tabId);
     renderDetachedNotice();
-    if (!p) $('#statusline').textContent = '该项目已从工作台移除，后台会话已结束';
+    $('#statusline').textContent = '该项目已从工作台移除，后台会话已结束';
     return;
   }
+  // "切回" must SWITCH, never kill the target: a currently-open tab detaches to the
+  // background bar first — clicking 切回 while a live tab exists used to close the
+  // session the user was trying to reach (audit #36)
+  if (state.tabId) detachLiveTab({ close: false });
   if (state.project?.path !== p.path) selectProject(p);
   state.tabId = info.tabId; state.sessionFile = info.sessionFile; state.tabCwd = p.path;
   state.detachedTabs = (state.detachedTabs || []).filter((t) => t.tabId !== info.tabId);
@@ -646,7 +690,7 @@ piEventHandlers.push(function (ev) {
   if (ev.type === 'response' && ev.command === 'get_fork_messages' && ev.success) {
     state.forkMsgs = ev.data?.messages || [];
     if (state.pendingForkResolve && state.pendingForkResolve.id === state.forkReqId) {
-      const r = state.pendingForkResolve; state.pendingForkResolve = null; r(state.forkMsgs);
+      const r = state.pendingForkResolve; state.pendingForkResolve = null; r.resolve(state.forkMsgs); // r is the {id, resolve} record — calling it as a function left regen hanging forever (audit #27)
     }
     return;
   }
@@ -673,6 +717,7 @@ piEventHandlers.push(function (ev) {
 function renderReplay(entries) {
   // entries: [{type:'message', id, message:{role, content|text, ...}}...]
   state.toolCards.clear(); // clear BEFORE registering: the replayed cards must stay reachable for tools that are still running when the replay lands
+  state.cur = null; // the old assistant block died with the cleared DOM — a continuing stream must start a fresh node, not write into a detached one (audit #38)
   clearTimeline(false);
   for (const e of entries) {
     if (e.type !== 'message') continue;
@@ -852,7 +897,8 @@ piEventHandlers.push(function (ev) {
     state.lastAssistantText = (ev.message.content || []).filter((b) => b.type === 'text').map((b) => b.text || '').join('\n');
     state.lastStop = ev.message.stopReason || null;
   }
-  if (ev.type === 'pi-exit' && ev.code !== 0 && state.streaming) maybeFailover('pi exited with code ' + ev.code);
+  // pi-exit arrives as a WS frame (handled in handlePiExit), never as pi-event data —
+  // this branch was unreachable; the real trigger lives in handlePiExit (audit #28)
   pushLog(ev);
 });
 function fmtK(n) { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n); }
@@ -1010,7 +1056,9 @@ function maybeGoalContinue() {
   if (!g || !g.auto || !g.text || state.userAborted || state.goalStop || state.goalDone) { renderGoalBanner(); return; }
   if (state.lastStop === 'error') { renderGoalBanner(); return; } // failover owns error turns
   const txt = state.lastAssistantText || '';
-  if (/GOAL_DONE/.test(txt)) {
+  // the protocol says "last line, alone" — a bare substring also matched explanations,
+  // quoted text or code that merely MENTIONS the marker (audit #41)
+  if (/(^|\n)[ \t]*GOAL_DONE[ \t]*$/.test(txt.trimEnd())) {
     state.goalDone = true; renderGoalBanner();
     $('#statusline').textContent = '目标完成（模型输出 GOAL_DONE）';
     return;
@@ -1096,6 +1144,9 @@ $('#btn-theme').onclick = async () => {
 async function sendPrompt() {
   const text = inputEl.value.trim();
   if (!text) return;
+  // known rejections clear NOTHING — the user's draft survives a refused send (audit #40)
+  if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
+  if (!state.project) { askAddProject(); return; }
   inputEl.value = '';
   inputEl.style.height = 'auto';
   submitPrompt(text);
@@ -1366,6 +1417,14 @@ async function renderProjectTree(useCache = false) {
         };
         block.appendChild(d);
       }
+      if (sessions.length > 50) {
+        // the cap is a display window, not the dataset — silence made older history
+        // look deleted; say the window exists (full pagination is queued) (audit #39)
+        const d = document.createElement('div');
+        d.className = 'muted small conv-empty';
+        d.textContent = `仅显示最近 50 个会话（共 ${sessions.length} 个，其余完整保存在磁盘）`;
+        block.appendChild(d);
+      }
       if (!sessions.length && !(state.pendingNewSession && state.project?.path === p.path)) {
         const d = document.createElement('div');
         d.className = 'muted small conv-empty';
@@ -1474,7 +1533,10 @@ $$('.import-head .chip').forEach((b) => {
 async function loadImportList() {
   const list = $('#import-list');
   list.innerHTML = `<div class="muted small" style="padding:20px 10px">${t('loading')}</div>`;
-  const r = await api.get(`/api/import/${state.importSrc}`).catch(() => null);
+  const seq = (state.importSeq = (state.importSeq || 0) + 1); // a fast source switch must let the NEWER answer win, not whichever reply is later (audit #35)
+  const src = state.importSrc;
+  const r = await api.get(`/api/import/${src}`).catch(() => null);
+  if (seq !== state.importSeq) return;
   if (!r) { list.innerHTML = '<div class="muted small" style="padding:20px 10px">加载失败，稍后重试</div>'; return; }
   list.innerHTML = '';
   for (const s of r.sessions || []) {
@@ -1483,13 +1545,15 @@ async function loadImportList() {
     d.dataset.title = (cleanTitle(s.preview) || s.id).toLowerCase();
     d.innerHTML = `<div class="s-name">${esc(cleanTitle(s.preview) || s.id.slice(0, 10))}</div>
       <div class="s-preview">${esc(s.cwd || '')} · ${relTime(s.mtime)}</div>`;
-    d.onclick = () => openImported(state.importSrc, s.file);
+    d.onclick = () => openImported(src, s.file); // the SOURCE at click time, not whatever the chip says later (audit #35)
     list.appendChild(d);
   }
   if (!r.sessions?.length) list.innerHTML = `<div class="placeholder small" style="padding:30px 10px">no sessions found</div>`;
 }
 async function openImported(src, file) {
+  const seq = (state.importSeq = (state.importSeq || 0) + 1);
   const r = await api.get(`/api/import/${src}/read?path=${encodeURIComponent(file)}`).catch(() => null);
+  if (seq !== state.importSeq) return; // a slower earlier click must not overwrite the later one
   if (!r) { $('#statusline').textContent = '加载会话失败'; return; }
   state.importView = true; // read-only: composer blocked, live pi-events held out of this view
   state.importFile = { src, file }; // what the user is LOOKING at — export must follow this, never the stale live session (audit #22)
@@ -1700,15 +1764,17 @@ $('#btn-discover').onclick = async () => {
   if (!state.modelsDoc) return;
   const btn = $('#btn-discover'); const out = $('#discover-status');
   btn.textContent = '获取中…'; btn.disabled = true; out.textContent = '';
+  const reqProv = state.editProv; // the answer belongs to the provider ASKED — switching rows mid-await must not merge A's models into B (audit #34)
   const r = await api.post('/api/providers/discover', {
-    provider: state.editProv,
+    provider: reqProv,
     baseUrl: $('#pf-url').value.trim(),
     apiKey: $('#pf-key').value.trim() || undefined,
     api: $('#pf-api')?.value || undefined, // the user's chosen protocol beats hostname sniffing
   }).catch(() => null);
   btn.textContent = '获取模型列表'; btn.disabled = false;
   if (!r || !r.ok) { out.textContent = (r && (r.detail || `HTTP ${r.status}`)) || '获取失败'; return; }
-  const p = state.modelsDoc.providers[state.editProv] = state.modelsDoc.providers[state.editProv] || { baseUrl: '', api: 'openai-responses', models: [] };
+  if (state.editProv !== reqProv) { out.textContent = '已切换供应商——忽略过期的获取结果'; return; }
+  const p = state.modelsDoc.providers[reqProv] = state.modelsDoc.providers[reqProv] || { baseUrl: '', api: 'openai-responses', models: [] };
   if (!$('#pf-url').value.trim() && p.baseUrl) $('#pf-url').value = p.baseUrl;
   const have = new Set((p.models || []).map((m) => m.id));
   let added = 0, kbHits = 0;
@@ -1723,7 +1789,7 @@ $('#btn-discover').onclick = async () => {
   }
   state.kbPricing = state.kbPricing || {};
   for (const [id, hit] of Object.entries(r.kb || {})) {
-    if (hit.price) (state.kbPricing[state.editProv] = state.kbPricing[state.editProv] || {})[id] = hit.price;
+    if (hit.price) (state.kbPricing[reqProv] = state.kbPricing[reqProv] || {})[id] = hit.price;
   }
   out.textContent = `发现 ${r.models.length} 个模型` + (added ? `，新增 ${added}` : '') + (kbHits ? `，${kbHits} 个已按知识库配置` : '');
   renderProvModels(p);
@@ -1761,13 +1827,18 @@ $('#btn-prov-save').onclick = async () => {
   if (keyInput) prov.apiKey = keyInput;
   else if (!prev.apiKey) delete prov.apiKey;
   doc.providers[state.editProv] = prov;
-  await api.post('/api/models', doc);
+  const saved = await api.post('/api/models', doc);
+  if (saved.error) { $('#models-status').textContent = '保存失败：' + saved.error; return; } // the backend refused — "已保存" would be a lie (audit #33)
   const def = document.querySelector('input[name="pm-default"]:checked');
   const test = document.querySelector('input[name="pm-test"]:checked');
-  if (test) await api.post('/api/routing', { providers: { [state.editProv]: { testModel: test.value } } });
+  if (test) {
+    const rt = await api.post('/api/routing', { providers: { [state.editProv]: { testModel: test.value } } });
+    if (rt.error) { $('#models-status').textContent = '路由保存失败：' + rt.error; return; }
+  }
   if (def) {
     state.cfg.defaultModel = def.value;
-    await api.post('/api/config', { defaultModel: def.value });
+    const cf = await api.post('/api/config', { defaultModel: def.value });
+    if (cf.error) { $('#models-status').textContent = '默认模型保存失败：' + cf.error; return; }
     // the chip describes the RUNNING tab — with a live tab it must keep telling the
     // truth; the new default applies from the next new session (openPiSession prefers
     // cfg.defaultModel for isNew). Only with no live tab does the chip follow now.
@@ -1941,11 +2012,13 @@ async function loadRoutingUI() {
     const on = document.createElement('button'); on.textContent = t('on');
     const off = document.createElement('button'); off.textContent = t('off');
     (pr.enabled ? on : off).classList.add('active');
-    // toggles persist immediately — no separate save step
-    const setEnabled = (val) => {
+    // toggles persist immediately — no separate save step. The UI flips only on
+    // backend CONFIRMATION; a refused toggle would otherwise lie on both ends (audit #33)
+    const setEnabled = async (val) => {
+      const r = await api.post('/api/routing', { providers: { [pr.name]: { enabled: val } } }).catch(() => ({ error: '网络失败' }));
+      if (r.error) { $('#routing-status').textContent = `${pr.name} 开关保存失败：` + r.error; return; }
       on.classList.toggle('active', val);
       off.classList.toggle('active', !val);
-      api.post('/api/routing', { providers: { [pr.name]: { enabled: val } } }).catch(() => {});
     };
     on.onclick = () => setEnabled(true);
     off.onclick = () => setEnabled(false);
@@ -1970,7 +2043,8 @@ async function loadRoutingUI() {
 $('#btn-routing-save').onclick = async () => {
   try {
     const chains = JSON.parse($('#routing-chains').value || '[]');
-    await api.post('/api/routing', { chains });
+    const r = await api.post('/api/routing', { chains });
+    if (r.error) { $('#routing-status').textContent = '保存失败：' + r.error; return; } // a backend-refused chain must not report saved (audit #33)
     $('#routing-status').textContent = '回退链已保存';
     setTimeout(() => { $('#routing-status').textContent = ''; }, 3000);
   } catch (e) { $('#routing-status').textContent = 'JSON 错误：' + e.message; }
@@ -2018,9 +2092,12 @@ async function loadHealth() {
   const kernel = await api.get('/api/kernel').catch(() => null);
   const rows = [];
   const push = (name, state, text) => rows.push({ name, state, text });
-  push('本地服务', 'ok', '127.0.0.1:' + (kernel ? kernel.port : 32123) + ' · 已响应');
-  if (kernel) push('Node 运行时', 'ok', kernel.node + ' · ' + kernel.platform);
-  if (kernel) push('pi 内核', kernel.pi ? 'ok' : 'warn', kernel.pi ? 'v' + kernel.pi : '未检测到 pi 包');
+  // the page LOADING is not proof the backend answered — a null/errored kernel fetch
+  // used to be reported as "本地服务 ok · 已响应", the exact opposite of the truth (audit #43)
+  if (kernel && !kernel.error) push('本地服务', 'ok', '127.0.0.1:' + kernel.port + ' · 已响应');
+  else push('本地服务', 'err', '后端 /api/kernel 未响应' + (kernel && kernel.error ? '（' + kernel.error + '）' : ''));
+  if (kernel && !kernel.error) push('Node 运行时', 'ok', kernel.node + ' · ' + kernel.platform);
+  if (kernel && !kernel.error) push('pi 内核', kernel.pi ? 'ok' : 'warn', kernel.pi ? 'v' + kernel.pi : '未检测到 pi 包');
   push('WS 连接', state.wsReady ? 'ok' : 'err', state.wsReady ? '已连接' : '未连接');
   push('中转密钥', kernel && kernel.secrets && kernel.secrets.relay ? 'ok' : 'warn', kernel && kernel.secrets.relay ? '已按配置读取（仅内存）' : '未配置');
   const dm = (state.cfg.defaultModel) || '未设置';
@@ -2395,6 +2472,18 @@ $('#btn-backup-import').onclick = () => {
     const r = await api.post('/api/backup/import', { path: val.trim() }).catch((e) => ({ error: e.message }));
     if (r.error) { $('#backup-status').textContent = '失败：' + r.error; return; }
     $('#backup-status').textContent = `已恢复 ${ (r.restored || []).join('、') }；覆盖前副本在 ${r.backup}`;
+    // disk restored ≠ app restored: cfg/projects/models/routing in memory are the
+    // PRE-import values — saving from them would write the old state back over the
+    // fresh restore (audit #42)
+    try {
+      await loadProjects();
+      state.modelsDoc = null; state.kbPricing = null; state.routingMeta = null; // force a real reload, not a cached one
+      await loadModelsEditor();
+      await loadRoutingUI();
+      if (typeof loadCron === 'function') await loadCron();
+      state.selModel = null; // the restored defaultModel takes over at the next new session
+      $('#statusline').textContent = '备份已恢复，界面配置已刷新';
+    } catch { $('#statusline').textContent = '备份已恢复（界面刷新失败——切一次面板或重新打开即同步）'; }
   });
 };
 $('#btn-migrate-scan').onclick = async () => {
@@ -2534,7 +2623,7 @@ function getForkMsgs() {
       // only the request that armed this timeout may be settled by it — a stale
       // 6s expiry used to clear a NEWER pending fork (audit #24)
       if (state.pendingForkResolve && state.pendingForkResolve.id === reqId) {
-        const r = state.pendingForkResolve; state.pendingForkResolve = null; r(null);
+        const r = state.pendingForkResolve; state.pendingForkResolve = null; r.resolve(null);
       }
     }, 6000);
   });

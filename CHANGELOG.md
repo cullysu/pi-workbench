@@ -2,6 +2,53 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.5 — 2026-10-12
+
+### Fixed (from the independent v1.3.4 audit — 43 behavior items; failure paths and trust contracts)
+
+**Service survives hostile input:**
+- **A malformed WebSocket upgrade target can no longer kill the whole service** — `new URL()` on `//[` threw before auth, hit the global handler, which reaps every tab and cron child and EXITS. The parse is guarded; the async HTTP handler answers 400 instead of dying as an unhandled rejection.
+- **An empty/absent tabId can no longer broadcast to every client** — tab-scoped frames require a non-empty string id (broadcast's owner lookup fell through to an all-client send).
+- **pi-exit frames go only to the tab's former owner/adopters** — the generic broadcast ran AFTER the Map delete and leaked exit events to every connection.
+- External terminal spawns on Windows/macOS carry async error handlers (an ENOENT can no longer become an uncaughtException); a FIFO passed the old !isDirectory check — reads now require a regular file.
+
+**"No-keys backup" becomes trustworthy (fail-closed):**
+- **Cookie-class credential headers are covered** — the mask/redaction pattern is deliberately broad (`auth|cookie|token|key|secret|credential|session|subscription`); over-masking round-trips safely, missing one leaks it.
+- **Corrupt cron.json in a keys-free export is OMITTED, not packed raw** — redaction failure used to fall back to the original file.
+- **Export filenames carry a random suffix** — same-second "without keys" then "with keys" used to overwrite the first path with a keys-bearing zip.
+- Secret files (configs, zips, restore temps) are created 0600 at write time, not chmod'd after.
+
+**Credential ownership requires a KNOWN endpoint:**
+- Save and restore both treated "old provider has a key but no baseUrl" as the SAME endpoint and inherited the credential onto a new URL. Sentinel keys/headers now restore only when BOTH sides name the same baseUrl; an unknown old endpoint is not a match.
+
+**Config poisoning blocked at the door:**
+- Backup import validates routing.json deeper: scalar `state:1` (which threw on `.cooldowns` assignment and took every routing API down) and `[null]` chains are rejected; `loadRouting` normalizes both defensively for every consumer.
+
+**Failover does what the chain promises:**
+- **`sameModelNewKey` respects model cooldowns** — a 429-cooled model is not "same model, fresh key"; the frontend used to re-open the cooled model on possibly the SAME key while a healthy successor sat in the chain.
+- **Keyless providers (local Ollama/LM Studio, header-auth) enter the fallback chain** — "no managed key" was conflated with "broken".
+- **Same-provider set_model keeps the key identity** — switching models reset `routeKeyIdx` to null while the process still served on its original key, so a later failure cooled the wrong slot.
+
+**Cron: no double starts, no lost dailies:**
+- **A restart-interrupted job can no longer spawn twice** — bootReset leaves a distinguishable status and a spawn ALWAYS persists its running flag (a status-only dirty check used to skip the write, and the next tick re-read `running:false` and spawned again).
+- **The deferral marker reaches EVERY daily** a full budget squeezes out (only the first got it), and the contract test now drives the real sequence through tick(): intervals occupy slots → dailies come due → both deferred → slots free → both fire.
+
+**The UI stops lying:**
+- **open-denied/rpc-denied are handled** — a refused spawn kills the optimistic tabId and says why, instead of leaving a user bubble no one will answer; sendPrompt stops clearing the draft on known rejections.
+- **Every save surface checks the backend answer** — the api helper resolves non-2xx to `{error}`; models/routing/config saves and provider toggles report "已保存" only on confirmation.
+- **Late responses carry request identity**: discover results are dropped when the user switched providers mid-await; import list/content races are sequenced.
+- **"切回" switches, never kills** — a live tab detaches to the bar first; the dangerous close-on-reattach is gone. The 4th detached tab now ends the oldest WITH a notice instead of silently unmanaging it.
+- New sessions sync `selModel` to the model actually opened (chip and failure reports describe reality); abnormal pi exits reach the failover path (the old trigger sat in a listener that never sees WS frames); a shared modal answers the waiting extension before being replaced; replay resets the streaming node so continuing deltas are visible; restore refreshes in-memory config (saving stale state used to write pre-import values back); the health page no longer reports "本地服务 ok" when /api/kernel failed; GOAL_DONE must be a standalone last line; the 50-session cap says it is a window.
+
+**Data correctness:**
+- A bare `null` JSONL line can no longer kill session lists/stats/trees (skipped at the reader).
+- Codex import dedupes the response_item/event_msg double representation; Gemini reads `.content` (string/parts/wrapper); Claude ledger dedupes by message id (one API call was billed once per row carrying its usage); Codex counter resets clamp per-dimension instead of booking negatives.
+- The session tree reports `truncated` at the read cap; file previews declare truncation; ZIP central directories carry correct made-by/needed versions.
+
+**Contract tests:** 16 → 23 assertions — the weak v1.3.4 checks the audit called out (a `||` that could mask failure, a deferral test that bypassed the scheduler) are replaced with tick-driven sequence tests; new locks: bootReset double-start, scalar routing rejection, unknown-endpoint restore, Cookie-class redaction, fail-closed cron export, unique export paths.
+
+Known and queued (unchanged): code signing (awaiting a certificate account), installer-level acceptance on Windows/macOS, Tauri server auto-restart parity, full-release SBOM layering, real pagination, a11y/i18n, session-identity architecture unification, sync-IO budgets.
+
 ## 1.3.4 — 2026-10-12
 
 ### Fixed (from the independent v1.3.3 audit — execution identity, credential ownership, real pi protocol)

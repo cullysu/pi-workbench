@@ -134,37 +134,126 @@ const check = (name, ok, detail = '') => {
   const j2 = { id: 'job-cooled', kind: 'interval', everyMin: 1, prompt: 'x', enabled: true, model: 'provCooled/m1' };
   cronState.jobs.push(j2);
   check('cron refuses to launch a cooled-out provider (fail-closed keys)', cron.runCronJob(j2) === false && j2.lastStatus === 'keys cooled', j2.lastStatus);
-  // 6c: a deferred daily still fires after its 2-minute window
-  const j3 = { id: 'job-daily', kind: 'daily', time: '03:00', prompt: 'x', enabled: true, deferDay: new Date().toISOString().slice(0, 10) };
-  cronState.jobs.push(j3);
-  check('deferred daily stays eligible outside its window', cron.runCronJob(j3) === true && j3.deferDay === null && j3.lastRunDay === new Date().toISOString().slice(0, 10).replace(/-/g, '-') || j3.lastRunDay, JSON.stringify({ defer: j3.deferDay, day: j3.lastRunDay }));
-}
+  // 6c: THE REAL SCHEDULING SEQUENCE — intervals occupy both slots FIRST; a daily
+  // coming due while they run must be deferred (BOTH of them), then actually fire
+  // when a slot frees. Driven through tick(), reading persisted state (audit E01/#15)
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+    let cronState = { jobs: [] };
+    const procs = [];
+    const cron = createCron({
+      CRON_FILE: path.join(root, 'cron.json'), CRON_RUNS_DIR: path.join(root, 'runs'), HOME: root, SECRET_ENV: {}, PI_CLI: 'mock-pi',
+      cronPiArgs: () => [], broadcast: () => {},
+      readJson: () => JSON.parse(JSON.stringify(cronState)),
+      saveJson: (_, d) => { cronState = JSON.parse(JSON.stringify(d)); },
+      spawn: () => { const p = new EventEmitter(); p.stdout = new PassThrough(); p.stderr = new PassThrough(); procs.push(p); return p; }, // never settles: the slots stay busy
+      get knownProject() { return () => true; },
+      get defaultModel() { return () => null; },
+      get providerCooledOut() { return () => false; },
+    });
+    const now = new Date();
+    const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0'); // due right now
+    cronState.jobs = [
+      { id: 'iv1', kind: 'interval', everyMin: 1, prompt: 'x', enabled: true },
+      { id: 'iv2', kind: 'interval', everyMin: 1, prompt: 'x', enabled: true },
+    ];
+    cron.tick(); // both intervals spawn and hold the slots
+    // the dailies come due while both intervals are still running
+    cronState.jobs.push(
+      { id: 'daily1', kind: 'daily', time: hhmm, prompt: 'x', enabled: true },
+      { id: 'daily2', kind: 'daily', time: hhmm, prompt: 'x', enabled: true },
+    );
+    cron.tick(); // intervals running → skipped; dailies due but budget full → BOTH deferred, none spawned
+    const j1 = cronState.jobs[2], j2 = cronState.jobs[3];
+    check('full slots defer EVERY daily (not just the first), none spawned', !!j1.deferDay && !!j2.deferDay && procs.length === 2, JSON.stringify({ procs: procs.length, d1: j1.deferDay, d2: j2.deferDay }));
+    for (const p of procs) p.emit('close', 0); // the intervals settle — slots free up
+    cron.tick(); // the deferred dailies must actually fire now
+    const fired1 = cronState.jobs[2], fired2 = cronState.jobs[3]; // tick() re-reads from disk — read the PERSISTED state, not the pre-tick copies
+    check('deferred dailies fire on a later tick with free slots', procs.length === 4 && !!fired1.lastRunDay && !fired1.deferDay && !!fired2.lastRunDay, JSON.stringify({ procs: procs.length, defer: fired1.deferDay, day: fired1.lastRunDay }));
+    cron.shutdown();
+  }
 
-// 7) backup: restore must not graft this machine's key onto a DIFFERENT endpoint; exclude-keys backup strips error text
-{
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
-  const cfgDir = path.join(root, '.pi-workbench');
-  // current machine state: provA at OLD endpoint with a key
-  fs.mkdirSync(cfgDir, { recursive: true });
-  fs.writeFileSync(path.join(root, 'models.json'), JSON.stringify({ providers: {
-    provA: { baseUrl: 'https://old.example/v1', apiKey: 'sk-live-machine-key', headers: { authorization: 'Bearer sk-live-hdr' } },
-  } }));
-  let routing = { chains: [], providers: {}, state: { cooldowns: { 'provA#key0': { until: Date.now() + 60000, error: '401 Bearer sk-secret-in-error' } } } };
-  fs.writeFileSync(path.join(root, 'routing.json'), JSON.stringify(routing));
-  const bt = createBackupTerminal({ CFG_DIR: cfgDir, HOME: root, CFG_FILE: path.join(root, 'config.json'), ROUTING_FILE: path.join(root, 'routing.json'), CRON_FILE: path.join(root, 'cron.json'), MODEL_META_FILE: path.join(root, 'mm.json'), PI_MODELS: path.join(root, 'models.json'), PI_SETTINGS: path.join(root, 'settings.json'), PI_SKILLS: path.join(root, 'skills.json'), CODEX_SESSIONS: path.join(root, 'codex'), CLAUDE_PROJECTS: path.join(root, 'claude'), VERSION: 'test', listSkills: () => ({ skills: [] }), createZip, readZip, spawn: () => ({ on: () => {}, stdin: { write: () => {} } }), fs, path });
-  const z = createZip([{ name: 'pi-agent/models.json', data: Buffer.from(JSON.stringify({ providers: {
-    provA: { baseUrl: 'https://new.example/v1' }, // SAME name, DIFFERENT endpoint, no key (redacted backup)
-  } })) }]);
-  fs.writeFileSync(path.join(root, 'move.zip'), z);
-  await bt.importBackupZip(path.join(root, 'move.zip'));
-  const after = JSON.parse(fs.readFileSync(path.join(root, 'models.json'), 'utf8'));
-  check('restore does NOT graft the machine key onto a moved endpoint', after.providers.provA.apiKey === undefined && after.providers.provA.baseUrl === 'https://new.example/v1', JSON.stringify(after.providers.provA));
-  const rep = await bt.exportBackupZip(true);
-  const entries = readZip(fs.readFileSync(rep.path));
-  const routingEntry = entries.find((e) => e.name === 'workbench/routing.json');
-  const rdoc = JSON.parse(routingEntry.data.toString('utf8'));
-  const errText = rdoc.state?.cooldowns?.['provA#key0']?.error || '';
-  check('exclude-keys backup strips cooldown error text', !errText.includes('sk-secret-in-error'), errText);
+  // 6d: a job interrupted by a restart must not double-start on the next ticks (audit #14)
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+    let cronState = { jobs: [] };
+    const procs = [];
+    const cron = createCron({
+      CRON_FILE: path.join(root, 'cron.json'), CRON_RUNS_DIR: path.join(root, 'runs'), HOME: root, SECRET_ENV: {}, PI_CLI: 'mock-pi',
+      cronPiArgs: () => [], broadcast: () => {},
+      readJson: () => JSON.parse(JSON.stringify(cronState)),
+      saveJson: (_, d) => { cronState = JSON.parse(JSON.stringify(d)); },
+      spawn: () => { const p = new EventEmitter(); p.stdout = new PassThrough(); p.stderr = new PassThrough(); procs.push(p); return p; }, // never settles
+      get knownProject() { return () => true; },
+      get defaultModel() { return () => null; },
+      get providerCooledOut() { return () => false; },
+    });
+    // disk state as a crash left it: running:true (bootReset will clear) with a stale lastRunMs
+    const j = { id: 'job-x', kind: 'interval', everyMin: 1, prompt: 'x', enabled: true, running: true, lastRunMs: Date.now() - 10 * 60000, lastStatus: 'running' };
+    cronState.jobs = [j];
+    cron.bootReset(cronState);
+    cron.tick(); // tick 1: spawns, and running:true MUST reach disk
+    const spawnedOnce = procs.length === 1 && cronState.jobs[0].running === true;
+    cron.tick(); // tick 2: the persisted running flag must prevent a second spawn
+    check('restart-interrupted interval spawns once, not twice (bootReset + persist)', spawnedOnce && procs.length === 1, JSON.stringify({ procs: procs.length, diskRunning: cronState.jobs[0].running }));
+    cron.shutdown();
+  }
+
+  // 7) backup: restore must not graft this machine's key onto a DIFFERENT or UNKNOWN endpoint; exclude-keys backup strips error text and fails closed
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+    const cfgDir = path.join(root, '.pi-workbench');
+    // current machine state: provA at OLD endpoint with a key; provB has a key but NO baseUrl (unknown trust domain)
+    fs.mkdirSync(cfgDir, { recursive: true });
+    fs.writeFileSync(path.join(root, 'models.json'), JSON.stringify({ providers: {
+      provA: { baseUrl: 'https://old.example/v1', apiKey: 'sk-live-machine-key', headers: { authorization: 'Bearer sk-live-hdr' } },
+      provB: { apiKey: 'sk-no-url-key', headers: { cookie: 'sk-cookie-secret' } },
+    } }));
+    let routing = { chains: [], providers: {}, state: { cooldowns: { 'provA#key0': { until: Date.now() + 60000, error: '401 Bearer sk-secret-in-error' } } } };
+    fs.writeFileSync(path.join(root, 'routing.json'), JSON.stringify(routing));
+    // a corrupt cron.json: unparseable lastOutput must NOT fall back to the raw file in a no-keys backup
+    fs.writeFileSync(path.join(root, 'cron.json'), '{not json at all');
+    const bt = createBackupTerminal({ CFG_DIR: cfgDir, HOME: root, CFG_FILE: path.join(root, 'config.json'), ROUTING_FILE: path.join(root, 'routing.json'), CRON_FILE: path.join(root, 'cron.json'), MODEL_META_FILE: path.join(root, 'mm.json'), PI_MODELS: path.join(root, 'models.json'), PI_SETTINGS: path.join(root, 'settings.json'), PI_SKILLS: path.join(root, 'skills.json'), CODEX_SESSIONS: path.join(root, 'codex'), CLAUDE_PROJECTS: path.join(root, 'claude'), VERSION: 'test', listSkills: () => ({ skills: [] }), createZip, readZip, spawn: () => ({ on: () => {}, stdin: { write: () => {} } }), fs, path });
+    const z = createZip([{ name: 'pi-agent/models.json', data: Buffer.from(JSON.stringify({ providers: {
+      provA: { baseUrl: 'https://new.example/v1' }, // SAME name, DIFFERENT endpoint, no key (redacted backup)
+      provB: { baseUrl: 'https://fresh.example/v1' }, // old entry had NO baseUrl — unknown endpoint, key must not follow
+    } })) }]);
+    fs.writeFileSync(path.join(root, 'move.zip'), z);
+    await bt.importBackupZip(path.join(root, 'move.zip'));
+    const after = JSON.parse(fs.readFileSync(path.join(root, 'models.json'), 'utf8'));
+    check('restore does NOT graft the machine key onto a moved endpoint', after.providers.provA.apiKey === undefined && after.providers.provA.baseUrl === 'https://new.example/v1', JSON.stringify(after.providers.provA));
+    check('restore does NOT graft a key whose old baseUrl was UNKNOWN', after.providers.provB.apiKey === undefined, JSON.stringify(after.providers.provB));
+    const rep = await bt.exportBackupZip(true);
+    const entries = readZip(fs.readFileSync(rep.path));
+    const routingEntry = entries.find((e) => e.name === 'workbench/routing.json');
+    const rdoc = JSON.parse(routingEntry.data.toString('utf8'));
+    const errText = rdoc.state?.cooldowns?.['provA#key0']?.error || '';
+    check('exclude-keys backup strips cooldown error text', !errText.includes('sk-secret-in-error'), errText);
+    // a corrupt cron.json must be OMITTED from a keys-free backup, never packed raw (audit #04)
+    check('exclude-keys backup fails CLOSED on corrupt cron (no raw fallback)', !entries.some((e) => e.name === 'workbench/cron.json'), entries.map((e) => e.name).join(','));
+    // Cookie-class headers must not survive a keys-free backup (audit #03)
+    const modelsEntry = entries.find((e) => e.name === 'pi-agent/models.json');
+    const mdoc = JSON.parse(modelsEntry.data.toString('utf8'));
+    check('exclude-keys backup strips Cookie-class credential headers', !mdoc.providers.provB.headers?.cookie, JSON.stringify(mdoc.providers.provB.headers || {}));
+    // export paths must be unique per call (audit #06)
+    const rep2 = await bt.exportBackupZip(false);
+    check('consecutive exports never share one zip path', rep.path !== rep2.path, rep.path);
+  }
+
+  // 7b) import rejects routing.json whose state is a scalar (audit #07)
+  {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+    const cfgDir = path.join(root, '.pi-workbench');
+    fs.mkdirSync(cfgDir, { recursive: true });
+    const bt = createBackupTerminal({ CFG_DIR: cfgDir, HOME: root, CFG_FILE: path.join(root, 'config.json'), ROUTING_FILE: path.join(root, 'routing.json'), CRON_FILE: path.join(root, 'cron.json'), MODEL_META_FILE: path.join(root, 'mm.json'), PI_MODELS: path.join(root, 'models.json'), PI_SETTINGS: path.join(root, 'settings.json'), PI_SKILLS: path.join(root, 'skills.json'), CODEX_SESSIONS: path.join(root, 'codex'), CLAUDE_PROJECTS: path.join(root, 'claude'), VERSION: 'test', listSkills: () => ({ skills: [] }), createZip, readZip, spawn: () => ({ on: () => {}, stdin: { write: () => {} } }), fs, path });
+    let rejected = false;
+    try {
+      const zbad = createZip([{ name: 'workbench/routing.json', data: Buffer.from('{"state":1,"chains":[null]}') }]);
+      fs.writeFileSync(path.join(root, 'bad-routing.zip'), zbad);
+      await bt.importBackupZip(path.join(root, 'bad-routing.zip'));
+    } catch { rejected = true; }
+    check('import rejects routing.json with scalar state / null chains', rejected, 'accepted!');
+  }
 }
 
 // 8) session tree: a parent cycle must not hang the walk

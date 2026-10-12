@@ -198,8 +198,11 @@ function loadRouting() {
     delete r.routes;
   }
   r.providers = r.providers || {};
-  r.chains = Array.isArray(r.chains) ? r.chains : [];
-  r.state = r.state || {}; r.state.cooldowns = r.state.cooldowns || {};
+  r.chains = Array.isArray(r.chains) ? r.chains.filter((c) => Array.isArray(c)) : []; // [null] chains used to TypeError nextInChain mid-fallback
+  // `state: 1` (scalar) survives `||` — and assigning .cooldowns on a primitive THROWS
+  // in strict mode, taking every routing API down with it (audit #07)
+  if (!r.state || typeof r.state !== 'object' || Array.isArray(r.state)) r.state = {};
+  if (!r.state.cooldowns || typeof r.state.cooldowns !== 'object' || Array.isArray(r.state.cooldowns)) r.state.cooldowns = {};
   return r;
 }
 // atomic write: tmp+rename so a crash mid-write can never leave a torn config
@@ -207,9 +210,7 @@ function loadRouting() {
 let atomicSeq = 0;
 const atomicWrite = (file, data) => {
   const tmp = `${file}.tmp-${process.pid}-${++atomicSeq}`; // concurrent writes must not share one tmp path
-  fs.writeFileSync(tmp, data);
-  // restrictive mode goes on BEFORE the rename — workbench configs carry keys, and the
-  // old order (chmod after rename) left a 0644 window on every write
+  fs.writeFileSync(tmp, data, { mode: 0o600 }); // restrictive at CREATION — chmod-after-write left a 0644 window on the tmp file itself (audit #05)
   if (process.platform !== 'win32') { try { fs.chmodSync(tmp, 0o600); } catch { /* best effort */ } }
   fs.renameSync(tmp, file);
 };
@@ -227,6 +228,7 @@ const cron = createCron({
   get envOverrideFor() { return envOverrideFor; },
   get defaultModel() { return () => (loadConfig() || {}).defaultModel || null; }, // lazy: jobs WITHOUT an explicit model run the default — its provider needs the same rotation wiring
   get providerCooledOut() { return providerCooledOut; },
+  get providerDisabled() { return (prov) => !!(loadRouting().providers?.[prov]?.enabled === false); },
   // unattended jobs run with the panel's skills switches (per cwd) and default model —
   // the arrow body defers skillArgsFor/loadConfig past their definition points
   get cronPiArgs() {
@@ -285,10 +287,16 @@ async function fetchJsonCapped(url, opts = {}, maxBytes = 2e6) {
 const isGoogleApi = (p, url) => p?.api === 'google-generative-ai' || /generativelanguage\.googleapis\.com/i.test(String(url || ''));
 const isAnthropicApi = (p, url) => p?.api === 'anthropic-messages' || /api\.anthropic\.com/i.test(String(url || ''));
 const authHeadersFor = (p, url, key, extra = {}) => {
-  if (!key) return { ...extra };
-  if (isGoogleApi(p, url)) return { ...extra, 'x-goog-api-key': key };
-  if (isAnthropicApi(p, url)) return { ...extra, 'x-api-key': key, 'anthropic-version': '2023-06-01' };
-  return { ...extra, authorization: `Bearer ${key}` };
+  const out = { ...extra };
+  // stored provider headers describe the STORED endpoint — attach them only when the
+  // request actually targets it (probe/test against p.baseUrl), never a moved URL
+  if (p && typeof p.headers === 'object' && p.baseUrl && url === p.baseUrl) {
+    for (const [k, v] of Object.entries(p.headers)) { if (typeof v === 'string' && v && out[k] === undefined) out[k] = v; }
+  }
+  if (!key) return out;
+  if (isGoogleApi(p, url)) return { ...out, 'x-goog-api-key': key };
+  if (isAnthropicApi(p, url)) return { ...out, 'x-api-key': key, 'anthropic-version': '2023-06-01' };
+  return { ...out, authorization: `Bearer ${key}` };
 };
 const modelsUrlFor = (p, url) => (isGoogleApi(p, url) ? String(url).replace(/\/$/, '') + '/v1beta/models' : String(url).replace(/\/$/, '') + '/models');
 
@@ -419,7 +427,14 @@ function attachPiReader(tabId, proc) {
           : (typeof ev.data === 'string' && ev.data.includes('/') ? ev.data.split('/')[0] : '');
         const mid2 = m && m.id ? String(m.id)
           : (typeof ev.data === 'string' && ev.data.includes('/') ? ev.data.split('/')[1] : '');
-        if (prov2 && mid2) { tab.routeProvider = prov2; tab.routeKeyIdx = null; tab.model = `${prov2}/${mid2}`; }
+        if (prov2 && mid2) {
+          // key identity survives a SAME-provider model switch: the process still runs
+          // on the key it started with — nulling routeKeyIdx made a later failure cool
+          // key0 while key1 was the one actually serving (audit #11)
+          if (tab.routeProvider !== prov2) tab.routeKeyIdx = null;
+          tab.routeProvider = prov2;
+          tab.model = `${prov2}/${mid2}`;
+        }
       }
       if (ev.type === 'response' && ev.success && ev.data?.sessionFile && ev.data.sessionFile !== tab.sessionFile) {
         tab.sessionFile = ev.data.sessionFile;
@@ -434,11 +449,12 @@ function attachPiReader(tabId, proc) {
   proc.stderr.setEncoding('utf8');
   proc.stderr.on('data', (c) => { if (!isLive()) return; broadcast({ type: 'pi-stderr', tabId, data: String(c).slice(0, 2000) }); });
   const isCurrent = () => { const cur = tabs.get(tabId); return cur && cur.proc === proc; };
-  proc.on('error', () => { if (isCurrent()) { tabs.delete(tabId); broadcast({ type: 'pi-exit', tabId, code: -1 }); } });
+  proc.on('error', () => { if (isCurrent()) { const owner = tabs.get(tabId)?.owner ?? null; tabs.delete(tabId); sendTabGone(tabId, -1, owner); } });
   proc.on('exit', (code) => {
     if (!isCurrent()) return; // a newer spawn took over this tabId — its exit must not delete the fresh entry
+    const owner = tabs.get(tabId)?.owner ?? null;
     tabs.delete(tabId);
-    broadcast({ type: 'pi-exit', tabId, code });
+    sendTabGone(tabId, code, owner);
   });
 }
 function sendToPi(tabId, cmd) {
@@ -454,6 +470,17 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 })
 // fanning out — a reopened window must explicitly {type:'adopt'} to reattach, so a
 // foreign connection can never silently read or steer someone else's conversation.
 const ownerLive = (tab) => tab && tab.owner && tab.owner.readyState === 1; // ws.OPEN
+// pi-exit for a tab that is ALREADY deleted from the Map: the generic broadcast would
+// find no owner and fall through to EVERY client. Resolve recipients before the delete
+// and address them directly (audit #09 — exit frames leaked tab ids to all connections)
+function sendTabGone(tabId, code, formerOwner) {
+  const s = JSON.stringify({ type: 'pi-exit', tabId, code });
+  if (formerOwner && formerOwner.readyState === 1) { try { formerOwner.send(s); } catch { /* gone */ } }
+  for (const c of wss.clients) {
+    if (c === formerOwner || !c.adopted || !c.adopted.has(tabId)) continue;
+    try { c.send(s); } catch { /* gone */ }
+  }
+}
 function broadcast(obj) {
   const tabId = obj && obj.tabId;
   const tab = tabId ? tabs.get(tabId) : null;
@@ -483,6 +510,9 @@ wss.on('connection', (ws) => {
     // reach path.resolve or the tabs Map as an object
     const strField = (v) => v === undefined || v === null || typeof v === 'string';
     if (typeof msg.type !== 'string' || !strField(msg.tabId) || !strField(msg.cwd) || !strField(msg.model) || !strField(msg.thinking) || !strField(msg.name)) return;
+    // a tab-scoped frame with an empty/absent tabId would fall through broadcast's
+    // owner lookup into an ALL-CLIENT send — same-token connections stay isolated
+    if (['open', 'rpc', 'close', 'detach', 'adopt'].includes(msg.type) && (typeof msg.tabId !== 'string' || !msg.tabId)) return;
     console.log('[ws] frame:', msg.type, msg.tabId || '');
     if (msg.type === 'adopt') {
       const tab = tabs.get(msg.tabId);
@@ -524,15 +554,15 @@ wss.on('connection', (ws) => {
           return;
         }
       }
-      closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
       const prov = model ? splitModel(model)[0] : null;
       // enabled=false is a global kill switch, not just a fallback-chain filter — an
-      // explicit open on a disabled provider must be denied, or the toggle "works" in
-      // the routing page while new tasks keep using the provider (audit #08)
+      // explicit open on a disabled provider must be denied BEFORE the replaced tab is
+      // torn down, or a denied open still kills the running session (audit #10)
       if (prov && loadRouting().providers?.[prov]?.enabled === false) {
         ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: `供应商 ${prov} 已停用——在路由页重新启用后再启动` }));
         return;
       }
+      closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
       const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
@@ -544,6 +574,13 @@ wss.on('connection', (ws) => {
       const tab = tabs.get(msg.tabId);
       const mine = ownerLive(tab) ? tab.owner === ws : !!(tab && ws.adopted.has(msg.tabId));
       if (!mine) { try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId })); } catch { /* socket gone */ } return; }
+      // set_model is an execution entry too — a disabled provider must not be
+      // reachable by steering an existing tab's model (audit #10)
+      if (msg.data && typeof msg.data === 'object' && msg.data.type === 'set_model' && msg.data.provider
+        && loadRouting().providers?.[String(msg.data.provider)]?.enabled === false) {
+        try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId, reason: `供应商 ${msg.data.provider} 已停用` })); } catch { /* socket gone */ }
+        return;
+      }
       sendToPi(msg.tabId, msg.data);
     } else if (msg.type === 'close') {
       const tab = tabs.get(msg.tabId);
@@ -592,10 +629,11 @@ function closeTab(tabId, silent = false) {
   if (tab) {
     try { tab.proc.stdin.write(JSON.stringify({ type: 'abort' }) + '\n'); } catch { /* child may already be gone */ }
     killTree(tab.proc); // a bare kill() orphans the grandchildren (MCP servers, shell tools)
+    const owner = tab.owner ?? null; // capture BEFORE the delete — see sendTabGone
     tabs.delete(tabId);
     // whoever sees the tab disappear first owns the announcement: closeTab here,
     // or the exit handler on a crash. Exactly one pi-exit broadcast, never two, never zero.
-    if (!silent) broadcast({ type: 'pi-exit', tabId, code: 0 });
+    if (!silent) sendTabGone(tabId, 0, owner);
   }
 }
 
@@ -739,12 +777,16 @@ async function hSessionsDelete(req, res, u) {
 // are not secrets and stay readable — the UI shows the env name), and POST substitutes
 // the stored key back when the sentinel round-trips. The UI never pre-fills key inputs.
 const KEY_SENTINEL = '***';
+// credential-ish header names — deliberately broad: masking too much is round-trip
+// safe (POST restores the stored value), missing one leaks it into GET responses and
+// "no-keys" backups. Cookie / Ocp-Apim-Subscription-Key / X-Auth-Secret all live here
+const CRED_HEADER_RE = /auth|cookie|token|key|secret|credential|session|subscription/i;
 const maskApiKeys = (doc) => {
   for (const p of Object.values(doc.providers || {})) {
     if (p && typeof p.apiKey === 'string' && p.apiKey && !p.apiKey.startsWith('$')) p.apiKey = KEY_SENTINEL;
     const h = p && p.headers;
     if (h && typeof h === 'object') for (const k of Object.keys(h)) {
-      if (/authorization|x-api-key|api-key|token/i.test(k) && h[k]) h[k] = '***'; // credential headers are secrets too
+      if (CRED_HEADER_RE.test(k) && h[k]) h[k] = '***'; // credential headers are secrets too
     }
   }
   return doc;
@@ -759,19 +801,19 @@ async function hModels(req, res, u) {
       }
       const prev = readJson(PI_MODELS) || { providers: {} };
       for (const [name, p] of Object.entries(doc.providers)) {
-        // a changed baseUrl must not inherit the old endpoint's credential — the user
-        // editing the URL without re-entering a key is exactly the misdirect leak
+        // credential ownership follows the ENDPOINT — and an old provider with a key
+        // but NO baseUrl is an UNKNOWN trust domain, not the same one (audit #02)
         const prevP = prev.providers?.[name] || {};
-        const urlChanged = p && typeof p.baseUrl === 'string' && prevP.baseUrl && p.baseUrl !== prevP.baseUrl;
-        if (urlChanged) {
+        const sameKnownEndpoint = !!prevP.baseUrl && p && typeof p.baseUrl === 'string' && p.baseUrl === prevP.baseUrl;
+        if (p && typeof p.baseUrl === 'string' && !sameKnownEndpoint) {
           if (!p.apiKey || p.apiKey === KEY_SENTINEL) delete p.apiKey;
           if (p.headers && typeof p.headers === 'object') for (const k of Object.keys(p.headers)) {
-            if (/authorization|x-api-key|api-key|token/i.test(k) && (!p.headers[k] || p.headers[k] === KEY_SENTINEL)) delete p.headers[k];
+            if (CRED_HEADER_RE.test(k) && (!p.headers[k] || p.headers[k] === KEY_SENTINEL)) delete p.headers[k];
           }
         }
         if (p && p.apiKey === KEY_SENTINEL) {
-          const stored = prev.providers?.[name]?.apiKey;
-          if (stored) p.apiKey = stored; // sentinel round-trip: keep the real key
+          const stored = prevP.apiKey;
+          if (stored && sameKnownEndpoint) p.apiKey = stored; // sentinel round-trip: keep the real key
           else delete p.apiKey;
         }
         // credential HEADERS round-trip too: the GET masked them to '***' — a plain
@@ -780,7 +822,7 @@ async function hModels(req, res, u) {
           const storedH = prevP.headers && typeof prevP.headers === 'object' ? prevP.headers : {};
           for (const k of Object.keys(p.headers)) {
             if (p.headers[k] === KEY_SENTINEL) {
-              if (storedH[k]) p.headers[k] = storedH[k];
+              if (sameKnownEndpoint && storedH[k]) p.headers[k] = storedH[k];
               else delete p.headers[k];
             }
           }
@@ -1162,9 +1204,14 @@ async function hFilesRead(req, res, u) {
     if (!realContains(root, base)) return json(res, 400, { error: 'bad path' });
     let st; try { st = fs.statSync(base); } catch { return json(res, 400, { error: 'not found' }); }
     if (st.isDirectory()) return json(res, 400, { error: 'is a directory' });
+    // FIFOs (and other non-regular files) pass a !isDirectory check with size 0 —
+    // a plain "is it a regular file" gate keeps a writer-less pipe from blocking the
+    // single-threaded event loop inside readFileSync (audit #18)
+    if (!st.isFile()) return json(res, 400, { error: 'not a regular file' });
     if (st.size > 400000) return json(res, 200, { text: '', tooBig: true, size: st.size });
-    try { return json(res, 200, { text: fs.readFileSync(base, 'utf8').slice(0, 200000) }); }
-    catch { return json(res, 200, { text: '', tooBig: false, binary: true }); }
+    const text = fs.readFileSync(base, 'utf8');
+    if (text.length > 200000) return json(res, 200, { text: text.slice(0, 200000), truncated: true, size: st.size }); // a silent tail-drop hides the half of the log that matters (audit #23)
+    return json(res, 200, { text });
 }
 
 async function hKernel(req, res, u) {
@@ -1444,7 +1491,13 @@ const routes = [
 ];
 
 const server = http.createServer(async (req, res) => {
-  const u = new URL(req.url, 'http://x');
+  let u;
+  try {
+    u = new URL(req.url, 'http://x');
+  } catch {
+    try { res.writeHead(400); res.end('bad request'); } catch { /* socket gone */ }
+    return;
+  }
   try {
     if (!hostAllowed(req.headers.host || '')) { res.writeHead(403); return res.end('forbidden host'); }
     if (u.pathname.startsWith('/api/')) {
@@ -1463,20 +1516,27 @@ const server = http.createServer(async (req, res) => {
     }
     return hStatic(req, res, u);
   } catch (e) {
-    console.error(String(e.stack));
+    console.error(redactSecrets(String(e.stack)));
     try { json(res, 500, { error: e.message }); } catch { /* headers already sent */ }
   }
 });
 
 
 server.on('upgrade', (req, socket, head) => {
-  const { pathname, searchParams } = new URL(req.url, 'http://x');
-  // WS can't carry custom headers — token rides the ?t= query param instead;
-  // browsers always send Origin on WS, so cross-site upgrade attempts die here
-  const origin = req.headers.origin;
-  const originOk = !origin || origin === `http://127.0.0.1:${PORT}` || origin === `http://localhost:${PORT}`;
-  if (originOk && hostAllowed(req.headers.host || '') && pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-  else socket.destroy();
+  // `//[` as the upgrade target makes new URL() throw — an unguarded throw here hit
+  // the global uncaughtException handler, which reaps every tab and cron child and
+  // EXITS the service. One malformed request must never be that switch (audit #01)
+  try {
+    const { pathname, searchParams } = new URL(req.url, 'http://x');
+    // WS can't carry custom headers — token rides the ?t= query param instead;
+    // browsers always send Origin on WS, so cross-site upgrade attempts die here
+    const origin = req.headers.origin;
+    const originOk = !origin || origin === `http://127.0.0.1:${PORT}` || origin === `http://localhost:${PORT}`;
+    if (originOk && hostAllowed(req.headers.host || '') && pathname === '/ws' && searchParams.get('t') === API_TOKEN) wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    else socket.destroy();
+  } catch {
+    try { socket.destroy(); } catch { /* already gone */ }
+  }
 });
 
 // the shell's tree-kill is Windows-only; on POSIX a dying server must reap its own

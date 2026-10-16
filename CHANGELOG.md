@@ -2,6 +2,49 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.6 — 2026-10-17
+
+### Fixed (from the independent v1.3.5 audit — 50 items; process identity, credential scope, cross-process locking, UI truthfulness)
+
+**A shell service proves who it is (F01):**
+- **"Something answers on the port with HTTP/1.x 200" is no longer accepted as the workbench** — both desktop shells send a fresh random nonce to the new unauthenticated `GET /api/identify?n=<hex>` and require `x-piwb-proof = HMAC-SHA256(API_TOKEN, nonce)`. A port squatter that happened to answer 200 used to be handed the API token; it cannot forge the HMAC. Electron and Tauri implement the same challenge (hand-rolled HMAC over `sha2`, constant-time compare, 3 s read timeout).
+
+**Credentials stay inside their trust domain (F02–F04, F17–F19, F32, F38):**
+- **The keys-free backup states its scope and enforces it** — the manifest carries `scope`/`scopeNote`, `config.json`/`settings.json` are packed as redacted copies, `baseUrl` userinfo and credential-looking query values are scrubbed, and provider rows are shape-validated before a restore.
+- **The MCP sentinel stops following a changed command** — `***` env/args restore only when command + args are the SAME identity; the config file is written stage-then-swap after `mkdir`.
+- **Write-only key fields are masked everywhere they appear** (`scrubUrlCreds` / `scrubArgSecrets` / `maskApiKeys`), and a masked `models.json` round-trip restores the stored `baseUrl` instead of destroying it.
+- **Key cooldowns bind to the credential's env NAME, not its array position** (`provider#env:NAME`) — a reordered or relocated key used to cool a different slot. `keyEnvsFor` returns `[]` for a provider with a literal key (nothing to rotate), and `nextInChain` refuses a provider/model that is not in `models.json` instead of treating it as keyless.
+- Corrupt config copies land in `corrupt-backups/`, capped at 3, created 0600.
+- **Windows credential-file ACLs are no longer token-only (F08)** — the same per-user DACL (`icacls /inheritance:r /grant:r <user>:F`) is applied to every credential-bearing file the server or the backup module writes: `token`, `config.json`, `models.json`, `mcp.json`, `routing.json`, `cron.json`, `settings.json`, `model-meta.json`, exported zips, restore snapshots and restore temps. POSIX 0600 was already right; Windows ignored it.
+
+**Log redaction states its real scope (F05, F06):**
+- Cron run logs are created 0600 (F05).
+- `docs/TROUBLESHOOTING.md` no longer implies "logs are redacted": it lists exactly which patterns are replaced and which secrets (other key formats, Cookie values, URL query tokens, child-process stderr) are NOT, and tells the user to review before pasting (F06).
+
+**Cron has one writer and an honest window (F09–F16):**
+- **Cross-process single writer** — a per-job lock file (`openSync('wx')`, 0600, stale takeover after 30 min, bootReset sweep) stops two service instances from running the same job (F09/F10).
+- **The daily window is consumed only AFTER a successful spawn** — a spawn that throws, or a cooled key/model, defers the day instead of burning it (F11–F13).
+- settle records the provider/model/key identity it actually ran with, and `__keyIdx` is stripped from the child env (F14).
+- **Live jobs can be cancelled** — disabling or deleting a job terminates its child; `settleWatch` guarantees a settled run even when `close` never arrives; the log fd is 0600 (F15/F16/F05).
+
+**The UI stops showing optimistic fiction (F20–F22, F40–F45):**
+- WS open resolves the effective model (default + disabled-provider gate) and pins the routing key env; a cross-provider `set_model` restarts that tab's pi and reports `pi-restarted` (F20/F21).
+- **Auto-resend after a failure is suppressed for a turn that used tools** — side effects no longer repeat without the user confirming (F22).
+- The model chip reverts when `set_model` is not acknowledged (F41); the goal dialog answers a waiting modal before replacing it (F42); goals/theme/provider/skill/cron and the advanced JSON editor check the backend answer and roll back on failure (F43/F40); structured API errors render as errors, not as "empty file"/"no sessions"/"0 today" (F44); attachments are size-gated before they can exceed the 8 MiB WS frame (F45).
+
+**Readers and ledgers stop losing data (F23–F31, F34):**
+- Codex import keeps genuinely repeated turns (the dedupe that merged distinct rounds is gone); pi/Claude importers keep raw timestamps and tool-error semantics; every session parser null-guards its head reads (F23/F24/F29/F30).
+- **Session export follows the active branch by default** (`?all=1` for every branch), emits a visible error block instead of a silently truncated 200, and degrades to a text notice rather than an empty file (F25/F28).
+- The Claude ledger is last-wins per `message.id` (the first row used to win and drop the final usage); the session tree reports `windowed`; `readJsonl` returns `{items, truncated}` and usage/ledger expose `cappedFiles`/`truncatedFiles` (F26/F27/F31).
+- `saveModelMeta` writes tmp+rename (F34).
+
+**Development parity and docs (F49):**
+- README code fence fixed; README.en gains the prepare-runtime + embed-token flow it was missing; `prepare-runtime.mjs` copies `data/` so a development KB is not silently empty.
+
+**Contract tests:** 23 → 39 assertions in `scripts/verify-audit-fixes.mjs` (16 new wave-25 locks: env-name key identity, literal-key providers, chain validation, daily-window deferral, export branch/empty-transcript, error-shape rendering), and `scripts/ui-contract-probe.mjs` now checks the F01 challenge-response against the running app.
+
+Known and queued (with the audit's own caveats): **F07** release signing (awaiting a certificate account — hash manifests detect corruption, not a malicious release), **F33** crash-safe restore journal, **F35** Tauri child-service supervision, **F36** automatic runtime-ZIP recovery after a failed validation, **F46** sidebar rescan cost, **F47** lifetime resource budgets, **F48** keyboard/AT paths and modal semantics, **F50** installer-level acceptance and supply-chain depth (pinned action digests, signed Node checksums, SBOM layering, Windows/macOS installer smoke tests). Code signing is the one item that cannot be closed from this repository alone.
+
 ## 1.3.5 — 2026-10-12
 
 ### Fixed (from the independent v1.3.4 audit — 43 behavior items; failure paths and trust contracts)

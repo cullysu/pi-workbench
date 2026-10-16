@@ -44,6 +44,26 @@ try {
   const up = await waitPort(PORT, 5000);
   if (!up) throw new Error('port never opened');
 
+  // F01 (v1.3.5 audit): port identity is a challenge-response, NOT a token handout.
+  // The shells (electron-main.cjs / tauri main.rs) send a fresh nonce and no token;
+  // only a genuine server can answer HMAC-SHA256(token, nonce). A port squatter that
+  // merely returns 200 can no longer be trusted — and it never sees the token.
+  {
+    const { createHmac, randomBytes } = await import('node:crypto');
+    const nonce = randomBytes(16).toString('hex');
+    const r1 = await fetch(`${BASE}/api/identify?n=${nonce}`);
+    const proof = r1.headers.get('x-piwb-proof');
+    const want = createHmac('sha256', token).update(nonce).digest('hex');
+    const rBad = await fetch(`${BASE}/api/identify?n=not-a-hex-nonce`);
+    const rNone = await fetch(`${BASE}/api/identify`);
+    if (r1.status === 200 && proof === want && rBad.status === 400 && rNone.status === 400) {
+      console.log('port identity answers a challenge with an HMAC proof, no token on the wire OK');
+    } else {
+      failed = true;
+      console.error('FAIL: /api/identify — status=' + r1.status + ' proof=' + proof + ' want=' + want + ' bad-nonce=' + rBad.status + ' no-nonce=' + rNone.status);
+    }
+  }
+
   const events = [];
   const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?t=${token}`);
   await new Promise((resolve, reject) => {

@@ -34,7 +34,10 @@ try {
   fs.cpSync(path.join(stage, 'node_modules'), path.join(pkgBuild, 'node_modules'), { recursive: true });
 
   // the app code itself (dev mode runs the server straight from pkg-build/)
-  for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib', 'public', 'extensions']) {
+  // F49 (v1.3.5 audit): `data` was missing here while CI copies it (ci.yml:138/206/327),
+  // so a dev-built pkg-build ran with an EMPTY model knowledge base and silently
+  // disagreed with the shipped artifact. Mirror CI: server.mjs:758 reads data/models-kb.json.
+  for (const top of ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib', 'public', 'extensions', 'data']) {
     const src = path.join(root, top);
     const dest = path.join(pkgBuild, top);
     fs.rmSync(dest, { recursive: true, force: true });

@@ -77,17 +77,23 @@
 
 ```bash
 npm install
+npm run prepare-runtime   # 组装 pkg-build/（按提交进库的 runtime 锁文件 npm ci —— 与 CI 同一套依赖集）
 node server.mjs           # http://127.0.0.1:32123
+npm run electron          # 或: node_modules\.bin\electron .
 ```
 
 > 默认浏览器打开时**不带凭据**（这是有意的安全默认）：开发模式请用 `PIWB_EMBED_TOKEN=1 node server.mjs` 让首页内嵌本机 token，否则页面会因 403 空凭据而不可用（桌面壳和测试都显式带 token）。
-npm run prepare-runtime   # 组装 pkg-build/（按提交进库的 runtime 锁文件 npm ci —— 与 CI 同一套依赖集）
-npm run electron          # 或: node_modules\.bin\electron .
-```
 
 打包：`npx electron-builder --win nsis --x64`（产物在 `dist_electron/`，不随 git 提交）。可分发的安装包还需要捆绑 Node 的 `pkg-runtime.zip`（`scripts/make-runtime.mjs` 从 pkg-build/ 打包）——完整组装流程以 CI workflow 为准，它是组装逻辑的唯一事实源。
 
 测试：`npm test`（node:test，在隔离 HOME 里起真实服务端打全量 API）；CI：push 到 main 自动跑双平台测试并出 Windows 安装包 artifact。
+
+## 已知限制（诚实披露）
+
+- **界面语言**：`public/app.js` 的 `t()` 字典只覆盖导航与部分面板标题，正文、按钮、提示大量仍是内联中文；`index.html` 的 `lang` 固定 `zh-CN`。英文 UI 尚未收尾，`README.en.md` 面向英文开发者，不等于英文使用者可用。
+- **窗口尺寸**：桌面壳最小 1080×680；被强制缩窄时由 `public/style.css` 末尾的媒体查询降级（<980px 收窄侧栏，<760px 隐藏项目树，会话仍可用 Ctrl+K 搜索进入），并已尊重 `prefers-reduced-motion`。
+- **ARM 安装包**：Windows arm64 包内含 x64 Node 运行时，依赖系统模拟层运行；启动器尚未检测模拟层是否可用。
+- **备份范围**：“已抹除已知凭据”指抹除 apiKey/token、认证与 Cookie 类头、URL 内嵌账号密码、env 值与 models baseUrl —— 自定义字段里手写的密钥不会被识别，分享前请自行检查 zip。
 
 ## License
 

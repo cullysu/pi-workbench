@@ -179,18 +179,30 @@ function portOpen(port) {
   });
 }
 
-// possession of the per-launch token IS identity: only a server spawned with this
-// shell's PIWB_TOKEN answers /api/kernel with 200 — a foreign process (or an old
-// workbench instance from a previous launch) gets 403
+// F01 (v1.3.5 audit): identity is now a challenge-response, never a raw token on an
+// unverified connection. The shell sends a fresh random nonce with NO token; only the
+// genuine server (holding this shell's PIWB_TOKEN) can answer
+// x-piwb-proof = HMAC-SHA256(token, nonce). A port pre-occupier used to pass the old
+// `HTTP/1. + 200` check AND get handed the token.
 function isWorkbenchPort(port) {
   return new Promise((resolve) => {
+    const { createHmac, timingSafeEqual } = require('node:crypto');
+    const nonce = randomBytes(16).toString('hex');
+    const expect = createHmac('sha256', SHELL_TOKEN).update(nonce).digest('hex');
     const s = net.connect(port, '127.0.0.1');
     let buf = '';
     const done = (v) => { try { s.destroy(); } catch { /* already gone */ } resolve(v); };
+    const verify = () => {
+      if (!buf.startsWith('HTTP/1.') || !buf.includes(' 200 ')) return done(false);
+      const m = /x-piwb-proof:\s*([0-9a-f]{64})/i.exec(buf);
+      if (!m) return done(false);
+      try { done(timingSafeEqual(Buffer.from(m[1], 'hex'), Buffer.from(expect, 'hex'))); }
+      catch { done(false); }
+    };
     s.setTimeout(1500);
-    s.once('connect', () => s.write(`GET /api/kernel HTTP/1.0\r\nHost: 127.0.0.1:${port}\r\nx-api-token: ${SHELL_TOKEN}\r\n\r\n`)); // the server's Host check requires the port — a portless Host made our OWN server look like a squatter
-    s.on('data', (c) => { buf += String(c); if (buf.length > 4096) done(buf.startsWith('HTTP/1.') && buf.includes(' 200 ')); });
-    s.once('end', () => done(buf.startsWith('HTTP/1.') && buf.includes(' 200 ')));
+    s.once('connect', () => s.write(`GET /api/identify?n=${nonce} HTTP/1.0\r\nHost: 127.0.0.1:${port}\r\n\r\n`)); // the server's Host check requires the port — a portless Host made our OWN server look like a squatter
+    s.on('data', (c) => { buf += String(c); if (buf.length > 4096) verify(); });
+    s.once('end', () => verify());
     s.once('timeout', () => done(false));
     s.once('error', () => done(false));
   });

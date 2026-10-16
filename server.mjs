@@ -82,11 +82,23 @@ function loadConfig() {
     }
     return cfg;
   } catch (e) {
-    // a torn config must not vanish silently: preserve it for forensics, then fall back
+    // a torn config must not vanish silently: preserve it for forensics, then fall back.
+    // F38 (v1.3.5 audit): copies go to a dedicated dir, are private (0600 where the OS
+    // honors it) and are capped at the 3 most recent — repeated reads of a corrupt
+    // file used to grow unbounded .corrupt-* siblings next to the live config.
     try {
       if (fs.existsSync(CFG_FILE) && fs.statSync(CFG_FILE).size > 0) {
-        const keep = `${CFG_FILE}.corrupt-${Date.now()}`;
+        const keepDir = path.join(CFG_DIR, 'corrupt-backups');
+        fs.mkdirSync(keepDir, { recursive: true });
+        const keep = path.join(keepDir, `config.corrupt-${Date.now()}.json`);
         fs.copyFileSync(CFG_FILE, keep);
+        try { fs.chmodSync(keep, 0o600); } catch { /* Windows keeps inherited ACL */ }
+        try {
+          const olds = fs.readdirSync(keepDir).filter((f) => f.startsWith('config.corrupt-')).sort();
+          for (const o of olds.slice(0, Math.max(0, olds.length - 3))) {
+            try { fs.unlinkSync(path.join(keepDir, o)); } catch { /* best-effort cap */ }
+          }
+        } catch { /* best-effort cap */ }
         logErr(`config.json unreadable (${(e && e.message) || e}) — preserved as ${keep}`);
       }
     } catch { /* forensics are best-effort */ }
@@ -205,6 +217,16 @@ function loadRouting() {
   if (!r.state.cooldowns || typeof r.state.cooldowns !== 'object' || Array.isArray(r.state.cooldowns)) r.state.cooldowns = {};
   return r;
 }
+// F08 (v1.3.5 audit): Windows ignores POSIX modes, so the 0600 above is a no-op there
+// and every credential-bearing file kept the inherited (often broad) profile ACL — the
+// token file was the ONLY one explicitly restricted. Same DACL for every file that
+// actually carries secrets, applied to the final name after the rename.
+const ACL_FILE_RE = /^(token|routing\.json|cron\.json|config\.json|models\.json|mcp\.json|settings\.json|model-meta\.json)$/i;
+function restrictAcl(file) {
+  if (process.platform !== 'win32' || !process.env.USERNAME) return;
+  if (!ACL_FILE_RE.test(path.basename(file))) return;
+  try { spawnSync('icacls', [file, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:F`], { windowsHide: true, stdio: 'ignore' }); } catch { /* best effort */ }
+}
 // atomic write: tmp+rename so a crash mid-write can never leave a torn config
 // (Windows rename replaces existing files — no unlink dance needed)
 let atomicSeq = 0;
@@ -213,6 +235,7 @@ const atomicWrite = (file, data) => {
   fs.writeFileSync(tmp, data, { mode: 0o600 }); // restrictive at CREATION — chmod-after-write left a 0644 window on the tmp file itself (audit #05)
   if (process.platform !== 'win32') { try { fs.chmodSync(tmp, 0o600); } catch { /* best effort */ } }
   fs.renameSync(tmp, file);
+  restrictAcl(file);
 };
 const saveJson = (file, obj) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -229,6 +252,11 @@ const cron = createCron({
   get defaultModel() { return () => (loadConfig() || {}).defaultModel || null; }, // lazy: jobs WITHOUT an explicit model run the default — its provider needs the same rotation wiring
   get providerCooledOut() { return providerCooledOut; },
   get providerDisabled() { return (prov) => !!(loadRouting().providers?.[prov]?.enabled === false); },
+  // F13 (v1.3.5 audit): the exact MODEL's cooldown gates unattended runs too — an
+  // interactive 429 must not keep getting re-hit by cron
+  get modelCooled() { return modelCooled; },
+  // F14: the env NAME of the key that actually ran is recorded on the job for attribution
+  get keyEnvAt() { return keyEnvAt; },
   // unattended jobs run with the panel's skills switches (per cwd) and default model —
   // the arrow body defers skillArgsFor/loadConfig past their definition points
   get cronPiArgs() {
@@ -245,7 +273,7 @@ function saveRouting(r) {
   return r;
 }
 const failover = createFailover({ SECRET_ENV, readJson, loadRouting, saveRouting, PI_MODELS });
-const { splitModel, keyEnvsFor, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain, sameModelNewKey, providerCooledOut } = failover;
+const { splitModel, keyEnvsFor, keyEnvAt, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain, sameModelNewKey, providerCooledOut } = failover;
 
 // provider URLs are user-supplied: only http(s) may leave the box (no file:, ftp:, data:...)
 // Local addresses stay allowed on purpose — ollama/LM Studio on 127.0.0.1 are first-class providers.
@@ -428,12 +456,19 @@ function attachPiReader(tabId, proc) {
         const mid2 = m && m.id ? String(m.id)
           : (typeof ev.data === 'string' && ev.data.includes('/') ? ev.data.split('/')[1] : '');
         if (prov2 && mid2) {
+          const newModel = `${prov2}/${mid2}`;
           // key identity survives a SAME-provider model switch: the process still runs
           // on the key it started with — nulling routeKeyIdx made a later failure cool
           // key0 while key1 was the one actually serving (audit #11)
-          if (tab.routeProvider !== prov2) tab.routeKeyIdx = null;
+          const switchedProvider = tab.routeProvider !== prov2;
+          if (switchedProvider) tab.routeKeyIdx = null;
           tab.routeProvider = prov2;
-          tab.model = `${prov2}/${mid2}`;
+          tab.model = newModel;
+          // F21 (v1.3.5 audit): a CROSS-provider switch cannot be served by the old
+          // process — its env still carries the previous provider's key. Restart the
+          // tab's pi child on the same session with the new model and the new
+          // provider's rotation env; the session file keeps the history.
+          if (switchedProvider) restartPiForTab(tabId, newModel);
         }
       }
       if (ev.type === 'response' && ev.success && ev.data?.sessionFile && ev.data.sessionFile !== tab.sessionFile) {
@@ -461,6 +496,32 @@ function sendToPi(tabId, cmd) {
   const tab = tabs.get(tabId);
   if (!tab) return false;
   try { tab.proc.stdin.write(JSON.stringify(cmd) + '\n'); return true; } catch { return false; }
+}
+// F21: replace a tab's pi child after a cross-provider model switch — same session
+// path and project, new model + new provider's key env. Silent close (the switch is
+// not an error) and the SAME owner keeps the tab; the reader reattaches to the new
+// child. Anything that fails here leaves the tab gone via the normal exit path.
+function restartPiForTab(tabId, model) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+  const owner = tab.owner ?? null;
+  const cwd = tab.cwd;
+  const sessionPath = tab.sessionPath;
+  const thinking = tab.thinking;
+  const name = tab.name;
+  closeTab(tabId, true);
+  const prov = splitModel(model)[0] || null;
+  if (prov && loadRouting().providers?.[prov]?.enabled === false) {
+    if (owner && owner.readyState === 1) { try { owner.send(JSON.stringify({ type: 'open-denied', tabId, reason: `供应商 ${prov} 已停用` })); } catch { /* gone */ } }
+    return;
+  }
+  const ov = prov ? envOverrideFor(prov) : null;
+  const { __keyIdx, ...envExtra } = ov || {};
+  const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
+  tabs.set(tabId, { proc, cwd, sessionPath, model, thinking: thinking || null, name: name || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, routeKeyEnv: ov ? keyEnvAt(prov, __keyIdx) : null, owner, orphanSince: null });
+  if (owner) { try { owner.adopted.add(tabId); } catch { /* socket gone */ } }
+  attachPiReader(tabId, proc);
+  if (owner && owner.readyState === 1) { try { owner.send(JSON.stringify({ type: 'pi-restarted', tabId, model })); } catch { /* gone */ } }
 }
 
 // ---------- ws ----------
@@ -554,7 +615,13 @@ wss.on('connection', (ws) => {
           return;
         }
       }
-      const prov = model ? splitModel(model)[0] : null;
+      // F20 (v1.3.5 audit): an open WITHOUT an explicit model used to bypass every
+      // default-provider gate entirely (prov stayed null → no disabled check, no key
+      // env) and let pi self-select. The configured default model — when one exists —
+      // is now the effective open model, so the same gates and key identity apply.
+      // No default configured → the ambient/keyless spawn is left as-is on purpose.
+      const effOpenModel = model || (loadConfig() || {}).defaultModel || null;
+      const prov = effOpenModel ? splitModel(effOpenModel)[0] : null;
       // enabled=false is a global kill switch, not just a fallback-chain filter — an
       // explicit open on a disabled provider must be denied BEFORE the replaced tab is
       // torn down, or a denied open still kills the running session (audit #10)
@@ -565,8 +632,8 @@ wss.on('connection', (ws) => {
       closeTab(tabId, true); // replacing a tab stays quiet — the new spawn owns the tabId now
       const ov = prov ? envOverrideFor(prov) : null;
       const { __keyIdx, ...envExtra } = ov || {};
-      const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
-      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: model || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, owner: ws, orphanSince: null });
+      const proc = spawnPi({ cwd, sessionPath, model: effOpenModel, thinking, name, envExtra });
+      tabs.set(tabId, { proc, cwd, sessionPath: sessionPath || null, model: effOpenModel || null, thinking: thinking || null, name: name || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, routeKeyEnv: ov ? keyEnvAt(prov, __keyIdx) : null, owner: ws, orphanSince: null });
       ws.adopted.add(tabId);
       attachPiReader(tabId, proc);
       ws.send(JSON.stringify({ type: 'opened', tabId }));
@@ -781,9 +848,33 @@ const KEY_SENTINEL = '***';
 // safe (POST restores the stored value), missing one leaks it into GET responses and
 // "no-keys" backups. Cookie / Ocp-Apim-Subscription-Key / X-Auth-Secret all live here
 const CRED_HEADER_RE = /auth|cookie|token|key|secret|credential|session|subscription/i;
+// F04 (v1.3.5 audit): a URL can carry secrets OUTSIDE the key field — userinfo
+// (https://user:pass@host) and credential-looking query values (?key=sk-...). GET
+// responses must not render those either; masking is round-trip safe (POST restores
+// via the same-endpoint sentinel logic — and a masked URL no longer matches the old
+// endpoint, which fail-closes the key restore: the safe direction).
+const scrubUrlCreds = (raw) => {
+  if (typeof raw !== 'string' || !raw) return raw;
+  let s2 = raw;
+  try {
+    const u = new URL(s2);
+    if (u.username || u.password) { u.username = ''; u.password = ''; s2 = u.toString(); }
+    for (const [k, v] of u.searchParams) {
+      if (v && CRED_HEADER_RE.test(k)) u.searchParams.set(k, '***');
+    }
+    s2 = u.toString();
+  } catch { /* not a parseable URL — leave as-is */ }
+  return s2;
+};
+// MCP args can inline credentials too: --token xxx / --api-key=xxx / --password xxx
+const scrubArgSecrets = (args) => args.map((a) => {
+  if (typeof a !== 'string') return a;
+  return a.replace(/(--(?:api[-_]?key|token|password|secret|credential)(?:[= ]))(\S+)/gi, '$1***');
+});
 const maskApiKeys = (doc) => {
   for (const p of Object.values(doc.providers || {})) {
     if (p && typeof p.apiKey === 'string' && p.apiKey && !p.apiKey.startsWith('$')) p.apiKey = KEY_SENTINEL;
+    if (p && typeof p.baseUrl === 'string') p.baseUrl = scrubUrlCreds(p.baseUrl);
     const h = p && p.headers;
     if (h && typeof h === 'object') for (const k of Object.keys(h)) {
       if (CRED_HEADER_RE.test(k) && h[k]) h[k] = '***'; // credential headers are secrets too
@@ -802,9 +893,14 @@ async function hModels(req, res, u) {
       const prev = readJson(PI_MODELS) || { providers: {} };
       for (const [name, p] of Object.entries(doc.providers)) {
         // credential ownership follows the ENDPOINT — and an old provider with a key
-        // but NO baseUrl is an UNKNOWN trust domain, not the same one (audit #02)
+        // but NO baseUrl is an UNKNOWN trust domain, not the same one (audit #02).
+        // F04: GET answers with a scrubbed URL, so a plain UI save round-trips the
+        // scrubbed form — recognize it and put the stored raw URL back (sentinel
+        // style); anything else is a genuinely NEW endpoint and fails the restore closed.
         const prevP = prev.providers?.[name] || {};
-        const sameKnownEndpoint = !!prevP.baseUrl && p && typeof p.baseUrl === 'string' && p.baseUrl === prevP.baseUrl;
+        const prevScrub = typeof prevP.baseUrl === 'string' ? scrubUrlCreds(prevP.baseUrl) : prevP.baseUrl;
+        const sameKnownEndpoint = !!prevP.baseUrl && p && typeof p.baseUrl === 'string' && (p.baseUrl === prevP.baseUrl || p.baseUrl === prevScrub);
+        if (p && typeof p.baseUrl === 'string' && p.baseUrl === prevScrub && prevScrub !== prevP.baseUrl) p.baseUrl = prevP.baseUrl;
         if (p && typeof p.baseUrl === 'string' && !sameKnownEndpoint) {
           if (!p.apiKey || p.apiKey === KEY_SENTINEL) delete p.apiKey;
           if (p.headers && typeof p.headers === 'object') for (const k of Object.keys(p.headers)) {
@@ -992,7 +1088,10 @@ async function hRoutingFail(req, res, u) {
     // auth-ish failures rotate the key; rate limits cool longer (the quota window is
     // usually minutes); everything else takes the standard omp-style chain step
     if (/401|403|unauthorized|invalid[ _-]*(api[ _-]*)?key|forbidden/i.test(msg)) {
-      coolKey(prov, tab && tab.routeKeyIdx != null ? tab.routeKeyIdx : 0, msg, 300);
+      // F19 (v1.3.5 audit): prefer the env NAME captured at spawn — an index into a
+      // pool reordered since the tab started would cool a different credential
+      const keyId = tab && tab.routeKeyEnv ? tab.routeKeyEnv : (tab && tab.routeKeyIdx != null ? tab.routeKeyIdx : 0);
+      coolKey(prov, keyId, msg, 300);
     } else if (/\b429\b|rate[ _-]?limit|too many requests|quota/i.test(msg)) {
       coolModel(model, msg, 300);
     } else {
@@ -1008,7 +1107,7 @@ async function hRoutingFail(req, res, u) {
 async function hRoutingOk(req, res, u) {
     const { model, tabId } = await readBody(req);
     const tab = tabId ? tabs.get(tabId) : null;
-    if (model) clearCool(model, tab && tab.routeKeyIdx != null ? tab.routeKeyIdx : undefined);
+    if (model) clearCool(model, tab ? (tab.routeKeyEnv ?? (tab.routeKeyIdx != null ? tab.routeKeyIdx : undefined)) : undefined);
     return json(res, 200, { ok: true });
 }
 
@@ -1049,6 +1148,11 @@ async function hCron(req, res, u) {
         if (typeof j.enabled !== 'boolean') j.enabled = true;
       }
       saveJson(CRON_FILE, { jobs });
+      // F15 (v1.3.5 audit): a job the user just DISABLED must stop NOW — its live run
+      // is killed (settle records the outcome); nothing to do for jobs not running.
+      for (const j of jobs) {
+        if (j.enabled === false && cron.cancelJob(j.id)) logErr(`cron job ${j.id} cancelled: disabled while running`);
+      }
     }
     // bootReset deliberately does NOT run here: it clears running flags, and a
     // panel refresh during a live run would clear the lock and double-spawn the job
@@ -1059,6 +1163,9 @@ async function hCron(req, res, u) {
 async function hCronDelete(req, res, u) {
     const { id } = await readBody(req);
     if (!isJobId(id)) return json(res, 400, { error: 'bad job id' });
+    // F15: deleting a job also stops its current run — a deleted job must not keep
+    // executing for up to 15 more minutes
+    if (cron.cancelJob(id)) logErr(`cron job ${id} cancelled: deleted while running`);
     const d = readJson(CRON_FILE) || { jobs: [] };
     d.jobs = d.jobs.filter((j) => j.id !== id);
     saveJson(CRON_FILE, d);
@@ -1118,21 +1225,64 @@ async function hCronLastlog(req, res, u) {
 async function hSessionExport(req, res, u) {
     const root = path.resolve(PI_SESSIONS);
     const abs = path.resolve(u.searchParams.get('path') || '');
+    const allBranches = u.searchParams.get('all') === '1';
     if (!realContains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
     let st0; try { st0 = fs.statSync(abs); } catch { res.writeHead(404); return res.end('not found'); }
     if (st0.size > 100e6) { res.writeHead(413); return res.end('session too large to export (> 100MB)'); }
+    const onGone = () => {}; res.on('error', onGone); // client vanished mid-export
+    // F28 (v1.3.5 audit): the default export now follows the session's ACTIVE branch
+    // only — regenerating a reply used to weave abandoned branches into the exported
+    // transcript and present them as the conversation. ?all=1 keeps the whole file,
+    // labelled. Parent-walk failures degrade to whole-file (never a broken export).
+    let activeIds = null; let otherBranch = 0;
+    if (!allBranches) {
+      try {
+        const parent = new Map(); const ids = new Set(); let last = null;
+        let sawParent = false; let idless = false;
+        const rl1 = createInterface({ input: fs.createReadStream(abs, { encoding: 'utf8' }), crlfDelay: Infinity });
+        for await (const line of rl1) {
+          if (!line) continue;
+          let j; try { j = JSON.parse(line); } catch { continue; }
+          if (!j || j.type !== 'message' || !j.message) continue;
+          const m = j.message;
+          if (m.role !== 'user' && m.role !== 'assistant') continue;
+          // F28b (api.test.mjs:306 caught this): a session row with NO id carries no branch
+          // information at all. The first version then produced activeIds = EMPTY SET, which
+          // is truthy, so the pruner at the write loop dropped EVERY message and the export
+          // came out header-only. Without provable branch structure we must export the whole
+          // file — pruning is only allowed when we can actually name the branch.
+          if (!j.id) { idless = true; continue; }
+          if (j.parentId) sawParent = true;
+          if (!ids.has(j.id)) { ids.add(j.id); if (j.parentId) parent.set(j.id, j.parentId); last = j.id; }
+        }
+        rl1.close();
+        if (idless || !sawParent || !last) {
+          activeIds = null; otherBranch = 0; // degrade to whole-file (never a broken export)
+        } else {
+          const chain = new Set(); const guard = new Set();
+          let cur = last;
+          while (cur && !guard.has(cur)) { guard.add(cur); chain.add(cur); cur = parent.get(cur) || null; }
+          activeIds = chain; otherBranch = Math.max(0, ids.size - chain.size);
+        }
+      } catch { activeIds = null; otherBranch = 0; }
+    }
     // streamed line-by-line: a big session never sits whole in memory and the
     // event loop keeps serving while the file is walked
     res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
     const NL = '\n';
     const write = (s2) => new Promise((r2) => { if (res.write(s2)) r2(); else res.once('drain', r2); });
     const rl = createInterface({ input: fs.createReadStream(abs, { encoding: 'utf8' }), crlfDelay: Infinity });
-    res.on('error', () => rl.close()); // client vanished mid-export
     try {
+      await write('# pi-workbench 会话导出' + NL + NL + (allBranches
+        ? '> 范围：全部分支（含被放弃的重新生成）' + NL + NL
+        : otherBranch > 0
+          ? `> 范围：当前对话分支（另有 ${otherBranch} 条其他分支消息未包含；导出全部请加 ?all=1）` + NL + NL
+          : '> 范围：当前对话分支' + NL + NL));
       for await (const line of rl) {
         if (!line) continue;
         let j; try { j = JSON.parse(line); } catch { continue; }
-        if (j.type !== 'message' || !j.message) continue;
+        if (!j || j.type !== 'message' || !j.message) continue; // F24: bare `null` lines must not throw
+        if (activeIds && !(j.id && activeIds.has(j.id))) continue;
         const m = j.message;
         if (m.role !== 'user' && m.role !== 'assistant') continue;
         const c = m.content;
@@ -1147,7 +1297,11 @@ async function hSessionExport(req, res, u) {
         if (!text.trim()) continue;
         await write((m.role === 'user' ? '## User' + NL + NL : '## Assistant' + NL + NL) + text.trim() + NL + NL + '---' + NL);
       }
-    } catch { /* read or client error: best-effort export */ }
+    } catch (e) {
+      // F25 (v1.3.5 audit): a 200 is already on the wire — a mid-stream failure must
+      // leave a VISIBLE marker instead of silently truncating the transcript
+      try { await write(NL + '> [导出中断：' + String((e && e.message) || e).slice(0, 200) + ']' + NL); } catch { /* client gone */ }
+    }
     return res.end();
 }
 
@@ -1341,20 +1495,39 @@ async function hMcpConfig(req, res, u) {
         if (!s || typeof s !== 'object' || !s.command) return json(res, 400, { error: `server "${name}" needs a command` });
       }
       const prev = readJson(MCP_FILE) || { mcpServers: {} };
-      for (const s of Object.values(servers)) {
-        if (!s || typeof s.env !== 'object' || s.env === null) continue;
+      const prevByName = prev.mcpServers && typeof prev.mcpServers === 'object' ? prev.mcpServers : {};
+      for (const [name, s] of Object.entries(servers)) {
+        if (!s || typeof s !== 'object') continue;
+        const prevS = prevByName[name];
+        // F04: GET masks credential-ish args, so a plain save round-trips the masked
+        // form — put the stored raw args back when nothing else changed, BEFORE the
+        // identity check below (masked args would otherwise read as a changed command)
+        if (prevS && typeof prevS === 'object' && Array.isArray(s.args) && Array.isArray(prevS.args)
+          && JSON.stringify(s.args) === JSON.stringify(scrubArgSecrets(prevS.args))) s.args = prevS.args;
+        // F03 (v1.3.5 audit): the sentinel may only be resolved against the stored
+        // server with the SAME identity (command+args). A renamed/re-pointed server
+        // must NOT inherit the previous program's secrets — that used to leak one
+        // server's env into a completely different command.
+        const sameIdentity = !!prevS && typeof prevS === 'object'
+          && prevS.command === s.command
+          && JSON.stringify(Array.isArray(prevS.args) ? prevS.args : []) === JSON.stringify(Array.isArray(s.args) ? s.args : []);
+        if (typeof s.env !== 'object' || s.env === null) continue;
         for (const k of Object.keys(s.env)) {
           if (s.env[k] === '***') {
-            const stored = prev.mcpServers?.[Object.keys(servers).find((n2) => servers[n2] === s)]?.env?.[k];
+            const stored = sameIdentity ? prevS.env?.[k] : undefined;
             if (stored !== undefined) s.env[k] = stored; else delete s.env[k];
           }
         }
       }
+      fs.mkdirSync(path.dirname(MCP_FILE), { recursive: true }); // F37: config save must not depend on install having run first
       atomicWrite(MCP_FILE, JSON.stringify({ mcpServers: servers }, null, 2)); // MCP env carries secrets
     }
     const doc = readJson(MCP_FILE) || { mcpServers: {} };
     for (const srv of Object.values(doc.mcpServers || {})) {
-      if (srv && typeof srv.env === 'object' && srv.env !== null) for (const k of Object.keys(srv.env)) srv.env[k] = '***'; // env values are secrets, like model keys
+      if (!srv || typeof srv !== 'object') continue; // F24: a bare `null` row must not throw
+      if (typeof srv.env === 'object' && srv.env !== null) for (const k of Object.keys(srv.env)) srv.env[k] = '***'; // env values are secrets, like model keys
+      // F04: args can inline credentials (`--token xxx`) — mask just the value
+      if (Array.isArray(srv.args)) srv.args = scrubArgSecrets(srv.args);
     }
     return json(res, 200, doc);
 }
@@ -1374,8 +1547,14 @@ async function hMcpInstall(req, res, u) {
     // The packaged runtime bundles it — copy across and skip npm entirely on clean machines.
     const bundledTypebox = path.join(__dirname, 'node_modules', 'typebox');
     if (fs.existsSync(bundledTypebox)) {
-      fs.rmSync(path.join(destDir, 'node_modules', 'typebox'), { recursive: true, force: true });
-      fs.cpSync(bundledTypebox, path.join(destDir, 'node_modules', 'typebox'), { recursive: true });
+      // F37 (v1.3.5 audit): rm-then-cp left the bridge with NO typebox if the copy
+      // failed mid-install (and broke a live extension). Stage first, swap after.
+      const destBox = path.join(destDir, 'node_modules', 'typebox');
+      const tmpBox = destBox + '.new';
+      fs.rmSync(tmpBox, { recursive: true, force: true });
+      fs.cpSync(bundledTypebox, tmpBox, { recursive: true });
+      fs.rmSync(destBox, { recursive: true, force: true });
+      fs.renameSync(tmpBox, destBox);
     }
     const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
     if (!hasDep) {
@@ -1506,6 +1685,19 @@ const server = http.createServer(async (req, res) => {
       // spoof Origin but they can equally just read the token, so this is browser-only armor
       const origin = req.headers.origin;
       if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) { res.writeHead(403); return res.end('forbidden origin'); }
+      // F01 (v1.3.5 audit): identity challenge for the desktop shells. A port
+      // pre-occupier used to pass the shells' `HTTP/1. + 200` probe AND receive the
+      // raw API token. Now the shells send a fresh random nonce and NO token; only a
+      // genuine server can answer HMAC-SHA256(token, nonce). The endpoint is an HMAC
+      // oracle for chosen nonces only — useless without the token, and the shells
+      // never send theirs before the proof verifies.
+      if (u.pathname === '/api/identify') {
+        const nonce = String(u.searchParams.get('n') || '');
+        if (!/^[0-9a-f]{16,64}$/.test(nonce)) { res.writeHead(400); return res.end('bad nonce'); }
+        const proof = crypto.createHmac('sha256', API_TOKEN).update(nonce).digest('hex');
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'x-piwb-proof': proof, 'cache-control': 'no-store' });
+        return res.end('pi-workbench');
+      }
       if (req.headers['x-api-token'] !== API_TOKEN) { res.writeHead(403); return res.end('forbidden'); }
       for (const [method, path, handler] of routes) {
         if (method && method !== '*' && method !== req.method) continue; // null/regex rows match any method
@@ -1571,11 +1763,8 @@ if (isMain) server.listen(PORT, '127.0.0.1', () => {
   // per-boot token file (0600 via atomicWrite on POSIX) for the desktop shells —
   // written only when the server owns the token generation
   if (!process.env.PIWB_TOKEN) {
+    // restrictAcl inside atomicWrite already tightens this file's DACL on Windows (F08)
     try { saveJson(TOKEN_FILE, { token: API_TOKEN, at: new Date().toISOString() }); } catch { /* shells fall back to embedded mode */ }
-    if (process.platform === 'win32' && process.env.USERNAME) {
-      // POSIX chmods this file 0600; Windows would inherit a broad ACL — restrict to the current user
-      try { spawnSync('icacls', [TOKEN_FILE, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:F`], { windowsHide: true, stdio: 'ignore' }); } catch { /* best effort */ }
-    }
   }
   // warm the codex list cache in the background so the first UI click is instant
   setTimeout(() => {

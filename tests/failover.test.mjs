@@ -134,7 +134,11 @@ test('clearCool with keyIdx clears only the successful key — a 401-rejected ke
   failover.coolModel('a/m1', 'x', 60);
   failover.clearCool('a/m1', 1); // key B (never cooled) answered successfully
   assert.equal(failover.pickKey('a')?.idx, 1, 'key B is the usable key');
-  assert.ok(failover.loadRouting().state.cooldowns['a#key0'], 'the 401 key A stays cooled under the new scoped clear');
+  // F19 (v1.3.5 audit): cooldowns are keyed by the env NAME, not by pool position —
+  // a mid-run reorder of keyEnvs used to move an index onto a different credential.
+  assert.ok(failover.loadRouting().state.cooldowns['a#env:KEY_A'], 'the 401 key A stays cooled under the new scoped clear');
+  assert.ok(!failover.loadRouting().state.cooldowns['a#env:KEY_B'], 'the successful key B was not cooled and stays clear');
+  assert.ok(!failover.loadRouting().state.cooldowns['a#key0'], 'no legacy index-keyed entry is written any more');
   assert.equal(failover.modelCooled('a/m1'), null);
 });
 

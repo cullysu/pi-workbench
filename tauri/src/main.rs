@@ -111,20 +111,32 @@ fn which_node_from_path() -> Option<PathBuf> {
     None
 }
 
-/// The port alone is not identity: a foreign process on port() must not get its page
-/// loaded into the shell. The workbench's unauthenticated index embeds a per-boot
-/// token bootstrap — requiring that marker is a cheap handshake.
+/// F01 (v1.3.5 audit): identity is a challenge-response, never a raw token on an
+/// unverified connection. The shell sends a fresh random nonce with NO token; only
+/// the genuine server (holding this shell's token) can answer
+/// x-piwb-proof = HMAC-SHA256(token, nonce). A port pre-occupier used to pass the
+/// old `HTTP/1. + 200` check AND get handed the token.
 fn workbench_serving(port: u16, token: &str) -> bool {
     use std::io::{Read, Write};
+    // 16 random bytes hex — nonce freshness is what makes a captured proof useless
+    let nonce = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .to_le_bytes());
+        h.update(std::process::id().to_le_bytes());
+        let d = h.finalize();
+        d.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let expect = hmac_sha256_hex(token.as_bytes(), nonce.as_bytes());
     let mut stream = match TcpStream::connect(("127.0.0.1", port)) {
         Ok(s) => s,
         Err(_) => return false,
     };
-    // possession of the per-boot token IS identity: only a server spawned with this
-    // boot's token answers /api/kernel with 200 — a foreign process gets 403
-    let req = format!(
-        "GET /api/kernel HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nx-api-token: {token}\r\nConnection: close\r\n\r\n"
-    );
+    let req = format!("GET /api/identify?n={nonce} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
@@ -134,7 +146,65 @@ fn workbench_serving(port: u16, token: &str) -> bool {
     let mut buf = Vec::new();
     let _ = stream.take(65536).read_to_end(&mut buf);
     let head = String::from_utf8_lossy(&buf);
-    head.starts_with("HTTP/1.") && head.contains(" 200 ")
+    if !(head.starts_with("HTTP/1.") && head.contains(" 200 ")) {
+        return false;
+    }
+    match proof_from_headers(&head) {
+        Some(p) => constant_time_eq(p.as_bytes(), expect.as_bytes()),
+        None => false,
+    }
+}
+
+/// HMAC-SHA256 (RFC 2104) over the existing sha2 dependency — no new crates.
+fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        let mut h = Sha256::new();
+        h.update(key);
+        k[..32].copy_from_slice(&h.finalize());
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= k[i];
+        opad[i] ^= k[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let ih = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(ih);
+    outer.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn proof_from_headers(head: &str) -> Option<String> {
+    for line in head.lines() {
+        if let Some(v) = line.strip_prefix("x-piwb-proof:") {
+            let v = v.trim();
+            if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Some(v.to_ascii_lowercase());
+            }
+            return None;
+        }
+    }
+    None
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// The server persists its per-boot token to ~/.pi-workbench/token (0600) for the

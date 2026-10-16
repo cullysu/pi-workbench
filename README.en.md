@@ -68,12 +68,16 @@ Provider keys support `$ENV_NAME` references. The repo contains no keys, endpoin
 
 ```bash
 npm install
-npm start              # server on http://127.0.0.1:32123
-npm test               # API test suite (isolated HOME)
-npm run electron       # Electron shell
-npx tauri build        # Tauri NSIS installer (from tauri/, ~10MB)
-npm run dist           # Electron NSIS installer (artifact in dist_electron/)
+npm run prepare-runtime   # assembles pkg-build/ (npm ci against the committed runtime lockfiles — the same dependency set CI uses)
+PIWB_EMBED_TOKEN=1 npm start   # dev server on http://127.0.0.1:32123; WITHOUT this flag the first page load has no
+                               # credentials, gets 403 and the UI cannot connect (the desktop shell and the tests always pass a token)
+npm test                  # API test suite (isolated HOME)
+npm run electron          # Electron shell on the assembled runtime
+npx tauri build           # Tauri NSIS installer (run from tauri/; needs the Rust toolchain and the assembled runtime)
+npm run dist              # Electron NSIS installer (artifact in dist_electron/)
 ```
+
+> A distributable installer also needs the bundled `pkg-runtime.zip` (`scripts/make-runtime.mjs`, packed from `pkg-build/`); the CI workflow is the single source of truth for the whole assembly. The Tauri bundle is a thin shell that downloads/uses the same Node runtime — it is **not** a ~10 MB self-contained binary, so compare the published asset sizes in the release notes instead of assuming a number.
 
 ## License
 

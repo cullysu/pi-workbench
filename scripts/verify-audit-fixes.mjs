@@ -270,3 +270,137 @@ const check = (name, ok, detail = '') => {
   const t = s.sessionTree ? s.sessionTree(f) : null;
   check('session tree survives a parent cycle (no hang, path bounded)', !!t && t.activePath.length <= 2, JSON.stringify(t && t.activePath));
 }
+
+// ---------- v1.3.5 audit contracts (wave 25) ----------
+
+// 9) F17/F19: a cooldown belongs to a CREDENTIAL, not to a pool position
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+  const modelsFile = path.join(root, 'models.json');
+  fs.writeFileSync(modelsFile, JSON.stringify({ providers: {
+    p: { baseUrl: 'https://p.example/v1', apiKey: '$KEY_A', models: [{ id: 'm1' }] },
+  } }));
+  let routing = { chains: [], providers: { p: { enabled: true, keyEnvs: ['KEY_A', 'KEY_B'] } }, state: { cooldowns: {} } };
+  const { createFailover } = await import('../lib/failover.mjs');
+  const fo = createFailover({
+    SECRET_ENV: { KEY_A: 'va', KEY_B: 'vb' },
+    readJson: () => JSON.parse(fs.readFileSync(modelsFile, 'utf8')),
+    loadRouting: () => JSON.parse(JSON.stringify(routing)),
+    saveRouting: (d) => { routing = JSON.parse(JSON.stringify(d)); },
+    PI_MODELS: modelsFile,
+  });
+  fo.coolKey('p', 0, '401 unauthorized', 300);
+  check('F19 a cooldown is stored by env NAME, not by pool index',
+    !!routing.state.cooldowns['p#env:KEY_A'] && !routing.state.cooldowns['p#key0'], JSON.stringify(routing.state.cooldowns));
+  // reorder the pool behind the running tab's back: the cooled credential must follow
+  // its NAME. The pre-1.3.6 index key would have pointed slot 0 at a different secret.
+  routing.providers.p.keyEnvs = ['KEY_B', 'KEY_A'];
+  const pk = fo.pickKey('p');
+  check('F19 after a pool reorder the cooled credential is still the cooled one',
+    !!pk && pk.env === 'KEY_B', JSON.stringify(pk));
+  fo.clearCool('p/m1', 'KEY_B');
+  check('F19 a success clears exactly the credential that answered',
+    !!routing.state.cooldowns['p#env:KEY_A'] && !routing.state.cooldowns['p#env:KEY_B'], JSON.stringify(routing.state.cooldowns));
+  // F17: a literal plaintext key has no rotation pool — and a 401 on it must still bite
+  fs.writeFileSync(modelsFile, JSON.stringify({ providers: { p: { apiKey: 'sk-literal', models: [{ id: 'm1' }] } } }));
+  check('F17 a literal-key provider advertises no rotation pool', fo.keyEnvsFor('p').length === 0, JSON.stringify(fo.keyEnvsFor('p')));
+  fo.coolKey('p', 0, '401 unauthorized', 300);
+  check('F17 a 401 on a literal key cools the literal slot (not a slot nothing reads)',
+    !!routing.state.cooldowns['p#literal'], JSON.stringify(routing.state.cooldowns));
+  check('F17 a cooled literal key is not offered as available', fo.providerHasKey('p') === false);
+  fo.clearCool('p/m1', undefined);
+  check('F17 a success re-arms the literal key', fo.providerHasKey('p') === true);
+}
+
+// 10) F18: a dangling PROVIDER is skipped — an unlisted MODEL is not (the audit scoped
+// the claim to providers; pi, not this function, is the authority on model ids)
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+  const modelsFile = path.join(root, 'models.json');
+  fs.writeFileSync(modelsFile, JSON.stringify({ providers: {
+    a: { baseUrl: 'https://a.example/v1', apiKey: 'sk-a', models: [{ id: 'm1' }] },
+    b: { baseUrl: 'https://b.example/v1', apiKey: 'sk-b', models: [{ id: 'm1' }] }, // lists m1 only
+  } }));
+  let routing = { chains: [['a/m1', 'ghost/m9', 'b/m3']], providers: { a: { enabled: true }, b: { enabled: true } }, state: { cooldowns: {} } };
+  const { createFailover } = await import('../lib/failover.mjs');
+  const fo = createFailover({
+    SECRET_ENV: {},
+    readJson: () => JSON.parse(fs.readFileSync(modelsFile, 'utf8')),
+    loadRouting: () => JSON.parse(JSON.stringify(routing)),
+    saveRouting: (d) => { routing = JSON.parse(JSON.stringify(d)); },
+    PI_MODELS: modelsFile,
+  });
+  check('F18 a chain entry naming a nonexistent PROVIDER is skipped',
+    fo.nextInChain('a/m1') === 'b/m3', JSON.stringify(fo.nextInChain('a/m1')));
+  // b exists but lists only m1 while the chain names b/m3 — that must NOT be skipped
+  // (the first cut of this fix emptied the whole chain here; failover-e2e caught it)
+  fs.writeFileSync(modelsFile, JSON.stringify({ providers: {
+    a: { apiKey: 'sk-a', models: [{ id: 'm1' }] },
+    b: { apiKey: 'sk-b', models: [{ id: 'm1' }] },
+  } }));
+  check('F18 an existing provider with an unlisted model is still offered',
+    fo.nextInChain('a/m1') === 'b/m3', JSON.stringify(fo.nextInChain('a/m1')));
+  routing.chains = [['a/m1', 'ghost/m9']];
+  check('F18 nothing left but dangling entries → null (no phantom failover target)',
+    fo.nextInChain('a/m1') === null, JSON.stringify(fo.nextInChain('a/m1')));
+}
+
+// 11) F09/F10/F11/F12/F13: one live run per job id across processes; a refused or
+// failed launch must not burn the day
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+  const runsDir = path.join(root, 'runs');
+  const mk = (spawnFn, extra = {}) => createCron({
+    CRON_FILE: path.join(root, 'cron.json'), CRON_RUNS_DIR: runsDir, HOME: root, SECRET_ENV: {}, PI_CLI: 'mock-pi',
+    cronPiArgs: () => [], broadcast: () => {},
+    readJson: () => ({ jobs: [] }), saveJson: () => {},
+    spawn: spawnFn,
+    get knownProject() { return () => true; },
+    get defaultModel() { return () => null; },
+    get providerCooledOut() { return () => false; },
+    ...extra,
+  });
+  const live = () => { const p = new EventEmitter(); p.stdout = new PassThrough(); p.stderr = new PassThrough(); return p; }; // never settles
+  const cronA = mk(live);
+  const cronB = mk(live); // a SECOND server process sharing CRON_RUNS_DIR
+  const ja = { id: 'lock1', kind: 'interval', everyMin: 1, prompt: 'x', enabled: true };
+  const jb = { id: 'lock1', kind: 'interval', everyMin: 1, prompt: 'x', enabled: true };
+  check('F09/F10 instance A starts the job', cronA.runCronJob(ja) === true, ja.lastStatus);
+  check('F09/F10 instance B refuses the same job id while the lock is held',
+    cronB.runCronJob(jb) === false && jb.lastStatus === 'already running', jb.lastStatus);
+  // the mode is POSIX-only: Windows ignores it and inherits the profile ACL instead
+  if (process.platform !== 'win32') check('F09/F10 the lock file is private-by-default (0600)', (fs.statSync(path.join(runsDir, 'lock1.lock')).mode & 0o777) === 0o600, (fs.statSync(path.join(runsDir, 'lock1.lock')).mode & 0o777).toString(8));
+  // F11: a spawn-prep failure must not consume today's daily window
+  const cronThrow = mk(() => { throw new Error('boom'); });
+  const hhmm = String(new Date().getHours()).padStart(2, '0') + ':' + String(new Date().getMinutes()).padStart(2, '0');
+  const jd = { id: 'daily1', kind: 'daily', time: hhmm, prompt: 'x', enabled: true };
+  check('F11 a failed spawn reports the failure', cronThrow.runCronJob(jd) === false && jd.lastStatus === 'spawn error', jd.lastStatus);
+  check('F11 a failed spawn does NOT burn the day (lastRunDay untouched)', jd.lastRunDay === undefined, String(jd.lastRunDay));
+  check('F11 the failed launch releases the run lock (no 30-min deadlock)',
+    !fs.existsSync(path.join(runsDir, 'daily1.lock')));
+  // F12/F13: a refused daily is DEFERRED (retries later today) instead of missing the day
+  const jc = { id: 'daily2', kind: 'daily', time: hhmm, prompt: 'x', enabled: true, model: 'p/m1' };
+  const cronCool = mk(live, { get modelCooled() { return () => true; }, get providerCooledOut() { return () => false; } });
+  check('F13 a cooled model refuses the unattended run', cronCool.runCronJob(jc) === false && jc.lastStatus === 'model cooled', jc.lastStatus);
+  const localDay = (d2) => `${d2.getFullYear()}-${String(d2.getMonth() + 1).padStart(2, '0')}-${String(d2.getDate()).padStart(2, '0')}`;
+  check('F12 a refused daily is deferred to retry today', jc.deferDay === localDay(new Date()), String(jc.deferDay));
+  check('F12 a refused daily does not burn the day', jc.lastRunDay === undefined, String(jc.lastRunDay));
+}
+
+// 12) F26: the claude ledger keeps the LAST usage row for one api message id
+{
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc-'));
+  const proj = path.join(root, '.claude', 'projects', 'proj');
+  fs.mkdirSync(proj, { recursive: true });
+  const ts = new Date().toISOString();
+  const row = (id, input, output) => JSON.stringify({ timestamp: ts, cwd: '/w', message: { id, model: 'claude-x', usage: { input_tokens: input, output_tokens: output } } });
+  fs.writeFileSync(path.join(proj, 'a.jsonl'), [
+    row('msg_1', 100, 5), // the streaming partial row
+    row('msg_2', 7, 3),   // a different call
+    row('msg_1', 200, 40), // the final row for msg_1 — must WIN
+  ].join('\n') + '\n');
+  const rep = ledger({ days: 30, engines: ['claude'], home: root });
+  const c = rep.byEngine.claude || { input: 0, output: 0 };
+  check('F26 the claude ledger counts one row per api message id (last wins)',
+    c.input === 207 && c.output === 43, JSON.stringify(c));
+}

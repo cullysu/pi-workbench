@@ -64,6 +64,8 @@ const state = {
   modelsAvailable: [],
   importSrc: 'codex',
   thinkLevel: 'medium',
+  turnHadTools: false,      // F22: a tool ran during the current prompt turn
+  pendingSetModel: null,    // F41: {model} awaiting the set_model ack — failure reverts the chip
 };
 
 // ---------- utils ----------
@@ -408,6 +410,8 @@ function wireToolCard(card) {
   card.querySelector('.tool-head').onclick = () => card.classList.toggle('open');
 }
 function onToolStart(ev) {
+  // F22: a tool started this turn — after this, an auto-resend would double-run it
+  state.turnHadTools = true;
   const holder = state.toolCards.get(ev.toolCallId);
   if (holder) {
     const body = holder.querySelector('.tool-body pre');
@@ -466,10 +470,17 @@ function handleUiRequest(ev) {
 
 // ---------- modal ----------
 let modalCancel = null; // pending onCancel for the open modal — Escape must fire it, pi extensions wait on the reply
-function modal(title, body, actions) {
-  if (modalCancel) { const stale = modalCancel; modalCancel = null; stale(); } // one modal slot: a NEW dialog must answer the waiting extension first, or it waits forever under the newer UI (audit #32)
-  modalCancel = null;
+// F42 (v1.3.5 audit): the host has ONE modal element. Every dialog must enter through
+// this slot so a still-waiting extension dialog is answered before its DOM is replaced;
+// painting over #modal-* directly was how the goal dialog orphaned a waiting confirm.
+function openModalSlot(title, cancellable = null) {
+  if (modalCancel && modalCancel !== cancellable) { const stale = modalCancel; modalCancel = null; stale(); }
+  modalCancel = cancellable || null;
   $('#modal-title').textContent = title;
+  $('#modal-backdrop').classList.remove('hidden');
+}
+function modal(title, body, actions) {
+  openModalSlot(title); // one modal slot: a NEW dialog must answer the waiting extension first, or it waits forever under the newer UI (audit #32)
   $('#modal-body').textContent = body;
   const act = $('#modal-actions'); act.innerHTML = '';
   for (const a of actions) {
@@ -483,9 +494,7 @@ function modal(title, body, actions) {
   $('#modal-backdrop').classList.remove('hidden');
 }
 function modalWithInput(title, placeholder, prefill, onOk, onCancel) {
-  if (modalCancel && modalCancel !== onCancel) { const stale = modalCancel; modalCancel = null; stale(); } // same single-slot rule (audit #32)
-  modalCancel = onCancel || null;
-  $('#modal-title').textContent = title;
+  openModalSlot(title, onCancel); // same single-slot rule (audit #32) and the same entry point every dialog now uses (F42)
   $('#modal-body').innerHTML = `<input id="modal-input" placeholder="${esc(placeholder)}">`;
   const act = $('#modal-actions'); act.innerHTML = '';
   const input = () => $('#modal-input');
@@ -802,9 +811,26 @@ piEventHandlers.push(function (ev) {
   }
   if (ev.type === 'response' && ev.command === 'get_state' && ev.success && ev.data) {
     state.sessionFile = ev.data.sessionFile;
+    // F41: the server knows the REAL model pi is running — sync the chip instead of
+    // trusting an optimistic click forever
+    if (ev.data.model && typeof ev.data.model === 'string') {
+      state.lastAckedModel = ev.data.model;
+      if (state.selModel !== ev.data.model) { state.selModel = ev.data.model; updateModelChip(); }
+      state.pendingSetModel = null;
+    }
     // the reconnect replay restores CONTENT — this restores the RUNNING state,
     // or the UI keeps a busy spinner over an agent that already finished
     if (typeof ev.data.isStreaming === 'boolean') { state.streaming = ev.data.isStreaming; setBusy(state.streaming); }
+    return;
+  }
+  // F41: a FAILED set_model ack reverts the optimistic chip — the model did not change
+  if (ev.type === 'response' && ev.command === 'set_model' && state.pendingSetModel) {
+    if (ev.success === false) {
+      state.selModel = state.pendingSetModel.prev || state.selModel;
+      updateModelChip();
+      $('#statusline').textContent = '模型切换失败：' + String(ev.error || 'pi 拒绝了该模型') + '——已恢复原选择';
+    }
+    state.pendingSetModel = null;
     return;
   }
 });
@@ -995,7 +1021,13 @@ async function renderFiles() {
       const rr = await api.get(`/api/files/read?root=${encodeURIComponent(filesRoot)}&path=${encodeURIComponent(child)}`).catch(() => null);
       const fv = $('#file-view');
       fv.classList.remove('hidden');
-      fv.textContent = !rr ? '读取失败' : rr.tooBig ? `文件过大（${fmtK(rr.size)}）` : (rr.binary ? '（二进制文件）' : (rr.text || '（空文件）'));
+      // F44 (v1.3.5 audit): a structured API error must never be rendered as "empty file"
+      const cap = rr && rr.truncated ? `【服务器已截断：仅显示前 ${(rr.text || '').length} 字符，完整大小 ${fmtK(rr.size)}】\n\n` : '';
+      fv.textContent = !rr ? '读取失败（无响应）'
+        : rr.error ? `读取失败：${rr.error}`
+        : rr.tooBig ? `文件过大（${fmtK(rr.size)}）——未读取`
+        : rr.binary ? '（二进制文件，未按文本显示）'
+        : cap + (rr.text || '（空文件）');
       fv.scrollTop = 0;
     };
     list.appendChild(row);
@@ -1018,36 +1050,43 @@ function renderGoalBanner() {
 $('#btn-goal').onclick = () => {
   const proj = state.project?.path || '';
   const g = (state.cfg.goals || {})[proj] || { text: '', auto: false };
-  $('#modal-title').textContent = '目标模式';
+  // F42 (v1.3.5 audit): the goal dialog used to paint over #modal-* directly, so an
+  // extension confirm that was still WAITING lost its DOM without ever being answered
+  // (modalCancel never fired once, verified by the reviewer's mock). Enter the shared
+  // single slot instead — it answers the stale waiter exactly like modal() does.
+  openModalSlot('目标模式');
   $('#modal-body').innerHTML = `<textarea id="goal-text" placeholder="描述要达成的目标，如：修复登录页 502 并确保测试通过">${esc(g.text)}</textarea>
     <label><input type="checkbox" id="goal-auto" ${g.auto ? 'checked' : ''}> 自动续跑（每轮完成后自动继续，直到模型输出 GOAL_DONE 或达到轮数上限）</label>`;
   $('#modal-actions').innerHTML = '';
   const mkBtn = (label, primary, cb) => {
     const b = document.createElement('button');
     b.textContent = label; if (primary) b.className = 'primary';
-    b.onclick = () => { closeModal(); cb && cb(); };
+    b.onclick = () => { modalCancel = null; closeModal(); cb && cb(); };
     $('#modal-actions').appendChild(b);
   };
+  // F43 (v1.3.5 audit): the local cfg was mutated BEFORE the POST, so a rejected save
+  // left the banner showing an objective that never reached disk. Build the next state,
+  // persist it, and only adopt it on an explicit success.
   mkBtn('清除', false, async () => {
-    const goals = state.cfg.goals || {};
+    const goals = { ...(state.cfg.goals || {}) };
     delete goals[proj];
+    const r = await api.post('/api/config', { goals }).catch((e) => ({ error: e.message }));
+    if (!r || r.error) { $('#statusline').textContent = `目标清除失败：${(r && r.error) || '无响应'}（未改动）`; return; }
     state.cfg.goals = goals;
-    await api.post('/api/config', { goals });
     state.goalRound = 0; state.goalDone = false; state.goalInjected = false;
     renderGoalBanner();
   });
   mkBtn('保存', true, async () => {
-    const goals = state.cfg.goals || {};
+    const goals = { ...(state.cfg.goals || {}) };
     const text = $('#goal-text').value.trim();
     const auto = $('#goal-auto')?.checked || false;
     if (text) goals[proj] = { text, auto }; else delete goals[proj];
+    const r = await api.post('/api/config', { goals }).catch((e) => ({ error: e.message }));
+    if (!r || r.error) { $('#statusline').textContent = `目标保存失败：${(r && r.error) || '无响应'}（未改动）`; return; }
     state.cfg.goals = goals;
     state.goalRound = 0; state.goalDone = false; state.goalInjected = false;
-    await api.post('/api/config', { goals });
     renderGoalBanner();
   });
-  // modal()/modalWithInput() 都会自己 unhide，这里是手搭的内容区，漏了就永远看不见
-  $('#modal-backdrop').classList.remove('hidden');
 };
 $('#btn-goal-stop').onclick = () => { state.goalStop = true; $('#statusline').textContent = '已停止自动续跑'; renderGoalBanner(); };
 const GOAL_CONTINUE_PROMPT = '继续推进目标；若目标已完全完成，请在回复末尾单独一行输出 GOAL_DONE。';
@@ -1097,13 +1136,33 @@ inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
 });
+// F45 (v1.3.5 audit): base64 inflates by 4/3 and server.mjs caps a WS frame at 8MiB, so
+// an unchecked attach could be accepted, clear the draft, then blow the frame limit and
+// close the socket — the user lost both the image and the draft. Gate by RAW size first.
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+function renderAttachChip() {
+  const chip = $('#attach-chip');
+  if (!chip) return;
+  const pi = state.pendingImage;
+  if (!pi) { chip.classList.add('hidden'); return; }
+  $('#attach-name').textContent = `${pi.name || '图片'} · ${fmtK(pi.size || 0)}`;
+  chip.classList.remove('hidden');
+}
 function queueImageFile(f) {
   if (!f || !String(f.type || '').startsWith('image/')) return;
+  if (f.size > MAX_IMAGE_BYTES) {
+    // refuse BEFORE the base64 read: nothing is attached, the draft is untouched
+    $('#statusline').textContent = `图片过大（${fmtK(f.size)}）——上限 ${fmtK(MAX_IMAGE_BYTES)}；草稿与附件均未变动`;
+    return;
+  }
   const rd = new FileReader();
   rd.onload = () => {
-    state.pendingImage = { data: String(rd.result).split(',')[1], mimeType: f.type };
-    $('#statusline').textContent = `${f.type} 图片就绪`;
+    state.pendingImage = { data: String(rd.result).split(',')[1], mimeType: f.type, name: f.name || '图片', size: f.size || 0 };
+    renderAttachChip();
+    // F30: an unknown/missing MIME must not be presented as fact
+    $('#statusline').textContent = `${f.type || '未知类型'} 图片已附加（${fmtK(f.size || 0)}）——可点 × 移除`;
   };
+  rd.onerror = () => { $('#statusline').textContent = '图片读取失败——未附加任何内容'; };
   rd.readAsDataURL(f);
 }
 inputEl.addEventListener('paste', (e) => {
@@ -1135,15 +1194,26 @@ $('#btn-attach').onclick = () => {
   inp.onchange = () => queueImageFile(inp.files && inp.files[0]);
   inp.click();
 };
+$('#attach-remove').onclick = () => {
+  state.pendingImage = null;
+  renderAttachChip();
+  $('#statusline').textContent = '已移除待发送图片';
+};
 $('#btn-theme').onclick = async () => {
+  const prev = state.cfg.theme;
   state.cfg.theme = state.cfg.theme === 'dark' ? 'light' : 'dark';
   applyI18n();
   applyThemeBtns();
-  await api.post('/api/config', { theme: state.cfg.theme });
+  const r = await api.post('/api/config', { theme: state.cfg.theme }).catch((e) => ({ error: e.message }));
+  if (!r || r.error) { // F43: a refused write must not leave the toggled theme on screen
+    state.cfg.theme = prev;
+    applyI18n(); applyThemeBtns();
+    $('#statusline').textContent = `主题保存失败：${(r && r.error) || '无响应'}（已恢复）`;
+  }
 };
 async function sendPrompt() {
   const text = inputEl.value.trim();
-  if (!text) return;
+  if (!text && !state.pendingImage) return; // F45: an image-only turn is a valid send, not a silent no-op
   // known rejections clear NOTHING — the user's draft survives a refused send (audit #40)
   if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
   if (!state.project) { askAddProject(); return; }
@@ -1153,7 +1223,7 @@ async function sendPrompt() {
 }
 async function submitPrompt(text, { resend = false } = {}) {
   if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
-  if (!text) return;
+  if (!text && !state.pendingImage) return; // F45: image-only turns are allowed through
   // execution-identity backstop: whatever UI path switched state.project without
   // detaching the tab, a prompt must never travel to a tab running another cwd
   // (v1.3.3 audit #11 — this closes the whole class, not just the known entries)
@@ -1171,16 +1241,18 @@ async function submitPrompt(text, { resend = false } = {}) {
     text = `【目标】${g.text}\n\n${text}`;
     state.goalInjected = true;
   }
+  if (!text) text = '（图片）'; // F45: pi needs a non-empty message; the placeholder is what the timeline shows too
   state.lastPrompt = text;
   state.failoverDone = false;
   state.userAborted = false;
+  state.turnHadTools = false; // F22: a fresh turn starts with no side effects on record
   state.forkMsgs = null; // new content invalidates cached fork points (audit #24)
   // only the hero empty state clears on send — an open conversation keeps its history
   if (!resend && $('#topbar').classList.contains('hidden')) clearTimeline(false);
   const el = msgShell('user', Date.now(), false);
   el.querySelector('.msg-body').textContent = text;
   const cmd = { type: 'prompt', message: text };
-  if (state.pendingImage) { cmd.images = [state.pendingImage]; state.pendingImage = null; $('#statusline').textContent = ''; }
+  if (state.pendingImage) { cmd.images = [state.pendingImage]; state.pendingImage = null; renderAttachChip(); $('#statusline').textContent = ''; }
   if (state.streaming) cmd.streamingBehavior = 'followUp';
   rpcTo(cmd);
   scrollBottom();
@@ -1190,6 +1262,14 @@ async function submitPrompt(text, { resend = false } = {}) {
 async function maybeFailover(detail) {
   if (state.failoverDone || state.userAborted || !state.selModel) return;
   state.failoverDone = true;
+  // F22 (v1.3.5 audit): if tools already ran this turn, the turn's side effects are
+  // OUTSIDE the model call — re-submitting the prompt would execute them a second
+  // time (files edited twice, commands re-run). An error after tool work needs a
+  // human decision, not an auto-resend.
+  if (state.turnHadTools) {
+    $('#statusline').textContent = '本轮已执行过工具调用——为避免重复副作用，不自动重发；请检查结果后手动继续';
+    return;
+  }
   // snapshot BEFORE the await — capturing after the round-trip would bless whatever
   // project/tab/prompt the user switched to while the fail call was in flight
   const armed = { tab: state.tabId, project: state.project && state.project.path, prompt: state.lastPrompt, seq: (state.failoverSeq = (state.failoverSeq || 0) + 1) };
@@ -1537,7 +1617,11 @@ async function loadImportList() {
   const src = state.importSrc;
   const r = await api.get(`/api/import/${src}`).catch(() => null);
   if (seq !== state.importSeq) return;
-  if (!r) { list.innerHTML = '<div class="muted small" style="padding:20px 10px">加载失败，稍后重试</div>'; return; }
+  // F44: a structured error is not an empty list
+  if (!r || r.error) {
+    list.innerHTML = `<div class="muted small" style="padding:20px 10px">${esc(!r ? '加载失败，稍后重试' : `加载失败：${r.error}`)}</div>`;
+    return;
+  }
   list.innerHTML = '';
   for (const s of r.sessions || []) {
     const d = document.createElement('div');
@@ -1554,7 +1638,11 @@ async function openImported(src, file) {
   const seq = (state.importSeq = (state.importSeq || 0) + 1);
   const r = await api.get(`/api/import/${src}/read?path=${encodeURIComponent(file)}`).catch(() => null);
   if (seq !== state.importSeq) return; // a slower earlier click must not overwrite the later one
-  if (!r) { $('#statusline').textContent = '加载会话失败'; return; }
+  // F44: an error payload used to render as an empty (silently "no messages") transcript
+  if (!r || r.error) {
+    $('#statusline').textContent = !r ? '加载会话失败（无响应）' : `加载会话失败：${r.error}`;
+    return;
+  }
   state.importView = true; // read-only: composer blocked, live pi-events held out of this view
   state.importFile = { src, file }; // what the user is LOOKING at — export must follow this, never the stale live session (audit #22)
   state.sessionFile = null; // while browsing imported history, no live file is described by the composer
@@ -1589,7 +1677,9 @@ async function openImported(src, file) {
       const card = (byId && cards.find((c) => c.dataset.id === byId)) || cards[cards.length - 1];
       if (card) {
         const st = card.querySelector('.t-status');
-        st.textContent = t('done'); st.className = 't-status ok';
+        const bad = !!e.isError; // F30/F44: an errored tool result must not render as "done"
+        st.textContent = bad ? '失败' : t('done');
+        st.className = 't-status ' + (bad ? 'err' : 'ok');
         const body = card.querySelector('.tool-body pre');
         if (body && e.output) body.textContent = String(e.output).slice(0, 20000);
       }
@@ -1753,10 +1843,18 @@ $('#btn-prov-add').onclick = () => {
   modalWithInput('添加 Provider', '名称（如 my-relay）', '', async (val) => {
     const name = (val || '').trim().replace(/\s+/g, '-');
     if (!name) return;
-    state.modelsDoc.providers = state.modelsDoc.providers || {};
-    if (!state.modelsDoc.providers[name]) state.modelsDoc.providers[name] = { baseUrl: '', api: 'openai-responses', models: [] };
+    // F43: post a CANDIDATE doc and adopt it only on an explicit success — the old code
+    // mutated the shared doc first, so a refused write left a phantom provider on screen
+    const doc = { ...state.modelsDoc, providers: { ...(state.modelsDoc.providers || {}) } };
+    if (!doc.providers[name]) doc.providers[name] = { baseUrl: '', api: 'openai-responses', models: [] };
+    const r = await api.post('/api/models', doc).catch((e) => ({ error: e.message }));
+    if (!r || r.error) {
+      $('#models-status').classList.remove('hidden');
+      $('#models-status').textContent = `添加失败：${(r && r.error) || '无响应'}（未落盘）`;
+      return;
+    }
+    state.modelsDoc = doc;
     state.editProv = name;
-    await api.post('/api/models', state.modelsDoc);
     loadModelsEditor();
   });
 };
@@ -1853,8 +1951,17 @@ $('#btn-prov-del').onclick = () => {
   modal('删除 Provider', `确定删除 ${state.editProv}？（只删本地配置，不影响上游）`, [
     { label: '取消' },
     { label: '删除', primary: true, cb: async () => {
-      delete state.modelsDoc.providers[state.editProv];
-      await api.post('/api/models', state.modelsDoc);
+      const name = state.editProv;
+      const keep = state.modelsDoc.providers[name];
+      delete state.modelsDoc.providers[name];
+      const r = await api.post('/api/models', state.modelsDoc).catch((e) => ({ error: e.message }));
+      if (!r || r.error) {
+        // F43: disk still has it — put it back instead of showing a deleted row
+        state.modelsDoc.providers[name] = keep;
+        $('#models-status').classList.remove('hidden');
+        $('#models-status').textContent = `删除失败：${(r && r.error) || '无响应'}（未改动）`;
+        return;
+      }
       state.editProv = null;
       loadModelsEditor();
     } },
@@ -1874,8 +1981,9 @@ $('#btn-advanced').onclick = () => {
 $('#btn-models-save').onclick = async () => {
   try {
     const obj = JSON.parse($('#models-editor').value);
-    await api.post('/api/models', obj);
+    const r = await api.post('/api/models', obj).catch((e) => ({ error: e.message }));
     $('#models-status').classList.remove('hidden');
+    if (!r || r.error) { $('#models-status').textContent = `保存失败：${(r && r.error) || '无响应'}（磁盘未改动）`; return; } // F43
     $('#models-status').textContent = t('models_saved');
   } catch (e) { $('#models-status').classList.remove('hidden'); $('#models-status').textContent = 'JSON error: ' + e.message; }
 };
@@ -1913,7 +2021,16 @@ async function loadUsage() {
   const box = $('#usage-box');
   box.innerHTML = `<div class="muted small" style="padding:20px 8px">${t('loading')}</div>`;
   const u = await api.get('/api/usage').catch(() => null);
-  if (!u) { box.innerHTML = '<div class="muted small" style="padding:20px 8px">加载失败</div>'; return; }
+  // F44: an error object has no counters — rendering it as "今日 0" invents a statistic
+  if (!u || u.error) {
+    box.innerHTML = `<div class="muted small" style="padding:20px 8px">${esc(!u ? '用量加载失败（无响应）' : `用量加载失败：${u.error}`)}</div>`;
+    return;
+  }
+  // F31: the ledger caps how many lines it reads per file — say so instead of showing a
+  // quietly understated total
+  const cappedNote = u.cappedFiles
+    ? `<div class="muted small" style="padding:4px 4px 0">⚠ ${u.cappedFiles} 个会话文件超出单文件行数上限，本次统计不完整</div>`
+    : '';
   const hit = Math.round((u.cacheHit || 0) * 100);
   const days = Object.entries(u.days || {}).sort((a, b) => (a[0] < b[0] ? -1 : 1)).slice(-14);
   const maxIn = Math.max(1, ...days.map(([, v]) => v.input));
@@ -1945,6 +2062,7 @@ async function loadUsage() {
       ${statCard(t('u_cw'), fmtTok(u.cacheWrite))}
       ${statCard(t('u_cr'), fmtTok(u.cacheRead))}
     </div>
+    ${cappedNote}
     ${todayHead}
     <div class="usage-sec">14 天趋势（输入 / 输出 / 缓存读）</div>
     <div id="usage-chart" class="usage-chart"></div>
@@ -2156,14 +2274,26 @@ function applyThemeBtns() {
   $$('[data-theme-set]').forEach((b) => b.classList.toggle('active', b.dataset.themeSet === state.cfg.theme));
 }
 $$('[data-theme-auto]').forEach((b) => b.onclick = async () => {
+  const prev = state.cfg.themeAuto; // F43: never adopt a value disk refused
   state.cfg.themeAuto = b.dataset.themeAuto === 'on';
-  await api.post('/api/config', { themeAuto: state.cfg.themeAuto });
+  const r = await api.post('/api/config', { themeAuto: state.cfg.themeAuto }).catch((e) => ({ error: e.message }));
+  if (!r || r.error) {
+    state.cfg.themeAuto = prev;
+    $('#statusline').textContent = `主题模式保存失败：${(r && r.error) || '无响应'}（未改动）`;
+    return;
+  }
   applySystemTheme();
 });
 $$('[data-theme-set]').forEach((b) => b.onclick = async () => {
+  const prev = state.cfg.theme;
   state.cfg.theme = b.dataset.themeSet;
   applyI18n(); applyThemeBtns();
-  await api.post('/api/config', { theme: state.cfg.theme });
+  const r = await api.post('/api/config', { theme: state.cfg.theme }).catch((e) => ({ error: e.message }));
+  if (!r || r.error) {
+    state.cfg.theme = prev;
+    applyI18n(); applyThemeBtns();
+    $('#statusline').textContent = `主题保存失败：${(r && r.error) || '无响应'}（已恢复）`;
+  }
 });
 
 // ---------- views & rails (Hermes-style shell) ----------
@@ -2216,7 +2346,13 @@ async function loadSkills() {
   $$('#skills-list .switch').forEach((sw) => {
     sw.onclick = async (e) => {
       e.stopPropagation();
-      await api.post('/api/skills', { name: sw.dataset.name, enabled: sw.checked });
+      const want = sw.checked;
+      // F43: the switch already flipped visually — put it back if the write was refused
+      const r = await api.post('/api/skills', { name: sw.dataset.name, enabled: want }).catch((err) => ({ error: err.message }));
+      if (!r || r.error) {
+        sw.checked = !want;
+        $('#statusline').textContent = `技能开关保存失败：${(r && r.error) || '无响应'}（已恢复）`;
+      }
     };
   });
   show(0);
@@ -2301,7 +2437,15 @@ function renderCronJobs() {
   box.querySelectorAll('.cron-en-sw').forEach((sw) => {
     sw.onchange = async () => {
       const job = cronJobs.find((x) => x.id === sw.dataset.id);
-      if (job) { job.enabled = sw.checked; await api.post('/api/cron', { jobs: cronJobs }); }
+      if (!job) return;
+      const prev = job.enabled;
+      job.enabled = sw.checked;
+      const r = await api.post('/api/cron', { jobs: cronJobs }).catch((e) => ({ error: e.message }));
+      if (!r || r.error) { // F43: an optimistic checkbox over a refused save
+        job.enabled = prev;
+        sw.checked = prev !== false;
+        $('#cron-status').textContent = `启用状态保存失败：${(r && r.error) || '无响应'}（已恢复）`;
+      }
     };
   });
   box.querySelectorAll('.cron-run').forEach((b) => {
@@ -2324,7 +2468,11 @@ function renderCronJobs() {
   });
   box.querySelectorAll('.cron-del').forEach((b) => {
     b.onclick = async () => {
-      await api.post('/api/cron/delete', { id: b.dataset.id });
+      const r = await api.post('/api/cron/delete', { id: b.dataset.id }).catch((e) => ({ error: e.message }));
+      if (!r || r.error) { // F43: a refused delete must not remove the row from the list
+        $('#cron-status').textContent = `删除失败：${(r && r.error) || '无响应'}（未改动）`;
+        return;
+      }
       cronJobs = cronJobs.filter((x) => x.id !== b.dataset.id);
       renderCronJobs();
     };
@@ -2344,9 +2492,11 @@ $('#btn-cron-save').onclick = async () => {
     if (!(job.everyMin > 0)) { $('#cron-status').textContent = '间隔分钟数无效'; return; }
   }
   if (!job.cwd && state.project) job.cwd = state.project.path; // a new job runs where the panel is looking
-  cronJobs.push(job);
-  const r = await api.post('/api/cron', { jobs: cronJobs }).catch((e) => ({ error: e.message }));
-  if (r.error) { $('#cron-status').textContent = '保存失败：' + r.error; return; }
+  // F43: post a CANDIDATE list — pushing into the live array first meant a failed save
+  // left the job in cronJobs, so pressing 保存 again could add it a second time
+  const candidate = [...cronJobs, job];
+  const r = await api.post('/api/cron', { jobs: candidate }).catch((e) => ({ error: e.message }));
+  if (!r || r.error) { $('#cron-status').textContent = `保存失败：${(r && r.error) || '无响应'}（未添加）`; return; }
   cronJobs = r.jobs;
   $('#cron-status').textContent = '已保存';
   $('#cron-name').value = ''; $('#cron-prompt').value = ''; $('#cron-model').value = '';
@@ -2454,16 +2604,20 @@ $$('.rail-item[data-panel]').forEach((b) => {
   };
 });
 $('#btn-backup-export').onclick = () => {
-  modal('导出备份', '备份包含你的工作台配置与会话元数据。模型 API Key 会以明文写入备份文件（还原需要）——请勿上传网盘或直接发给别人。', [
+  // F02 (v1.3.5 audit): "不含密钥" was an overclaim — the keyless mode scrubs the
+  // credential fields it KNOWS (apiKey/token/Authorization/Cookie-class headers,
+  // URL-embedded userinfo, env values, models baseUrl) but cannot promise that a
+  // hand-written config holds no secret in some shape the scrubber has never seen.
+  modal('导出备份', '备份包含你的工作台配置与会话元数据。\n\n含密钥：模型 API Key 以明文写入，还原需要它，请勿上传网盘或转发。\n不含密钥：会抹除已知的凭据字段（apiKey、token、认证/Cookie 头、URL 内嵌账号密码、env 值、models 的 baseUrl），但它是"尽力抹除"而非保证——自定义字段里手写的密钥不会被识别。首次分享前请自行检查 zip。', [
     { label: '导出（含密钥）', primary: true, cb: () => doBackupExport(false) },
-    { label: '导出（不含密钥，更安全）', cb: () => doBackupExport(true) },
+    { label: '导出（已抹除已知凭据）', cb: () => doBackupExport(true) },
   ]);
 };
 async function doBackupExport(excludeKeys) {
   $('#backup-status').textContent = '正在打包…';
   const r = await api.post('/api/backup/export?excludeKeys=' + (excludeKeys ? '1' : '0'), {}).catch((e) => ({ error: e.message }));
   if (r.error) { $('#backup-status').textContent = '失败：' + r.error; return; }
-  $('#backup-status').textContent = `已导出 ${r.path}（${Math.round((r.size || 0) / 1024)} KB）${excludeKeys ? '，不含密钥' : '，含明文密钥请妥善保管'}`;
+  $('#backup-status').textContent = `已导出 ${r.path}（${Math.round((r.size || 0) / 1024)} KB）${excludeKeys ? '——已抹除已知凭据字段（非"无秘密"保证，分享前请自查）' : '，含明文密钥请妥善保管'}`;
 }
 $('#btn-backup-import').onclick = () => {
   modalWithInput('导入备份', '本地 zip 完整路径', '', async (val) => {
@@ -2504,7 +2658,10 @@ $('#term-form').addEventListener('submit', async (e) => {
   $('#term-cmd').value = '';
   const out = $('#term-out');
   out.textContent += '\n$ ' + cmd + '\n';
-  const r = await api.post('/api/term/exec', { cwd: state.project?.path || '', cmd }).catch((err) => ({ err: err.message, out: '' }));
+  const r = await api.post('/api/term/exec', { cwd: state.project?.path || '', cmd }).catch((err) => ({ error: err.message, out: '', err: '' }));
+  // F44: the backend answers 400 with {error:'bad cmd'|'unknown project root'} — showing
+  // only out/err made a refused command look like it produced no output at all
+  if (r && r.error) out.textContent += `[错误] ${r.error}\n`;
   out.textContent += (r.out || '') + (r.err || '');
   out.scrollTop = 1e9;
 });

@@ -19,7 +19,9 @@ const browserGlobals = {
 };
 
 export default [
-  { ignores: ['node_modules/**', 'public/vendor/**', 'remotion/**', 'promo/**', 'dist/**', 'build/**', 'pkg-build/**', 'pkg/**', 'stage/**', 'installer/**', 'tauri/target/**', 'docs/**'] },
+  // .pytest_cache is created by unrelated tooling in this shared workspace with
+  // permissions that make a recursive scandir fail (EPERM) — it holds no JS.
+  { ignores: ['node_modules/**', 'public/vendor/**', 'remotion/**', 'promo/**', 'dist/**', 'build/**', 'pkg-build/**', 'pkg/**', 'stage/**', 'installer/**', 'tauri/target/**', 'docs/**', '.pytest_cache/**'] },
   js.configs.recommended,
   {
     files: ['server.mjs', 'zip.mjs', 'ledger.mjs', 'lib/**/*.mjs', 'electron-main.cjs', 'extensions/**/*.js', 'tools/**/*.cjs', 'scripts/**'],

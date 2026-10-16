@@ -82,6 +82,9 @@ document.querySelector('#model-chip').onclick = () => {
       cb: () => {
         st.selModel = key;
         __wb.updateModelChip();
+        // F41 (v1.3.5 audit): the chip is optimistic — remember what we asked for and
+        // what was ACKED before, so a FAILED set_model reverts instead of leaving a lie
+        st.pendingSetModel = { model: key, prev: st.lastAckedModel || null };
         __wb.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
         __wb.rpcTo({ type: 'get_available_thinking_levels' }); // the new model may support different levels
       },

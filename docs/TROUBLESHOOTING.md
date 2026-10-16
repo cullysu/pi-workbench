@@ -47,9 +47,15 @@
 
 | 内容 | 位置 |
 |---|---|
-| 服务端错误（脱敏后） | `~/.pi-workbench/server.log`（+ `.old`） |
+| 服务端错误（部分脱敏，见下） | `~/.pi-workbench/server.log`（+ `.old`） |
 | Electron 壳启动日志 | `%APPDATA%\Pi Workbench\server.log` |
 | 定时任务单次输出 | `~/.pi-workbench/cron-runs/<job-id>/<时间>.log` |
 | 损坏的配置留证 | `~/.pi-workbench/config.json.corrupt-<时间戳>` |
 
-提交 issue 时请附上相关片段（已自动脱敏 sk- 类密钥）。
+**脱敏的范围（F06，v1.3.5 审计）：** 日志脱敏是**尽力而为的模式匹配**，不是"日志不含秘密"的保证。
+
+- **会替换**：`sk-…`、GitHub `ghp_/gho_/ghu_/ghs_`、Slack `xox…`、`Bearer <token>` 等已知前缀；备份导出另按"凭据字段/凭据头/凭据环境变量/URL 内嵌凭据"四类剥离。
+- **不会替换**：其它任意格式的 API key、Cookie 值、URL 查询串里的 token，以及 pi/MCP 子进程原样打印的 stderr —— `server.log` 和 `cron-runs/*.log` 都可能含它们。
+
+提交 issue 前请**人工确认**要附的片段。`server.log`、`cron-runs/*.log` 与配置/备份文件在 POSIX 上以 0600 创建，Windows 上按当前用户收紧 DACL（`token`/`config.json`/`models.json`/`mcp.json`/`routing.json`/`cron.json`/`settings.json`/`model-meta.json` 及导出的 zip 与快照）。
+

@@ -6,6 +6,9 @@ import os from 'node:os';
 import { walkFiles, readJsonl } from './lib/io.mjs';
 
 const DAY = 86400000;
+// F31 (v1.3.5 audit): count of scanned files that hit readJsonl's 200k-line cap —
+// surfaced through ledger()/usage so a giant window is labelled, not silently partial
+const truncatedFlag = { count: 0 };
 
 const deepFindUsage = (o) => {
   // 在任意嵌套结构里找带 input_tokens+output_tokens 的对象
@@ -42,7 +45,8 @@ function scanCodex(days, home) {
   for (const f of walkFiles(root)) {
     let st; try { st = fs.statSync(f); } catch { continue; } // file rotated away mid-walk
     if (st.mtimeMs < since) continue;
-    const lines = readJsonl(f, { hot: 'token_usage' });
+    const { items: lines, truncated } = readJsonl(f, { hot: 'token_usage', wantMeta: true });
+    if (truncated) truncatedFlag.count++; // F31: 200k-line cap hit — the report must say the window is a tail
     if (!lines.length) continue;
     let meta = {cwd: null, ts: st.mtimeMs};
     let model = null;
@@ -92,11 +96,13 @@ function scanZCode(days, home) {
   for (const f of walkFiles(roll)) {
     let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
-    for (const l of readJsonl(f)) {
+    // zcode rollouts use their own field names (cacheReadTokens/cacheWriteTokens) —
+    // deepFindUsage only knows the snake/camel input/output aliases and zeroed both caches
+    const { items: lines0, truncated: tr0 } = readJsonl(f, { wantMeta: true });
+    if (tr0) truncatedFlag.count++; // F31
+    for (const l of lines0) {
       const ts = l.startedAt ? Date.parse(l.startedAt) : (l.completedAt ? Date.parse(l.completedAt) : st.mtimeMs);
       if (ts < since) continue;
-      // zcode rollouts use their own field names (cacheReadTokens/cacheWriteTokens) —
-      // deepFindUsage only knows the snake/camel input/output aliases and zeroed both caches
       const u0 = l.response?.usage || {};
       const zin = u0.inputTokens || 0, zout = u0.outputTokens || 0;
       if (zin || zout) {
@@ -129,24 +135,28 @@ function scanClaude(days, home) {
   for (const f of walkFiles(root)) {
     let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
-    const seenMsg = new Set(); // the SAME api message id can appear in several jsonl rows (block + update) — counting each row billed one call twice (audit #25)
+    // the SAME api message id can appear in several jsonl rows (block + update) —
+    // counting each row billed one call twice (audit #25). F26 (v1.3.5 audit):
+    // LAST row wins, not the first — a stream emits a partial usage row before the
+    // final counts land, and first-wins kept the incomplete one.
+    const byMsg = new Map(); // preserves insertion order; values overwrite
+    const noId = [];
     for (const l of readJsonl(f, { hot: '"usage"' })) {
       const u = deepFindUsage(l.message ?? l);
       if (!u) continue;
-      const msgId = l.message?.id ?? l.uuid ?? null;
-      if (msgId) {
-        if (seenMsg.has(msgId)) continue;
-        seenMsg.add(msgId);
-      }
       const ts = l.timestamp ? Date.parse(l.timestamp) : st.mtimeMs;
       if (ts < since) continue;
-      recs.push({engine: 'claude', file: path.basename(f), ts, cwd: l.cwd ?? null, model: l.message?.model ?? null, usage: u});
+      const msgId = l.message?.id ?? l.uuid ?? null;
+      const rec = {engine: 'claude', file: path.basename(f), ts, cwd: l.cwd ?? null, model: l.message?.model ?? null, usage: u};
+      if (msgId) byMsg.set(msgId, rec); else noId.push(rec);
     }
+    recs.push(...noId, ...byMsg.values());
   }
   return recs;
 }
 
 export function ledger({days = 30, engines = ['codex', 'zcode', 'claude'], home = process.env.PIWB_LEDGER_HOME || os.homedir()} = {}) {
+  truncatedFlag.count = 0; // fresh per call — the flag reports THIS scan, not a running total
   let recs = [];
   if (engines.includes('codex')) recs = recs.concat(scanCodex(days, home));
   if (engines.includes('zcode')) recs = recs.concat(scanZCode(days, home));
@@ -171,6 +181,7 @@ export function ledger({days = 30, engines = ['codex', 'zcode', 'claude'], home 
   return {
     days,
     sessions: recs.filter((r) => !r.aggregate).length,
+    truncatedFiles: truncatedFlag.count, // F31: files whose scan hit the 200k-line cap
     byEngine: sortObj(byEngine),
     byDay: sortObj(byDay),
     byModel: sortObj(byModel),

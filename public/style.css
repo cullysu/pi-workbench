@@ -398,6 +398,13 @@ select { color-scheme: light dark; }
 #model-chip svg { width: 11px; height: 11px; margin-left: 4px; vertical-align: -1px; opacity: 0.7; }
 #drop-hint { display: flex; align-items: center; gap: 8px; }
 #drop-hint svg { width: 13px; height: 13px; }
+/* F45 (v1.3.5 audit): a queued attachment must be visible and removable before send */
+#attach-chip { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text2);
+  background: var(--card); border: 1px solid var(--card-border); border-radius: 10px;
+  padding: 4px 6px 4px 10px; margin-bottom: 6px; width: fit-content; }
+#attach-chip button { border: none; background: none; color: var(--text3); font-size: 14px; line-height: 1;
+  cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+#attach-chip button:hover { color: var(--text); background: var(--hover, rgba(127,127,127,0.15)); }
 
 /* ============ usage panel (omp-stats inspired) ============ */
 .usage-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 2px; }
@@ -818,3 +825,26 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
 .cron-job { background: var(--card); border: 1px solid var(--card-border); border-radius: var(--radius-md); padding: 12px; margin-bottom: 8px; }
 .cron-job-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cron-job-name { font-weight: 600; font-size: 14px; }
+
+/* ============ F49 (v1.3.5 audit): narrow-window & motion policy ============
+   Both shells declare a 1080x680 minimum, but an OS/user can still force a narrower
+   window (high zoom, tiling, a small laptop). With no media query the sidebar kept its
+   width and the timeline was crushed; and prefers-reduced-motion was never honored. */
+@media (max-width: 980px) {
+  #rail { --rail-w: 176px; padding: 10px 8px; }
+  .usage-cards { grid-template-columns: repeat(2, 1fr); }
+  .split-list { width: 220px; min-width: 180px; }
+  .rr-seg { width: 84px; }
+}
+@media (max-width: 760px) {
+  #project-tree { display: none; } /* sessions stay reachable through Ctrl+K search */
+  .usage-cards { grid-template-columns: 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

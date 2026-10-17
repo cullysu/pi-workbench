@@ -404,3 +404,46 @@ const check = (name, ok, detail = '') => {
   check('F26 the claude ledger counts one row per api message id (last wins)',
     c.input === 207 && c.output === 43, JSON.stringify(c));
 }
+
+// 13) v1.3.6 review (wave 26): the five P2/P3 items — structural checks on the app
+// source plus a behavioral check on collectProc's strict caps
+{
+  const repoRoot = path.resolve(path.dirname(decodeURI(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  const app = fs.readFileSync(path.join(repoRoot, 'public', 'app.js'), 'utf8');
+  const io = fs.readFileSync(path.join(repoRoot, 'lib', 'io.mjs'), 'utf8');
+
+  // P2-1: the composer must not clear the input before the open is confirmed; the
+  // clear happens only at the point of no return, AFTER the open await
+  const submitIdx = app.indexOf('async function submitPrompt');
+  const clearIdx = app.indexOf("inputEl.value = '';", submitIdx);
+  const openAwaitIdx = app.indexOf('await Promise.race([', submitIdx);
+  const tabIdGateIdx = app.indexOf('if (!state.tabId) return;', submitIdx);
+  check('P2-1 submitPrompt clears the composer only after the open await + tabId gate',
+    submitIdx > 0 && clearIdx > openAwaitIdx && openAwaitIdx > 0 && clearIdx > tabIdGateIdx && tabIdGateIdx > 0,
+    `submit@${submitIdx} gate@${tabIdGateIdx} await@${openAwaitIdx} clear@${clearIdx}`);
+  check('P2-1 open-denied rejects the pending open (state._openReject wired)',
+    app.includes('state._openReject') && app.includes('会话打开失败：'), 'missing _openReject or failure statusline');
+  check('P2-1 openPiSession returns a denial/backstop race',
+    app.includes("Promise.race([openDenied, backstop])"), 'race missing');
+
+  // P2-2: the 200-cap queue drops only refresh-class RPC and refuses user-meaningful frames
+  check('P2-2 wsSend drops only refresh-class RPC at the 200 cap',
+    app.includes('DROPPABLE_RPC') && app.includes('未能入队') && !app.includes('最早的一条待发消息被丢弃'),
+    'queue policy comment/behavior missing');
+
+  // P3-3: both set-default sites check the config ack before touching cfg/chip
+  const setDefaultSites = app.split("api.post('/api/config', { defaultModel").length - 1;
+  check('P3-3 every set-default site checks the /api/config ack',
+    setDefaultSites >= 2 && app.includes("'默认模型保存失败：'"), `sites=${setDefaultSites}`);
+
+  // P3-4: provider save works on a clone and reloads state from disk on partial failure
+  check('P3-4 btn-prov-save clones modelsDoc and reloads config state on partial failure',
+    app.includes('JSON.parse(JSON.stringify(state.modelsDoc))') && app.includes('async function reloadConfigState'),
+    'clone or reloadConfigState missing');
+
+  // P3-5: collectProc enforces caps at the CHUNK level, not just on settle
+  check('P3-5 collectProc slices each stdout/stderr chunk to the remaining cap',
+    io.includes('maxOut - out.length') && io.includes('maxErr - err.length') && io.includes('out.slice(0, maxOut)'),
+    'chunk-level slicing missing');
+}
+

@@ -2,6 +2,25 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.7 — 2026-10-17
+
+### Fixed (from the independent v1.3.6 review — 5 items; draft safety, queue honesty, save rollback)
+
+**A refused open can no longer eat the composer draft (P2-1):**
+- The composer no longer clears the input before the session opens — the clear happens only at the point of no return (tab id confirmed on the wire). An `open-denied` frame now REJECTS the pending open promise (reject fn reachable from the WS handler via `state._openReject`, with a 21 s backstop for a lost frame) and `submitPrompt` catches it: the statusline says 会话打开失败 and the draft plus pending attachments stay in place.
+
+**The offline queue stops discarding user turns (P2-2):**
+- At the 200-frame cap only refresh-class RPC (`get_state` / `get_entries` / `get_available_models` / `get_available_thinking_levels`) is dropped — their answers are stale the moment they flush. When the queue holds no droppable frame, the NEW send is refused with an explicit statusline naming the operation instead of silently discarding someone's open/prompt/close/set_model/adopt.
+
+**Save paths check the backend's answer (P3-3, P3-4):**
+- Both set-default-model sites check the `/api/config` ack before updating cfg/chip — a 500 used to update the optimistic UI anyway.
+- Provider save works on a CLONE of `modelsDoc` (the pre-POST in-place mutation no longer survives a refused save); a mid-sequence failure (models→routing→config) reloads all three docs from disk via the new `reloadConfigState()` so memory matches what actually got saved.
+
+**collectProc caps are strict (P3-5):**
+- Each stdout/stderr chunk is sliced to the REMAINING cap at receive time and the close path truncates again — a single oversized chunk (5000 chars vs a 200-char cap) used to slip through whole.
+
+**Contract tests:** 5 new wave-26 assertions in `scripts/verify-audit-fixes.mjs` (composer-clear ordering, open-denied rejection wiring, queue policy, ack checks + clone/reload, chunk-level caps).
+
 ## 1.3.6 — 2026-10-17
 
 ### Fixed (from the independent v1.3.5 audit — 50 items; process identity, credential scope, cross-process locking, UI truthfulness)

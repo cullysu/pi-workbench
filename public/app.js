@@ -161,6 +161,7 @@ function wsConnect() {
     if (msg.type === 'pi-session-file') {
       if (msg.tabId !== state.tabId) return; // a detached/old tab's file must not rebind the composer's session identity (audit #12)
       state.sessionFile = msg.sessionFile;
+      if (state._openTab === msg.tabId) { state._openTab = null; if (state._openReject) state._openReject(); } // open succeeded — disarm the denial/backstop race
       if (state.pendingNewSession) { state.pendingNewSession = false; renderProjectTree(true); }
       return;
     }
@@ -173,6 +174,10 @@ function wsConnect() {
       // optimistic tabId must die here, or the composer keeps "sending" into nothing
       // while the bubble sits there answered by no one (audit #29)
       if (state.tabId === msg.tabId) { state.tabId = null; state.tabCwd = null; state.pendingNewSession = false; setBusy(false); }
+      if (state._openTab === msg.tabId && state._openReject) {
+        const rej = state._openReject(); state._openTab = null;
+        if (rej) rej(new Error(msg.reason || '会话被拒绝'));
+      }
       $('#statusline').textContent = '会话被拒绝：' + (msg.reason || '未知原因');
       renderProjectTree(true);
       return;
@@ -190,13 +195,26 @@ function wsConnect() {
 }
 const wsQueue = [];
 let wsRetries = 0;
+const DROPPABLE_RPC = new Set(['get_state', 'get_entries', 'get_available_models', 'get_available_thinking_levels']); // stale the moment they flush — refetching is always safe
 function wsSend(obj) {
   if (state.wsReady) { state.ws.send(JSON.stringify(obj)); return; }
   if (wsQueue.length >= 200) { // bounded offline queue — an offline typing spree must not grow the heap
-    wsQueue.shift();
-    const sl = $('#statusline'); if (sl) sl.textContent = '离线队列已满（200）——最早的一条待发消息被丢弃';
+    // v1.3.6 review P2-2: drop the oldest REFRESH-class frame only (its answer is
+    // stale the moment it flushes); never an open/prompt/close/set_model/adopt —
+    // losing those silently ate user turns while the comment claimed they were safe.
+    const di = wsQueue.findIndex((f) => f.type === 'rpc' && DROPPABLE_RPC.has(f.data && f.data.type));
+    if (di >= 0) {
+      wsQueue.splice(di, 1);
+      const sl = $('#statusline'); if (sl) sl.textContent = '离线队列已满（200）——一条状态刷新请求被丢弃';
+    } else {
+      // nothing refresh-class to shed: the queue is all user-meaningful frames, so
+      // this send is refused INSTEAD of silently discarding someone's prompt
+      const kind = obj.type === 'rpc' ? (obj.data && obj.data.type) || 'rpc' : obj.type;
+      const sl = $('#statusline'); if (sl) sl.textContent = `离线队列已满（200）——「${kind}」未能入队，连接恢复后请重试`;
+      return;
+    }
   }
-  wsQueue.push(obj); // flushed on open — never drop open/prompt frames
+  wsQueue.push(obj); // flushed on open — user-meaningful frames (open/prompt/close/set_model/adopt) are never dropped
 }
 
 // ---------- pi event handling ----------
@@ -560,7 +578,20 @@ function rpcTo(data) { wsSend({ type: 'rpc', tabId: state.tabId, data }); }
 function openPiSession({ sessionPath = null, isNew = false }) {
   if (!state.project) { askAddProject(); return; }
   state.importView = false; // opening a real session leaves the read-only import view
+  // draft preservation (v1.3.6 review P2-1): open-denied must REJECT this promise so a
+  // composer-originated open can catch it and keep the draft; the 20s backstop guards
+  // against a lost frame. Non-composer callers (project tree, failover resend) just
+  // fire-and-forget as before — an unhandled rejection here is suppressed below.
+  // The reject fn lives on `state` because the module-level ws handler (open-denied /
+  // pi-session-file) has to reach it — a local closure variable is invisible there.
+  let rejectOpen;
+  state._openReject = (fn = null) => { const r = rejectOpen; rejectOpen = fn; return r || null; };
+  const openDenied = new Promise((_, rej) => { rejectOpen = rej; });
+  const backstop = new Promise((_, rej) => setTimeout(() => rej(new Error('等待会话打开确认超时')), 20000));
+  const race = Promise.race([openDenied, backstop]);
+  race.catch(() => {}); // fire-and-forget callers must not trigger unhandledrejection
   const doOpen = () => {
+    state._openTab = state.tabId; // the tabId THIS open attempt created (open-denied carries it)
     if (state.tabId) { wsSend({ type: 'close', tabId: state.tabId }); }
     state.tabId = 'tab-' + Math.random().toString(36).slice(2, 9);
     state.tabCwd = state.project.path; // the cwd this tab was opened under — submitPrompt refuses to send prompts across a mismatch
@@ -593,6 +624,7 @@ function openPiSession({ sessionPath = null, isNew = false }) {
     rpcTo({ type: 'get_available_thinking_levels' });
     rpcTo({ id: 'st-' + Date.now(), type: 'get_state' });
     setTimeout(refreshStats, 800);
+    return race; // resolves never (until denial) — submitPrompt awaits this and catches the rejection
   };
   if (!state.selModel) {
     return api.get('/api/models/available').then((r) => {
@@ -1217,11 +1249,13 @@ async function sendPrompt() {
   // known rejections clear NOTHING — the user's draft survives a refused send (audit #40)
   if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
   if (!state.project) { askAddProject(); return; }
-  inputEl.value = '';
-  inputEl.style.height = 'auto';
-  submitPrompt(text);
+  // draft preservation (v1.3.6 review P2-1): the composer is NOT cleared here anymore.
+  // submitPrompt clears it only at the point of no return, so a refused open
+  // (tab budget full / provider disabled / bad cwd) hands back the text AND the
+  // pending attachment exactly as the user left them.
+  submitPrompt(text, { fromComposer: true });
 }
-async function submitPrompt(text, { resend = false } = {}) {
+async function submitPrompt(text, { resend = false, fromComposer = false } = {}) {
   if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
   if (!text && !state.pendingImage) return; // F45: image-only turns are allowed through
   // execution-identity backstop: whatever UI path switched state.project without
@@ -1231,10 +1265,27 @@ async function submitPrompt(text, { resend = false } = {}) {
     detachLiveTab({ close: false });
   }
   if (!state.tabId) {
-    await openPiSession({ isNew: true });
-    await new Promise((r) => setTimeout(r, 400));
+    try {
+      await Promise.race([
+        openPiSession({ isNew: true }),
+        // success path: resolves as soon as the open was accepted on the wire
+        // (tab id exists and no denial raced in); denial rejects; 21s caps the wait
+        new Promise((res, rej) => {
+          const iv = setInterval(() => {
+            if (state.tabId && !state._openTab) { clearInterval(iv); res(); } // _openTab cleared = confirmed
+          }, 50);
+          setTimeout(() => { clearInterval(iv); if (!state.tabId) rej(new Error('等待会话打开确认超时')); else res(); }, 21000);
+        }),
+      ]);
+    } catch (e) {
+      // open-denied (or the 21s backstop): the draft is still in the composer, the
+      // pending attachment is still on the chip — the user can fix the cause and resend
+      $('#statusline').textContent = '会话打开失败：' + ((e && e.message) || '未知原因') + '——输入框内容已保留';
+      return;
+    }
   }
   if (!state.tabId) return;
+  if (fromComposer) { inputEl.value = ''; inputEl.style.height = 'auto'; } // point of no return — the prompt is going out
   // goal context injection: first prompt of a session carries the pinned objective
   const g = currentGoal();
   if (g && g.text && !state.goalInjected) {
@@ -1688,6 +1739,15 @@ async function openImported(src, file) {
 }
 
 // ---------- providers tab (beginner flow: URL + key → discover models → pick) ----------
+// partial-commit recovery (v1.3.6 review P3-4): after a mid-sequence failure, pull all
+// three docs back from disk so memory matches what actually got saved
+async function reloadConfigState() {
+  const m = await api.get('/api/models').catch(() => null);
+  if (m) state.modelsDoc = m;
+  state.routingMeta = await api.get('/api/routing').catch(() => state.routingMeta);
+  state.cfg = await api.get('/api/config').catch(() => state.cfg);
+  renderCurrentCfg();
+}
 async function loadModelsEditor() {
   const m = await api.get('/api/models').catch(() => null);
   if (!m) { const st = $('#models-status'); if (st) st.textContent = '加载 models.json 失败'; return; }
@@ -1759,7 +1819,10 @@ function renderCurrentCfg() {
       const mid = test || (models[0] || {}).id;
       if (!mid) { $('#models-status').textContent = `${name} 还没有可用模型，先获取模型列表`; return; }
       const key = `${name}/${mid}`;
-      await api.post('/api/config', { defaultModel: key });
+      // v1.3.6 review P3-3: apiParse resolves non-2xx to {error} — without checking it
+      // the chip/cfg updated even when the server refused the save (500 at saveConfig)
+      const cf = await api.post('/api/config', { defaultModel: key });
+      if (cf.error) { $('#models-status').textContent = '默认模型保存失败：' + cf.error; return; }
       state.cfg.defaultModel = key;
       state.selModel = key;
       updateModelChip();
@@ -1907,7 +1970,10 @@ $('#btn-kbfill').onclick = async () => {
 };
 $('#btn-prov-save').onclick = async () => {
   if (!state.modelsDoc || !state.editProv) return;
-  const doc = state.modelsDoc;
+  // v1.3.6 review P3-4: work on a CLONE — the pre-POST in-place mutation must not
+  // survive a refused save (memory must match disk), and the models→routing→config
+  // sequence can otherwise leave a cross-file partial commit
+  const doc = JSON.parse(JSON.stringify(state.modelsDoc));
   const prev = doc.providers[state.editProv] || {};
   const keyInput = $('#pf-key').value.trim();
   const models = $$('#pf-models .pm-row').map((row) => {
@@ -1925,18 +1991,22 @@ $('#btn-prov-save').onclick = async () => {
   if (keyInput) prov.apiKey = keyInput;
   else if (!prev.apiKey) delete prov.apiKey;
   doc.providers[state.editProv] = prov;
-  const saved = await api.post('/api/models', doc);
-  if (saved.error) { $('#models-status').textContent = '保存失败：' + saved.error; return; } // the backend refused — "已保存" would be a lie (audit #33)
+  const saved = await api.post('/api/models', doc).catch((e) => ({ error: e.message }));
+  if (saved.error) { // disk kept the old modelsDoc — adopt the server's doc back so memory matches (v1.3.6 review P3-4)
+    if (saved.modelsDoc) state.modelsDoc = saved.modelsDoc;
+    $('#models-status').textContent = '保存失败：' + saved.error; return;
+  }
+  state.modelsDoc = doc; // the save landed — memory adopts the clone that disk now holds
   const def = document.querySelector('input[name="pm-default"]:checked');
   const test = document.querySelector('input[name="pm-test"]:checked');
   if (test) {
-    const rt = await api.post('/api/routing', { providers: { [state.editProv]: { testModel: test.value } } });
-    if (rt.error) { $('#models-status').textContent = '路由保存失败：' + rt.error; return; }
+    const rt = await api.post('/api/routing', { providers: { [state.editProv]: { testModel: test.value } } }).catch((e) => ({ error: e.message }));
+    if (rt.error) { $('#models-status').textContent = '路由保存失败：' + rt.error + '（模型已保存；正在重载路由/配置以对齐磁盘）'; await reloadConfigState(); return; }
   }
   if (def) {
+    const cf = await api.post('/api/config', { defaultModel: def.value }).catch((e) => ({ error: e.message }));
+    if (cf.error) { $('#models-status').textContent = '默认模型保存失败：' + cf.error + '（模型已保存；正在重载配置以对齐磁盘）'; await reloadConfigState(); return; } // cfg must match disk — set it only on success (v1.3.6 review P3-3)
     state.cfg.defaultModel = def.value;
-    const cf = await api.post('/api/config', { defaultModel: def.value });
-    if (cf.error) { $('#models-status').textContent = '默认模型保存失败：' + cf.error; return; }
     // the chip describes the RUNNING tab — with a live tab it must keep telling the
     // truth; the new default applies from the next new session (openPiSession prefers
     // cfg.defaultModel for isNew). Only with no live tab does the chip follow now.

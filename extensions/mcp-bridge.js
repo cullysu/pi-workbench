@@ -132,7 +132,11 @@ class McpClient {
       const argv = useShell ? ['/d', '/s', '/c', command, ...args] : args;
       const proc = this.proc = spawn(exe, argv, {
         cwd: os.homedir(),
-        env: { ...process.env, ...env },
+        // v1.3.8 review P1-2: the GUI admin token is scrubbed from server.mjs's own
+        // environment, but this bridge is also loaded by pi, which inherits whatever the
+        // shell gave it. Drop it again here so a third-party MCP server can never read it
+        // out of `env` even if a future launcher forgets the scrub.
+        env: (() => { const e = { ...process.env, ...env }; delete e.PIWB_TOKEN; delete e.PIWB_EMBED_TOKEN; return e; })(),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32', // POSIX: own process group so _killTree can reap the whole tree

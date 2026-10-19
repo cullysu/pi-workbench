@@ -21,7 +21,7 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 
 ## Architecture at a glance
 
-- **Single-file server**: `server.mjs` (~1000 lines) = 42 named handlers + one declarative route table + a single dispatch loop; auth and 404 live in exactly one place
+- **Single-file server**: `server.mjs` (~1900 lines) = 42 named handlers + one declarative route table + a single dispatch loop; auth and 404 live in exactly one place
 - **All logic lives in nine `lib/` modules**: factories with explicit ctx injection, and **every factory verifies its wiring contract at boot** (a missing dependency crashes startup loudly instead of silently dying at 9am); IO collapses to four primitives in `lib/io.mjs`
 - **Secure defaults**: per-boot random token + CSP nonce (no `unsafe-inline` scripts), DOMPurify fail-closed sanitization, `path.relative` + realpath containment (symlinks/junctions cannot escape the project root), Origin checks, provider URLs forced to http(s) with capped responses, atomic config writes (tmp+rename, corrupt files preserved for forensics), CRC-checked backup zips with extraction limits, cron job ID allowlist
 - **Four verification layers** (all committed and re-runnable): repo-wide `eslint` 0/0, 23 API tests + a 47-route acceptance sweep (`scripts/route-sweep.py`), integration probes (`scripts/ws-probe.mjs`: a real pi child through the full WS chain), and a browser-level probe (`scripts/ui-probe.mjs`: headless Chromium asserts replay bubbles, all 17 panels, zero console errors)
@@ -37,10 +37,10 @@ Download the installer for your platform from [Releases](../../releases) (1.3.2 
 | Windows (Electron) | `PiWorkbench-Setup-<version>.exe` | the default, full-featured shell — pick this if unsure |
 | Windows (Tauri lightweight) | `PiWorkbench-<version>-Tauri-x64-setup.exe` | same feature surface, smaller (system WebView2) |
 | Linux | `PiWorkbench-<version>-linux.AppImage` | the Linux channel; `chmod +x` and run |
-| macOS (Apple Silicon) | `PiWorkbench-<version>-macOS-arm64.dmg` | pick by CPU; both dmgs bundle the same x64 Node (ARM runs it via Rosetta — the both-compatible trade-off) |
-| macOS (Intel) | `PiWorkbench-<version>-macOS-x64.dmg` | same as above |
+| macOS (Apple Silicon) | `PiWorkbench-<version>-macOS-arm64.dmg` | pick by CPU; the arm64 dmg bundles an arm64 Node — no Rosetta |
+| macOS (Intel) | `PiWorkbench-<version>-macOS-x64.dmg` | same as above (bundles an x64 Node) |
 
-The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; macOS x64 — Apple Silicon runs it via Rosetta), so **no system Node.js is needed**. `package.json` `engines >= 22.19` (pi 0.85.0's real floor) only constrains development from source:
+The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; macOS per architecture — arm64 and x64 respectively), so **no system Node.js is needed**. `package.json` `engines >= 22.19` (pi 0.85.0's real floor) only constrains development from source:
 
 - Windows installers follow system language (Chinese/English), per-user install, desktop + start menu shortcuts
 - Upgrades keep config and sessions; uninstall leaves `~/.pi-workbench` and `~/.pi` untouched

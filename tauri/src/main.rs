@@ -6,6 +6,7 @@
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::Manager;
@@ -17,6 +18,11 @@ struct ServerChild {
     child: Mutex<Option<Child>>,
     owned: Mutex<bool>,
 }
+
+// v1.3.8 review P3-11: Electron has supervised its server since the beginning — a
+// crash there is a 1.5s blip. The Tauri shell only ever spawned once, so after any
+// abnormal exit the window kept talking to a dead port until the user restarted the app.
+static QUITTING: AtomicBool = AtomicBool::new(false);
 
 fn port() -> u16 {
     static PORT: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
@@ -77,8 +83,7 @@ fn another_instance_running() -> bool {
 
 fn wait_port(port: u16, timeout: Duration) -> bool {
     let start = Instant::now();
-    while start.elapsed() < timeout {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+    while start.elapsed() < timeout {        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -349,6 +354,65 @@ fn ensure_runtime(zip: &Path, dir: &Path, version: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Spawn the bundled server. NODE_OPTIONS/NODE_PATH are removed: a planted value would
+/// inject modules into server.mjs before any of our checks run (audit #33).
+fn spawn_node_server(node: &Path, runtime_dir: &Path) -> std::io::Result<Child> {
+    Command::new(node)
+        .arg(runtime_dir.join("server.mjs"))
+        .current_dir(runtime_dir)
+        .env("PIWB_PARENT_PID", std::process::id().to_string())
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .creation_flags(no_window())
+        .spawn()
+}
+
+/// v1.3.8 review P3-11: watch the server we own and restart it after an abnormal exit —
+/// the same 1.5s grace + 2-restart budget Electron has. A deliberately stopped child
+/// (app quitting) or a healthy one just returns to the loop.
+fn start_supervisor(app: tauri::AppHandle, node: PathBuf, runtime_dir: PathBuf) {
+    std::thread::spawn(move || {
+        let mut restarts: u32 = 0;
+        let mut last_start = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(1500));
+            if QUITTING.load(Ordering::Relaxed) {
+                return;
+            }
+            let Some(state) = app.try_state::<ServerChild>() else { return };
+            let exited = {
+                let mut guard = state.child.lock().unwrap();
+                match guard.as_mut() {
+                    Some(c) => !matches!(c.try_wait(), Ok(None)),
+                    None => false, // the Exit handler already took it
+                }
+            };
+            if !exited {
+                continue;
+            }
+            if last_start.elapsed() > Duration::from_secs(300) {
+                restarts = 0; // stayed up five minutes: the earlier crashes were transient
+            }
+            if restarts >= 2 {
+                continue; // budget spent — the page shows its own connection error, do not loop
+            }
+            restarts += 1;
+            std::thread::sleep(Duration::from_millis(1500));
+            if QUITTING.load(Ordering::Relaxed) {
+                return;
+            }
+            match spawn_node_server(&node, &runtime_dir) {
+                Ok(c) => {
+                    *state.child.lock().unwrap() = Some(c);
+                    *state.owned.lock().unwrap() = true;
+                    last_start = Instant::now();
+                }
+                Err(_) => { /* stay within budget; the next tick retries */ }
+            }
+        }
+    });
+}
+
 fn main() {
     if another_instance_running() {
         std::process::exit(0);
@@ -397,23 +461,17 @@ fn main() {
             let already_up = TcpStream::connect(("127.0.0.1", port())).is_ok();
             let mut owned = false;
             let mut child = None;
+            let mut sup_node: Option<PathBuf> = None;
             if !already_up {
                 let node = find_node(&runtime_dir).ok_or_else(|| "node.exe not found".to_string())?;
                 // NODE_OPTIONS/NODE_PATH must not leak into the bundled runtime: a
                 // planted NODE_OPTIONS would inject modules into server.mjs before
                 // any of our checks run — Electron strips these, so does the Tauri
                 // shell now (audit #33)
-                let c = Command::new(&node)
-                    .arg(runtime_dir.join("server.mjs"))
-                    .current_dir(&runtime_dir)
-                    .env("PIWB_PARENT_PID", std::process::id().to_string())
-                    .env_remove("NODE_OPTIONS")
-                    .env_remove("NODE_PATH")
-                    .creation_flags(no_window())
-                    .spawn()
-                    .map_err(|e| format!("node spawn failed: {e}"))?;
+                let c = spawn_node_server(&node, &runtime_dir).map_err(|e| format!("node spawn failed: {e}"))?;
                 child = Some(c);
                 owned = true;
+                sup_node = Some(node);
             }
 
             if !wait_port(port(), Duration::from_secs(30)) {
@@ -431,6 +489,11 @@ fn main() {
             *app.state::<ServerChild>().child.lock().unwrap() = child;
             *app.state::<ServerChild>().owned.lock().unwrap() = owned;
             let _ = APP.set(app.handle().clone());
+            // only a server WE own is ours to restart; an already-running instance
+            // belongs to another shell (the second instance exited at startup)
+            if let Some(node) = sup_node {
+                start_supervisor(app.handle().clone(), node, runtime_dir.clone());
+            }
 
             let url = format!("http://127.0.0.1:{}/", port()).parse()?;
             let init_js = format!("window.__API_TOKEN = {};\n", serde_json::to_string(&shell_token).unwrap_or_else(|_| "\"\"".into()));
@@ -462,6 +525,9 @@ fn main() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                // tell the supervisor to stand down FIRST — otherwise it may resurrect
+                // the server during our own shutdown
+                QUITTING.store(true, Ordering::SeqCst);
                 let owned = app_handle
                     .try_state::<ServerChild>()
                     .map(|s| *s.owned.lock().unwrap())

@@ -48,6 +48,14 @@ const PORT = Number(process.env.PIWB_PORT || 32123);
 // (plus a 0600 token file for tooling). See the shell repos' main entry points.
 const API_TOKEN = process.env.PIWB_TOKEN || crypto.randomBytes(24).toString('hex');
 const TOKEN_EMBED = process.env.PIWB_EMBED_TOKEN === '1';
+const TOKEN_FROM_ENV = !!process.env.PIWB_TOKEN; // the shell owns this token; we only hand it back
+// v1.3.8 review P1-2: CAPTURE, THEN SCRUB. Every child we start (pi, MCP servers, tool
+// shells, cron runs, git, the file browser) inherits process.env, and pi can run arbitrary
+// commands — so keeping PIWB_TOKEN in the environment handed the GUI's admin credential to
+// every process the agent could start. Only THIS process authenticates the GUI; nothing
+// downstream needs it, so it leaves the environment before any spawn happens.
+delete process.env.PIWB_TOKEN;
+delete process.env.PIWB_EMBED_TOKEN;
 const TOKEN_FILE = path.join(CFG_DIR, 'token');
 const HTML_NONCE = crypto.randomBytes(16).toString('base64'); // CSP script nonce for the injected token bootstrap
 // Electron mode: self-terminate when the desktop app dies, so the port never leaks
@@ -195,6 +203,11 @@ const hostAllowed = (h) => h === `127.0.0.1:${PORT}` || h === `localhost:${PORT}
 const readJson = (p) => {
   try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
 };
+// v1.3.8 review P2-8: object keys taken from requests/disk must never be able to traverse
+// the prototype chain. `providers['__proto__']` reads Object.prototype (truthy), so a plain
+// `x = x || {}` would then write onto the global prototype.
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const isSafeKey = (k) => typeof k === 'string' && k.length > 0 && k.length <= 200 && !UNSAFE_KEYS.has(k);
 
 // ---------- routing: fallback chains + per-key cooldowns/rotation ----------
 const ROUTING_FILE = path.join(CFG_DIR, 'routing.json');
@@ -209,7 +222,13 @@ function loadRouting() {
     }
     delete r.routes;
   }
-  r.providers = r.providers || {};
+  r.providers = r.providers && typeof r.providers === 'object' && !Array.isArray(r.providers) ? r.providers : {};
+  // v1.3.8 review P2-8: a hand-edited/restored routing.json could already carry a
+  // prototype key; every consumer does `routing.providers[name]` lookups, so drop them
+  // on load as well as rejecting them on write.
+  for (const k of Object.keys(r.providers)) {
+    if (!isSafeKey(k) || !r.providers[k] || typeof r.providers[k] !== 'object' || Array.isArray(r.providers[k])) delete r.providers[k];
+  }
   r.chains = Array.isArray(r.chains) ? r.chains.filter((c) => Array.isArray(c)) : []; // [null] chains used to TypeError nextInChain mid-fallback
   // `state: 1` (scalar) survives `||` — and assigning .cooldowns on a primitive THROWS
   // in strict mode, taking every routing API down with it (audit #07)
@@ -733,6 +752,33 @@ const realContains = (root, target) => {
   }
   return contains(rpRoot, tail.length ? path.join(t, ...tail) : t);
 };
+// v1.3.8 review P3-12: realContains() proved the TARGET was inside the root, but the
+// caller then opened the ORIGINAL (still symlink-bearing) path — a same-user process
+// could swap the link in between. resolveInside() returns the already-resolved real
+// path so the check and the syscall name the same file. A path whose last components
+// do not exist yet still resolves through its nearest existing ancestor (so "not
+// found" keeps reporting 404, not 400). Residual: a directory component of the
+// resolved path can still be swapped (Windows has no O_NOFOLLOW) — closing that needs
+// openat-style handling the platform does not offer here.
+const resolveInside = (root, target) => {
+  const abs = path.resolve(String(target || ''));
+  const real = (() => {
+    try { return fs.realpathSync(abs); } catch (e) {
+      if (!e || e.code !== 'ENOENT') return null;
+      let t = abs; const tail = [];
+      for (;;) {
+        try { return path.join(fs.realpathSync(t), ...tail); } catch (e2) {
+          if (!e2 || e2.code !== 'ENOENT') return null;
+          tail.unshift(path.basename(t));
+          const up = path.dirname(t);
+          if (up === t) return null;
+          t = up;
+        }
+      }
+    }
+  })();
+  return real && realContains(root, real) ? real : null;
+};
 function json(res, code, obj) {
   const s = JSON.stringify(obj);
   res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -833,8 +879,10 @@ async function hSessionsPi(req, res, u) {
 async function hSessionsDelete(req, res, u) {
     const { path: file } = await readBody(req);
     const root = path.resolve(PI_SESSIONS);
-    const abs = path.resolve(String(file || ''));
-    if (!realContains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) return json(res, 400, { error: 'bad path' });
+    const abs0 = path.resolve(String(file || ''));
+    // P3-12: the check and the unlink must name the same file — resolve once
+    const abs = resolveInside(root, abs0);
+    if (!abs || !abs.toLowerCase().endsWith('.jsonl')) return json(res, 400, { error: 'bad path' });
     if (!fs.existsSync(abs)) return json(res, 404, { error: 'not found' });
     fs.rmSync(abs, { force: true });
     return json(res, 200, { ok: true, deleted: abs });
@@ -892,6 +940,21 @@ async function hModels(req, res, u) {
       }
       const prev = readJson(PI_MODELS) || { providers: {} };
       for (const [name, p] of Object.entries(doc.providers)) {
+        // v1.3.8 review P2-7/P2-8: a null provider row or a `__proto__` key used to survive
+        // the write and then TypeError every reader (`kbfill` walks m.id). Validate the
+        // SHAPE here, where a 400 costs nothing, instead of trusting the doc.
+        if (!isSafeKey(name)) return json(res, 400, { error: `provider name not allowed: ${name}` });
+        if (!p || typeof p !== 'object' || Array.isArray(p)) return json(res, 400, { error: `provider ${name} must be an object` });
+        if (p.models != null) {
+          if (!Array.isArray(p.models)) return json(res, 400, { error: `provider ${name}: models must be an array` });
+          for (const m of p.models) {
+            if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.id !== 'string' || !m.id) {
+              return json(res, 400, { error: `provider ${name}: every model needs a string id` });
+            }
+          }
+        } else {
+          p.models = [];
+        }
         // credential ownership follows the ENDPOINT — and an old provider with a key
         // but NO baseUrl is an UNKNOWN trust domain, not the same one (audit #02).
         // F04: GET answers with a scrubbed URL, so a plain UI save round-trips the
@@ -1009,6 +1072,9 @@ async function hProvidersKbfill(req, res, u) {
     const pricing = {};
     let n = 0;
     for (const m of pv.models) {
+      // v1.3.8 review P2-7: models.json can arrive from a restore or the advanced editor —
+      // a null row used to throw on m.id and 500 the fill.
+      if (!m || typeof m !== 'object' || typeof m.id !== 'string') continue;
       const hit = kbLookup(m.id);
       if (!hit) continue;
       if ((!m.contextWindow || m.contextWindow === 128000) && hit.ctx) {
@@ -1045,7 +1111,16 @@ async function hRouting(req, res, u) {
       if (Array.isArray(body.chains)) routing.chains = body.chains.filter((c) => Array.isArray(c) && c.every((x) => typeof x === 'string' && x.includes('/'))); // a malformed chain would only explode at failover time
       if (body.providers && typeof body.providers === 'object') {
         for (const [name, meta] of Object.entries(body.providers)) {
-          const cur = routing.providers[name] = routing.providers[name] || {};
+          // v1.3.8 review P2-7: `{"providers":{"x":null}}` used to throw at meta.enabled and
+          // surface as a 500 on an endpoint that only ever receives hand-edited JSON.
+          if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return json(res, 400, { error: `provider ${name} must be an object` });
+          // v1.3.8 review P2-8: a provider named `__proto__` read Object.prototype back
+          // (truthy), then the assignments below wrote enabled/priority onto EVERY object in
+          // the process. Routing providers are a plain string-keyed map; these three keys are
+          // never legitimate names and must not be reachable through prototype lookup.
+          if (!isSafeKey(name)) return json(res, 400, { error: `provider name not allowed: ${name}` });
+          if (!Object.hasOwn(routing.providers, name)) routing.providers[name] = {};
+          const cur = routing.providers[name];
           if (typeof meta.enabled === 'boolean') cur.enabled = meta.enabled;
           if (Number.isFinite(meta.priority)) cur.priority = meta.priority;
           if (Array.isArray(meta.keyEnvs)) cur.keyEnvs = meta.keyEnvs.map(String);
@@ -1119,6 +1194,9 @@ async function hCron(req, res, u) {
       if (jobs.length > 100) return json(res, 400, { error: '定时任务最多 100 个' });
       const seenIds = new Set();
       for (const j of jobs) {
+        // v1.3.8 review P2-7: `{"jobs":[null]}` used to throw on `j.name` and answer 500
+        // from an endpoint whose whole job is validating hand-edited input.
+        if (!j || typeof j !== 'object' || Array.isArray(j)) return json(res, 400, { error: '每个任务必须是对象' });
         if (typeof j.name !== 'string' || !j.name || typeof j.prompt !== 'string' || !j.prompt) return json(res, 400, { error: '每个任务需要字符串类型的 name 和 prompt' });
         if (j.id != null && j.id !== '' && !isJobId(j.id)) return json(res, 400, { error: '任务 ID 只能含字母/数字/连字符，最长 64 字符' });
         if (j.id && seenIds.has(j.id)) return json(res, 400, { error: '任务 ID 重复：' + j.id });
@@ -1133,7 +1211,10 @@ async function hCron(req, res, u) {
           if (typeof j.cwd !== 'string' || !knownProject(j.cwd)) return json(res, 400, { error: 'cwd 必须是已注册的项目目录' });
         }
       }
-      const prev = readJson(CRON_FILE) || { jobs: [] };
+      const prevRaw = readJson(CRON_FILE) || { jobs: [] };
+      // the file on disk is hand-editable/restorable too — `jobs: null` or a null element
+      // must not break a legitimate save with a TypeError
+      const prev = { jobs: Array.isArray(prevRaw.jobs) ? prevRaw.jobs.filter((x) => x && typeof x === 'object') : [] };
       for (const j of jobs) {
         const old = prev.jobs.find((x) => x.id === j.id);
         if (old) {
@@ -1224,9 +1305,10 @@ async function hCronLastlog(req, res, u) {
 
 async function hSessionExport(req, res, u) {
     const root = path.resolve(PI_SESSIONS);
-    const abs = path.resolve(u.searchParams.get('path') || '');
     const allBranches = u.searchParams.get('all') === '1';
-    if (!realContains(root, abs) || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
+    // P3-12: stat/read the RESOLVED path so a link swap cannot redirect the export
+    const abs = resolveInside(root, u.searchParams.get('path') || '');
+    if (!abs || !abs.toLowerCase().endsWith('.jsonl')) { res.writeHead(400); return res.end('bad path'); }
     let st0; try { st0 = fs.statSync(abs); } catch { res.writeHead(404); return res.end('not found'); }
     if (st0.size > 100e6) { res.writeHead(413); return res.end('session too large to export (> 100MB)'); }
     const onGone = () => {}; res.on('error', onGone); // client vanished mid-export
@@ -1333,8 +1415,10 @@ async function hFilesList(req, res, u) {
     const cfgc = loadConfig();
     const known = (cfgc.projects || []).some((pr) => projectKey(pr.path) === projectKey(root || '')); // same identity as registration — case folds only where the filesystem does
     if (!root || !known) return json(res, 400, { error: 'unknown project root' });
-    const base = path.resolve(root, rel);
-    if (!realContains(root, base)) return json(res, 400, { error: 'bad path' });
+    // P3-12: list the resolved directory — a symlinked subdir must not expose names
+    // from outside the project
+    const base = resolveInside(root, path.resolve(root, rel));
+    if (!base) return json(res, 400, { error: 'bad path' });
     let entries;
     try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch (e) { return json(res, 400, { error: e.message }); }
     const skip = new Set(['node_modules', '.git', 'dist', 'build', '.next', '__pycache__']);
@@ -1354,8 +1438,9 @@ async function hFilesRead(req, res, u) {
     const cfgc = loadConfig();
     const known = (cfgc.projects || []).some((pr) => projectKey(pr.path) === projectKey(root || '')); // same identity as registration — case folds only where the filesystem does
     if (!root || !known) return json(res, 400, { error: 'unknown project root' });
-    const base = path.resolve(root, rel);
-    if (!realContains(root, base)) return json(res, 400, { error: 'bad path' });
+    // P3-12: read the resolved path, not the one the client named
+    const base = resolveInside(root, path.resolve(root, rel));
+    if (!base) return json(res, 400, { error: 'bad path' });
     let st; try { st = fs.statSync(base); } catch { return json(res, 400, { error: 'not found' }); }
     if (st.isDirectory()) return json(res, 400, { error: 'is a directory' });
     // FIFOs (and other non-regular files) pass a !isDirectory check with size 0 —
@@ -1404,14 +1489,35 @@ async function hEnv(req, res, u) {
     });
 }
 
+// v1.3.8 review P2-6: importers hand the WHOLE file to readFileSync (Claude/Gemini/Aider
+// readers) — a restored or hand-placed 2 GB session file would pin the single-threaded
+// event loop and blow out memory, while the neighbouring export path has had a cap all
+// along. Refuse before reading, and cap the returned entry count so even a file under the
+// byte limit cannot produce an unbounded reply.
+const MAX_IMPORT_BYTES = 100 * 1000 * 1000;
+const MAX_IMPORT_ENTRIES = 20000;
 async function hImport(req, res, u, m) {
     const imp = IMPORT_SOURCES[m[1]];
     if (m[2]) {
-      const f = u.searchParams.get('path');
+      const f0 = u.searchParams.get('path');
       const roots = [imp.root, ...(imp.roots ? imp.roots() : [])].filter(Boolean);
-      if (!f || (roots.length && !roots.some((r) => realContains(r, f)))) return json(res, 400, { error: 'bad path' });
-      if (!roots.length && !(f || '').startsWith('opencode://')) return json(res, 400, { error: 'bad path' });
-      return json(res, 200, { entries: imp.read(f) });
+      if (!f0 || (roots.length && !roots.some((r) => realContains(r, f0)))) return json(res, 400, { error: 'bad path' });
+      if (!roots.length && !(f0 || '').startsWith('opencode://')) return json(res, 400, { error: 'bad path' });
+      // P3-12: read the RESOLVED target (a swapped link cannot redirect the import)
+      const f = String(f0).startsWith('opencode://') ? f0 : (roots.map((r) => resolveInside(r, f0)).find(Boolean) || f0);
+      if (!String(f).startsWith('opencode://')) {
+        let st = null;
+        try { st = fs.statSync(f); } catch { return json(res, 400, { error: '会话文件不存在或不可读' }); }
+        if (!st.isFile()) return json(res, 400, { error: 'not a regular file' });
+        if (st.size > MAX_IMPORT_BYTES) {
+          return json(res, 413, { error: `会话文件过大（${(st.size / 1048576).toFixed(1)} MB），超过 ${MAX_IMPORT_BYTES / 1048576} MB 导入上限`, size: st.size });
+        }
+      }
+      const all = imp.read(f);
+      const entries = Array.isArray(all) ? all : [];
+      const truncated = entries.length > MAX_IMPORT_ENTRIES;
+      // keep the TAIL — an agent session's most recent turns are the ones worth re-reading
+      return json(res, 200, { entries: truncated ? entries.slice(-MAX_IMPORT_ENTRIES) : entries, truncated, total: entries.length });
     }
     return json(res, 200, { sessions: await imp.list() });
 }
@@ -1762,7 +1868,7 @@ if (isMain) server.listen(PORT, '127.0.0.1', () => {
   console.log(`pi-workbench listening on http://127.0.0.1:${PORT}`);
   // per-boot token file (0600 via atomicWrite on POSIX) for the desktop shells —
   // written only when the server owns the token generation
-  if (!process.env.PIWB_TOKEN) {
+  if (!TOKEN_FROM_ENV) {
     // restrictAcl inside atomicWrite already tightens this file's DACL on Windows (F08)
     try { saveJson(TOKEN_FILE, { token: API_TOKEN, at: new Date().toISOString() }); } catch { /* shells fall back to embedded mode */ }
   }

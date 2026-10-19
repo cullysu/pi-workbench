@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml/badge.svg)](https://github.com/cullysu/pi-workbench/actions/workflows/ci.yml)
 
-**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). 跨平台桌面应用：Windows 双壳（Electron 完整壳 + Tauri 轻量壳，安装包 ≈64MB）、Linux AppImage、macOS dmg（arm64/x64），中文界面。
+**pi-workbench** — a local-first desktop workbench for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). 跨平台桌面应用：Windows 双壳（Electron 完整壳 + Tauri 轻量壳，安装包 ≈68MB）、Linux AppImage、macOS dmg（arm64/x64），中文界面。
 
 不 fork、不改 pi。工作台以子进程运行 `pi --mode rpc`（stdin/stdout JSONL）驱动 pi 本体：会话文件是 pi 原生格式（`~/.pi/agent/sessions`），自定义模型在 `~/.pi/agent/models.json`，与 pi CLI 完全互通。
 
@@ -46,10 +46,10 @@
 | Windows (Electron) | `PiWorkbench-Setup-<版本>.exe` | 功能最全的默认壳，不确定就选这个 |
 | Windows (Tauri 轻量壳) | `PiWorkbench-<版本>-Tauri-x64-setup.exe` | 同一功能面，体积更小（系统 WebView2） |
 | Linux | `PiWorkbench-<版本>-linux.AppImage` | 唯一 Linux 通道，`chmod +x` 后直接运行 |
-| macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` | 按 CPU 选；两个 dmg 内置同一个 x64 Node（ARM 经 Rosetta 运行的全兼容取舍） |
-| macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` | 同上 |
+| macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` | 按 CPU 选；arm64 包内置 arm64 Node，无需 Rosetta |
+| macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` | 同上（内置 x64 Node） |
 
-安装包**内置 Node 运行时**（Windows/Linux 为 x64 官方二进制，macOS 为 x64 —— Apple Silicon 经 Rosetta 运行），**无需本机安装 Node.js**。`package.json` 的 `engines >= 22.19`（pi 0.85.0 的真实下限）仅约束源码开发环境：
+安装包**内置 Node 运行时**（Windows/Linux 为 x64 官方二进制，macOS 按架构分别内置 arm64 / x64），**无需本机安装 Node.js**。`package.json` 的 `engines >= 22.19`（pi 0.85.0 的真实下限）仅约束源码开发环境：
 
 - 跟随系统语言（中文 / English），可选安装路径，桌面 + 开始菜单快捷方式
 - 覆盖升级保留配置与会话；卸载不影响 `~/.pi-workbench` 与 `~/.pi`
@@ -92,7 +92,7 @@ npm run electron          # 或: node_modules\.bin\electron .
 
 - **界面语言**：`public/app.js` 的 `t()` 字典只覆盖导航与部分面板标题，正文、按钮、提示大量仍是内联中文；`index.html` 的 `lang` 固定 `zh-CN`。英文 UI 尚未收尾，`README.en.md` 面向英文开发者，不等于英文使用者可用。
 - **窗口尺寸**：桌面壳最小 1080×680；被强制缩窄时由 `public/style.css` 末尾的媒体查询降级（<980px 收窄侧栏，<760px 隐藏项目树，会话仍可用 Ctrl+K 搜索进入），并已尊重 `prefers-reduced-motion`。
-- **ARM 安装包**：Windows arm64 包内含 x64 Node 运行时，依赖系统模拟层运行；启动器尚未检测模拟层是否可用。
+- **ARM 安装包**：Windows arm64 包内含 x64 Node 运行时，依赖系统模拟层运行；启动器尚未检测模拟层是否可用。（Mac 的 arm64 dmg 自 1.3.8 起内置 arm64 Node，不再依赖 Rosetta，且 CI 会解包验证。）
 - **备份范围**：“已抹除已知凭据”指抹除 apiKey/token、认证与 Cookie 类头、URL 内嵌账号密码、env 值与 models baseUrl —— 自定义字段里手写的密钥不会被识别，分享前请自行检查 zip。
 
 ## License

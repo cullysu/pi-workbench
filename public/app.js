@@ -161,7 +161,7 @@ function wsConnect() {
     if (msg.type === 'pi-session-file') {
       if (msg.tabId !== state.tabId) return; // a detached/old tab's file must not rebind the composer's session identity (audit #12)
       state.sessionFile = msg.sessionFile;
-      if (state._openTab === msg.tabId) { state._openTab = null; if (state._openReject) state._openReject(); } // open succeeded — disarm the denial/backstop race
+      resolveOpen(msg.tabId); // open succeeded — settle the deferred (v1.3.8 review P2-4)
       if (state.pendingNewSession) { state.pendingNewSession = false; renderProjectTree(true); }
       return;
     }
@@ -174,14 +174,12 @@ function wsConnect() {
       // optimistic tabId must die here, or the composer keeps "sending" into nothing
       // while the bubble sits there answered by no one (audit #29)
       if (state.tabId === msg.tabId) { state.tabId = null; state.tabCwd = null; state.pendingNewSession = false; setBusy(false); }
-      if (state._openTab === msg.tabId && state._openReject) {
-        const rej = state._openReject(); state._openTab = null;
-        if (rej) rej(new Error(msg.reason || '会话被拒绝'));
-      }
+      rejectOpen(msg.tabId, new Error(msg.reason || '会话被拒绝')); // v1.3.8 review P2-4: settle the deferred, don't just disarm it
       $('#statusline').textContent = '会话被拒绝：' + (msg.reason || '未知原因');
       renderProjectTree(true);
       return;
     }
+    if (msg.type === 'opened') { resolveOpen(msg.tabId); return; }
     if (msg.type === 'rpc-denied') {
       $('#statusline').textContent = '请求被拒绝：' + (msg.reason || '会话不属于此连接或已关闭');
       return;
@@ -190,14 +188,43 @@ function wsConnect() {
     if (msg.type === 'pi-event') for (const h of piEventHandlers) h(msg.data);
     else if (msg.type === 'pi-exit') handlePiExit(msg);
     else if (msg.type === 'pi-stderr') $('#statusline').textContent = msg.data.slice(0, 200);
-    else if (msg.type === 'opened') { /* noop */ }
   };
 }
 const wsQueue = [];
 let wsRetries = 0;
+// ---------- pending session opens ----------
+// v1.3.8 review P2-4: v1.3.7's patch only ever REJECTED — a successful open left the
+// promise dangling until the 20s backstop fired, so `startInProject` and the new-session
+// button sat for 20 seconds and then threw. Each attempted tabId now owns one deferred,
+// settled exactly once: resolve on the server's `opened`/`pi-session-file`, reject on
+// `open-denied`, and the backstop rejects only if neither ever arrives.
+const pendingOpens = new Map(); // tabId -> { resolve, reject, timer }
+function settleOpen(tabId, ok, err) {
+  const p = pendingOpens.get(tabId);
+  if (!p) return false;
+  pendingOpens.delete(tabId);
+  clearTimeout(p.timer);
+  if (ok) p.resolve(); else p.reject(err || new Error('会话打开失败'));
+  return true;
+}
+function resolveOpen(tabId) { return settleOpen(tabId, true); }
+function rejectOpen(tabId, err) { return settleOpen(tabId, false, err); }
+function newOpenDeferred(tabId, timeoutMs = 20000) {
+  settleOpen(tabId, false, new Error('被新的打开请求取代')); // a retry on the same tab supersedes the old wait
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingOpens.delete(tabId);
+      reject(new Error('等待会话打开确认超时'));
+    }, timeoutMs);
+    pendingOpens.set(tabId, { resolve, reject, timer });
+  });
+}
 const DROPPABLE_RPC = new Set(['get_state', 'get_entries', 'get_available_models', 'get_available_thinking_levels']); // stale the moment they flush — refetching is always safe
+// v1.3.8 review P2-3: returns whether the frame was actually accepted (sent or queued).
+// The composer used to clear the draft and the attachment BEFORE calling this, so a
+// refused send lost the user's text even though the statusline told them to retry.
 function wsSend(obj) {
-  if (state.wsReady) { state.ws.send(JSON.stringify(obj)); return; }
+  if (state.wsReady) { state.ws.send(JSON.stringify(obj)); return true; }
   if (wsQueue.length >= 200) { // bounded offline queue — an offline typing spree must not grow the heap
     // v1.3.6 review P2-2: drop the oldest REFRESH-class frame only (its answer is
     // stale the moment it flushes); never an open/prompt/close/set_model/adopt —
@@ -211,10 +238,11 @@ function wsSend(obj) {
       // this send is refused INSTEAD of silently discarding someone's prompt
       const kind = obj.type === 'rpc' ? (obj.data && obj.data.type) || 'rpc' : obj.type;
       const sl = $('#statusline'); if (sl) sl.textContent = `离线队列已满（200）——「${kind}」未能入队，连接恢复后请重试`;
-      return;
+      return false;
     }
   }
   wsQueue.push(obj); // flushed on open — user-meaningful frames (open/prompt/close/set_model/adopt) are never dropped
+  return true;
 }
 
 // ---------- pi event handling ----------
@@ -574,24 +602,11 @@ function clearTimeline(withPlaceholder) {
 }
 
 // ---------- session lifecycle ----------
-function rpcTo(data) { wsSend({ type: 'rpc', tabId: state.tabId, data }); }
+function rpcTo(data) { return wsSend({ type: 'rpc', tabId: state.tabId, data }); }
 function openPiSession({ sessionPath = null, isNew = false }) {
-  if (!state.project) { askAddProject(); return; }
+  if (!state.project) { askAddProject(); return Promise.resolve(); }
   state.importView = false; // opening a real session leaves the read-only import view
-  // draft preservation (v1.3.6 review P2-1): open-denied must REJECT this promise so a
-  // composer-originated open can catch it and keep the draft; the 20s backstop guards
-  // against a lost frame. Non-composer callers (project tree, failover resend) just
-  // fire-and-forget as before — an unhandled rejection here is suppressed below.
-  // The reject fn lives on `state` because the module-level ws handler (open-denied /
-  // pi-session-file) has to reach it — a local closure variable is invisible there.
-  let rejectOpen;
-  state._openReject = (fn = null) => { const r = rejectOpen; rejectOpen = fn; return r || null; };
-  const openDenied = new Promise((_, rej) => { rejectOpen = rej; });
-  const backstop = new Promise((_, rej) => setTimeout(() => rej(new Error('等待会话打开确认超时')), 20000));
-  const race = Promise.race([openDenied, backstop]);
-  race.catch(() => {}); // fire-and-forget callers must not trigger unhandledrejection
   const doOpen = () => {
-    state._openTab = state.tabId; // the tabId THIS open attempt created (open-denied carries it)
     if (state.tabId) { wsSend({ type: 'close', tabId: state.tabId }); }
     state.tabId = 'tab-' + Math.random().toString(36).slice(2, 9);
     state.tabCwd = state.project.path; // the cwd this tab was opened under — submitPrompt refuses to send prompts across a mismatch
@@ -624,7 +639,9 @@ function openPiSession({ sessionPath = null, isNew = false }) {
     rpcTo({ type: 'get_available_thinking_levels' });
     rpcTo({ id: 'st-' + Date.now(), type: 'get_state' });
     setTimeout(refreshStats, 800);
-    return race; // resolves never (until denial) — submitPrompt awaits this and catches the rejection
+    const p = newOpenDeferred(state.tabId);
+    p.catch(() => {}); // fire-and-forget callers (project tree, session click) must not raise unhandledrejection
+    return p;
   };
   if (!state.selModel) {
     return api.get('/api/models/available').then((r) => {
@@ -1266,26 +1283,17 @@ async function submitPrompt(text, { resend = false, fromComposer = false } = {})
   }
   if (!state.tabId) {
     try {
-      await Promise.race([
-        openPiSession({ isNew: true }),
-        // success path: resolves as soon as the open was accepted on the wire
-        // (tab id exists and no denial raced in); denial rejects; 21s caps the wait
-        new Promise((res, rej) => {
-          const iv = setInterval(() => {
-            if (state.tabId && !state._openTab) { clearInterval(iv); res(); } // _openTab cleared = confirmed
-          }, 50);
-          setTimeout(() => { clearInterval(iv); if (!state.tabId) rej(new Error('等待会话打开确认超时')); else res(); }, 21000);
-        }),
-      ]);
+      // v1.3.8 review P2-4: openPiSession's own deferred now settles on BOTH paths
+      // (opened / open-denied / backstop), so no second poll race is needed here.
+      await openPiSession({ isNew: true });
     } catch (e) {
-      // open-denied (or the 21s backstop): the draft is still in the composer, the
+      // open-denied (or the backstop): the draft is still in the composer, the
       // pending attachment is still on the chip — the user can fix the cause and resend
       $('#statusline').textContent = '会话打开失败：' + ((e && e.message) || '未知原因') + '——输入框内容已保留';
       return;
     }
   }
   if (!state.tabId) return;
-  if (fromComposer) { inputEl.value = ''; inputEl.style.height = 'auto'; } // point of no return — the prompt is going out
   // goal context injection: first prompt of a session carries the pinned objective
   const g = currentGoal();
   if (g && g.text && !state.goalInjected) {
@@ -1293,6 +1301,20 @@ async function submitPrompt(text, { resend = false, fromComposer = false } = {})
     state.goalInjected = true;
   }
   if (!text) text = '（图片）'; // F45: pi needs a non-empty message; the placeholder is what the timeline shows too
+  const cmd = { type: 'prompt', message: text };
+  const sentImage = state.pendingImage;
+  if (sentImage) { cmd.images = [sentImage]; $('#statusline').textContent = ''; }
+  if (state.streaming) cmd.streamingBehavior = 'followUp';
+  // v1.3.8 review P2-3: send FIRST, hand the draft back on refusal. Clearing the
+  // composer/attachment before this call lost the user's text while the statusline
+  // asked them to "retry" a message that no longer existed anywhere.
+  if (!rpcTo(cmd)) {
+    if (fromComposer && !inputEl.value.trim()) { inputEl.value = text; inputEl.style.height = 'auto'; }
+    if (sentImage && !state.pendingImage) { state.pendingImage = sentImage; renderAttachChip(); }
+    return;
+  }
+  if (fromComposer) { inputEl.value = ''; inputEl.style.height = 'auto'; } // accepted — the prompt is going out
+  if (sentImage) { state.pendingImage = null; renderAttachChip(); }
   state.lastPrompt = text;
   state.failoverDone = false;
   state.userAborted = false;
@@ -1302,10 +1324,6 @@ async function submitPrompt(text, { resend = false, fromComposer = false } = {})
   if (!resend && $('#topbar').classList.contains('hidden')) clearTimeline(false);
   const el = msgShell('user', Date.now(), false);
   el.querySelector('.msg-body').textContent = text;
-  const cmd = { type: 'prompt', message: text };
-  if (state.pendingImage) { cmd.images = [state.pendingImage]; state.pendingImage = null; renderAttachChip(); $('#statusline').textContent = ''; }
-  if (state.streaming) cmd.streamingBehavior = 'followUp';
-  rpcTo(cmd);
   scrollBottom();
   renderHomeHero();
 }
@@ -1869,9 +1887,9 @@ function renderProvModels(p) {
       </div>
       <div class="pm-line2">
         <span class="pm-lbl">上下文</span>
-        <input class="pm-ctx" type="number" value="${m.contextWindow || ''}" placeholder="128000">
+        <input class="pm-ctx" type="number" value="${esc(String(m.contextWindow == null ? '' : m.contextWindow))}" placeholder="128000">
         <span class="pm-lbl">输出</span>
-        <input class="pm-max" type="number" value="${m.maxTokens || ''}" placeholder="4096">
+        <input class="pm-max" type="number" value="${esc(String(m.maxTokens == null ? '' : m.maxTokens))}" placeholder="4096">
       </div>
       ${priceLine(state.editProv, m.id)}`;
     row.querySelector('.pm-test').onclick = async () => {
@@ -2032,8 +2050,33 @@ $('#btn-prov-del').onclick = () => {
         $('#models-status').textContent = `删除失败：${(r && r.error) || '无响应'}（未改动）`;
         return;
       }
+      // v1.3.8 review P2-10: models.json alone left DANGLING references — a defaultModel
+      // pointing at the deleted provider made every new session fail, and a fallback chain
+      // naming its models kept "…/model" entries that can never resolve. Clean both here,
+      // where the deletion actually happens, and report what was swept.
+      const swept = [];
+      const dm = state.cfg && state.cfg.defaultModel;
+      if (dm && String(dm).startsWith(name + '/')) {
+        const cf = await api.post('/api/config', { defaultModel: null }).catch((e) => ({ error: e.message }));
+        if (cf && !cf.error) { state.cfg.defaultModel = null; state.selModel = null; updateModelChip(); swept.push('默认模型'); }
+      }
+      try {
+        const rt = await api.get('/api/routing').catch(() => null);
+        if (rt && Array.isArray(rt.chains)) {
+          const next = rt.chains
+            .map((c) => (Array.isArray(c) ? c.filter((m) => typeof m === 'string' && !m.startsWith(name + '/')) : c))
+            .filter((c) => Array.isArray(c) && c.length > 0);
+          if (JSON.stringify(next) !== JSON.stringify(rt.chains)) {
+            const sr = await api.post('/api/routing', { chains: next }).catch((e) => ({ error: e.message }));
+            if (sr && !sr.error) swept.push('回退链条目');
+          }
+        }
+      } catch { /* chain cleanup is best-effort; deletion itself already succeeded */ }
       state.editProv = null;
-      loadModelsEditor();
+      await loadModelsEditor();
+      await loadRoutingUI().catch(() => {});
+      $('#models-status').classList.remove('hidden');
+      $('#models-status').textContent = swept.length ? `${t('models_saved')}（已清理：${swept.join('、')}）` : t('models_saved');
     } },
   ]);
 };
@@ -2054,6 +2097,15 @@ $('#btn-models-save').onclick = async () => {
     const r = await api.post('/api/models', obj).catch((e) => ({ error: e.message }));
     $('#models-status').classList.remove('hidden');
     if (!r || r.error) { $('#models-status').textContent = `保存失败：${(r && r.error) || '无响应'}（磁盘未改动）`; return; } // F43
+    // v1.3.8 review P2-9: the advanced editor used to write disk while leaving
+    // state.modelsDoc stale — the NEXT provider-form save then cloned the old doc and
+    // silently reverted this edit. Reload the canonical (masked) doc so memory matches disk,
+    // and keep the textarea showing what actually landed.
+    await loadModelsEditor();
+    const ed = $('#models-editor');
+    if (ed && !ed.classList.contains('hidden') && state.modelsDoc) {
+      ed.value = JSON.stringify({ providers: state.modelsDoc.providers || {} }, null, 2);
+    }
     $('#models-status').textContent = t('models_saved');
   } catch (e) { $('#models-status').classList.remove('hidden'); $('#models-status').textContent = 'JSON error: ' + e.message; }
 };

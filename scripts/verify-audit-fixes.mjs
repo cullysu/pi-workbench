@@ -416,15 +416,16 @@ const check = (name, ok, detail = '') => {
   // clear happens only at the point of no return, AFTER the open await
   const submitIdx = app.indexOf('async function submitPrompt');
   const clearIdx = app.indexOf("inputEl.value = '';", submitIdx);
-  const openAwaitIdx = app.indexOf('await Promise.race([', submitIdx);
+  const openAwaitIdx = app.indexOf('await openPiSession({ isNew: true })', submitIdx);
   const tabIdGateIdx = app.indexOf('if (!state.tabId) return;', submitIdx);
   check('P2-1 submitPrompt clears the composer only after the open await + tabId gate',
     submitIdx > 0 && clearIdx > openAwaitIdx && openAwaitIdx > 0 && clearIdx > tabIdGateIdx && tabIdGateIdx > 0,
     `submit@${submitIdx} gate@${tabIdGateIdx} await@${openAwaitIdx} clear@${clearIdx}`);
-  check('P2-1 open-denied rejects the pending open (state._openReject wired)',
-    app.includes('state._openReject') && app.includes('会话打开失败：'), 'missing _openReject or failure statusline');
-  check('P2-1 openPiSession returns a denial/backstop race',
-    app.includes("Promise.race([openDenied, backstop])"), 'race missing');
+  check('P2-1 a refused open reports failure and keeps the draft',
+    app.includes('会话打开失败：') && app.includes('输入框内容已保留'), 'failure statusline missing');
+  check('P2-1 openPiSession settles through one deferred (resolve + reject + backstop)',
+    app.includes('function newOpenDeferred') && app.includes('function resolveOpen') && app.includes('function rejectOpen') && app.includes('等待会话打开确认超时'),
+    'open deferred missing');
 
   // P2-2: the 200-cap queue drops only refresh-class RPC and refuses user-meaningful frames
   check('P2-2 wsSend drops only refresh-class RPC at the 200 cap',
@@ -445,5 +446,93 @@ const check = (name, ok, detail = '') => {
   check('P3-5 collectProc slices each stdout/stderr chunk to the remaining cap',
     io.includes('maxOut - out.length') && io.includes('maxErr - err.length') && io.includes('out.slice(0, maxOut)'),
     'chunk-level slicing missing');
+}
+
+// 14) v1.3.7 review (wave 27): the 14 items — source contracts for the ones that are
+// structural, behavioral checks for every module that can be driven directly.
+{
+  const repoRoot = path.resolve(path.dirname(decodeURI(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  const rd = (p) => fs.readFileSync(path.join(repoRoot, p), 'utf8');
+  const app = rd(path.join('public', 'app.js'));
+  const srv = rd('server.mjs');
+  const cronSrc = rd(path.join('lib', 'cron.mjs'));
+  const mcp = rd(path.join('extensions', 'mcp-bridge.js'));
+  const ci = rd(path.join('.github', 'workflows', 'ci.yml'));
+
+  // P1-2: the GUI admin token must not survive into ANY child environment
+  check('P1-2 server scrubs PIWB_TOKEN from its own env after capture',
+    /delete process\.env\.PIWB_TOKEN;/.test(srv) && srv.indexOf('delete process.env.PIWB_TOKEN') > srv.indexOf('const API_TOKEN = process.env.PIWB_TOKEN'),
+    'capture-then-scrub missing');
+  check('P1-2 MCP bridge strips the token before spawning a server',
+    mcp.includes('delete e.PIWB_TOKEN'), 'bridge env strip missing');
+
+  // P2-8: prototype-pollution gate on every request-supplied provider key
+  check('P2-8 routing/models reject __proto__ and guard own properties',
+    srv.includes('const isSafeKey') && srv.includes('isSafeKey(name)') && srv.includes('Object.hasOwn(routing.providers, name)'),
+    'unsafe-key gate missing');
+
+  // P2-7: malformed members are 400s, not 500s
+  check('P2-7 cron/routing/models validate every member, not just the container',
+    srv.includes('每个任务必须是对象') && srv.includes('must be an object') && srv.includes('every model needs a string id'),
+    'member validation missing');
+
+  // P2-6: imports are capped before the whole file is read
+  check('P2-6 import refuses files over the byte cap and reports truncation',
+    srv.includes('MAX_IMPORT_BYTES') && srv.includes('MAX_IMPORT_ENTRIES') && srv.includes('truncated'),
+    'import cap missing');
+
+  // P2-5: the cron lock descriptor is closed on both settle paths
+  check('P2-5 cron closes the lock fd on settle and on spawn failure',
+    (cronSrc.match(/fs\.closeSync\(lockFd\)/g) || []).length >= 2 && cronSrc.includes('lockFd = undefined;'),
+    'lock fd close missing');
+
+  // P2-3/P2-4: wsSend reports acceptance; the composer restores on refusal; opens resolve
+  check('P2-3 wsSend reports whether the frame was accepted',
+    /function wsSend\(obj\)[\s\S]{0,1600}?return true;/.test(app) && app.includes('if (!rpcTo(cmd))'),
+    'wsSend receipt or composer restore missing');
+  check('P2-4 the deferred resolves on opened/pi-session-file and rejects on denial',
+    app.includes('function settleOpen') && /if \(msg\.type === 'opened'\) \{ resolveOpen\(msg\.tabId\); return; \}/.test(app) && app.includes('rejectOpen(msg.tabId'),
+    'deferred settle wiring missing');
+
+  // P2-9/P2-10: advanced save reloads memory; provider delete sweeps dangling refs
+  check('P2-9 advanced JSON save reloads state.modelsDoc',
+    /btn-models-save[\s\S]{0,900}?await loadModelsEditor\(\)/.test(app), 'modelsDoc not reloaded');
+  check('P2-10 provider delete clears defaultModel and prunes chains',
+    /btn-prov-del[\s\S]{0,2200}?defaultModel: null/.test(app) && /btn-prov-del[\s\S]{0,2600}?chains: next/.test(app),
+    'delete cleanup missing');
+
+  // P3-13: numeric model fields must be escaped like every other attribute
+  check('P3-13 contextWindow/maxTokens are escaped into the attribute',
+    app.includes("esc(String(m.contextWindow == null ? '' : m.contextWindow))") && app.includes("esc(String(m.maxTokens == null ? '' : m.maxTokens))"),
+    'attribute escaping missing');
+
+  // P1-1: the mac build must assemble a runtime PER architecture — one darwin-x64 node
+  // packed into both dmgs shipped an arm64 build that only ran under Rosetta
+  check('P1-1 macOS builds bundle a per-arch Node runtime and assert it',
+    ci.includes('for arch in arm64 x64') && ci.includes('darwin-$arch.tar.xz') && ci.includes('lipo -archs') && ci.includes('pkg-runtime-$arch.zip'),
+    'per-arch runtime assembly missing');
+  check('P1-1 each built dmg is unpacked and its bundled node arch verified',
+    ci.includes('hdiutil attach') && ci.includes('runtime.zip') && /\*"\$arch"\*\) ;;/.test(ci),
+    'dmg arch verification missing');
+
+  // P3-14: workflow actions pinned to immutable commits
+  check('P3-14 CI actions are pinned to commit SHAs',
+    !/@v\d+(\s|$)/m.test(ci) && /uses:\s*[^@\s]+@[0-9a-f]{40}/.test(ci),
+    'mutable action tags still present');
+
+  // P3-11: the Tauri shell must supervise its own server like Electron does
+  const rs = rd(path.join('tauri', 'src', 'main.rs'));
+  check('P3-11 Tauri restarts a crashed server within a restart budget',
+    rs.includes('fn start_supervisor') && rs.includes('restarts >= 2') && rs.includes('start_supervisor(app.handle().clone()'),
+    'tauri supervisor missing');
+  check('P3-11 Tauri marks quitting so the supervisor cannot resurrect the server',
+    rs.includes('static QUITTING') && rs.includes('QUITTING.store(true') && rs.includes('QUITTING.load'),
+    'quit guard missing');
+
+  // P3-12: the path check and the syscall must name the same (resolved) file
+  check('P3-12 file APIs operate on the resolved path, not the client-supplied one',
+    srv.includes('const resolveInside = (root, target)') &&
+    (srv.match(/resolveInside\(/g) || []).length >= 5,
+    'resolveInside not used at the call sites');
 }
 

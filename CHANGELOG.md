@@ -2,6 +2,51 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.8 — 2026-10-20
+
+### Fixed (from the independent v1.3.7 review — 14 items; release architecture, credential boundary, input validation)
+
+**The macOS arm64 dmg carries an arm64 runtime (P1-1):**
+- The build downloaded one `darwin-x64` Node and packed it into BOTH dmgs, so the "arm64" build only started under Rosetta 2. Each architecture now fetches its own tarball, asserts it with `lipo -archs` before zipping, and builds its own `pkg-runtime-<arch>.zip`; the dmgs are built in separate `electron-builder` invocations and then **the artifacts themselves are mounted, their `runtime.zip` extracted and the bundled `node` arch verified** — the claim is checked against what ships, not against the build inputs.
+
+**The GUI admin token no longer reaches the agent (P1-2):**
+- `server.mjs` captures `PIWB_TOKEN` and then deletes it (plus `PIWB_EMBED_TOKEN`) from its own environment before any spawn. Every child — pi, MCP servers, tool shells, cron runs, git — used to inherit it, so pi could read the credential that unlocks `/api/term/exec`, `/api/config`, backups and cron. The MCP bridge strips it again as defence in depth. (The token the shells hand the page is unchanged; only the subprocess environment lost it.)
+
+**A refused queue entry can no longer eat the prompt (P2-3):**
+- `wsSend`/`rpcTo` report acceptance. `submitPrompt` builds the frame first, and only after the wire accepts it clears the composer / consumes the pending image and draws the user bubble; a refusal restores the draft, the attachment and says why.
+
+**A successful session open now resolves (P2-4):**
+- The v1.3.7 deferred only had a reject path: the `opened` and `pi-session-file` frames took the reject function and dropped it, so `startInProject` and the new-session button waited out the 20 s backstop and then threw. One `{resolve, reject, timer}` per tabId now settles on arrival, denies on `open-denied`, and clears its timer either way. (Self-inflicted in v1.3.7; the old contract test only asserted the strings, never that the promise settles.)
+
+**Cron stops leaking descriptors (P2-5):**
+- The cross-process run lock was unlinked but never closed on either path (settle and spawn-prep failure). Both now close before unlinking.
+
+**Imports are bounded (P2-6):**
+- Session import stats the file first and refuses >100 MB with 413, and the reply is capped at the newest 20 000 entries with `truncated` + `total` reported. Claude/Gemini/Aider readers used to hand whatever size the file was to `readFileSync`.
+
+**Malformed documents are 400s, not 500s (P2-7):**
+- Cron jobs, routing providers and model rows are validated **member by member** (object shape, string ids) instead of only checking that the container is an array/object. `{"jobs":[null]}`, `{"providers":{"x":null}}` and a null model row used to reach `j.name` / `meta.enabled` / `m.id` and surface as 500s.
+
+**`__proto__` can no longer poison the process (P2-8):**
+- Provider names pass an `isSafeKey` gate (`__proto__`/`constructor`/`prototype` rejected) and provider rows are created with `Object.hasOwn`. `{"providers":{"__proto__":{...}}}` used to write `enabled` onto `Object.prototype` — every plain object in the process then read as a disabled provider.
+
+**Saving JSON really saves it (P2-9, P2-10):**
+- The advanced-JSON save reloads `state.modelsDoc` from the server response (the next provider-form save used to rewrite the pre-edit document over it). Deleting a provider now also clears a `defaultModel` that pointed at it and prunes routing chains naming it.
+
+**Numbers are escaped like everything else (P3-13):**
+- `contextWindow`/`maxTokens` go through `esc(String(...))` before landing in an attribute.
+
+**Tauri supervises its server (P3-11):**
+- The shell gained the same 1.5 s grace + two-restart budget + five-minute stability reset Electron has, and a `QUITTING` flag so shutdown cannot resurrect the process. Before this, any abnormal server exit left the window talking to a dead port until the app was restarted.
+
+**Path checks and syscalls name the same file (P3-12):**
+- `resolveInside()` returns the resolved realpath and every file API (session delete/export, file list/read, import) uses that resolved path for the actual operation. Residual documented: a directory component can still be swapped (no `O_NOFOLLOW` on Windows).
+
+**CI supply chain (P3-14):**
+- Every workflow action is pinned to a commit SHA with the release tag in a comment (SHAs resolved through the API, not invented). Code signing remains the one gap a certificate account must close.
+
+**Contract tests:** 20 new wave-27 assertions (63 total) covering the per-arch runtime + dmg verification, token scrub in both server and bridge, `__proto__` gate, member-level validation, import caps, lock fd, queue receipt, open settle, modelsDoc reload, chain pruning, attribute escaping, Tauri supervisor + quit guard, and resolved-path file APIs.
+
 ## 1.3.7 — 2026-10-17
 
 ### Fixed (from the independent v1.3.6 review — 5 items; draft safety, queue honesty, save rollback)

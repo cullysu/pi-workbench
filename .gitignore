@@ -47,3 +47,7 @@ tauri/target/
 # local UI-probe screenshot artifacts
 scripts/ui-shots/
 release-1.1.[3-9]/
+# per-release publish scripts and notes are local working material, not source.
+# 1.2.1-1.2.7 were tracked by accident in 98f9e17 — a pathspec exclusion list is an
+# invitation to forget an entry, so the rule belongs here instead.
+release-1.[0-9].[0-9]/

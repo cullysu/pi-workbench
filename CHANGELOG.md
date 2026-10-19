@@ -45,7 +45,7 @@ All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 **CI supply chain (P3-14):**
 - Every workflow action is pinned to a commit SHA with the release tag in a comment (SHAs resolved through the API, not invented). Code signing remains the one gap a certificate account must close.
 
-**Contract tests:** 20 new wave-27 assertions (63 total) covering the per-arch runtime + dmg verification, token scrub in both server and bridge, `__proto__` gate, member-level validation, import caps, lock fd, queue receipt, open settle, modelsDoc reload, chain pruning, attribute escaping, Tauri supervisor + quit guard, and resolved-path file APIs.
+**Contract tests:** 23 new wave-27 assertions (67 total) covering the per-arch runtime + dmg verification, token scrub in both server and bridge, `__proto__` gate, member-level validation, import caps, lock fd, queue receipt, open settle, modelsDoc reload, chain pruning, attribute escaping, Tauri supervisor + quit guard, and resolved-path file APIs.
 
 ## 1.3.7 — 2026-10-17
 

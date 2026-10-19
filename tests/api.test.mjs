@@ -363,6 +363,53 @@ test('cron routes reject junk job ids before path.join', async () => {
   const r = await req('/api/cron/lastlog', { id: '..' + path.sep + '..' + path.sep + 'evil' });
   assert.equal(r.status, 400, 'traversal id rejected');
 });
+
+// review wave 28, shortcoming 1: a provider change touches three files, and the UI
+// used to write them one request at a time — a failure on the second or third leg left
+// a cross-file partial commit. These endpoints are the single commit.
+test('provider save writes models+routing+config, delete sweeps the references', async () => {
+  const modelsFile = path.join(tmpHome, '.pi', 'agent', 'models.json');
+  // routing.json / config.json live in the workbench config dir, not the pi agent dir
+  const routingFile = path.join(tmpHome, '.pi-workbench', 'routing.json');
+  const cfgFile = path.join(tmpHome, '.pi-workbench', 'config.json');
+  const read = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+  fs.mkdirSync(path.dirname(routingFile), { recursive: true });
+  fs.writeFileSync(routingFile, JSON.stringify({ chains: [], providers: {} }));
+  fs.writeFileSync(cfgFile, JSON.stringify({ defaultModel: null }));
+
+  const saved = await req('/api/provider/save', {
+    name: 'txprov',
+    provider: { baseUrl: 'https://tx.example/v1', api: 'openai-responses', apiKey: 'sk-tx', models: [{ id: 'tm1' }] },
+    testModel: 'txprov/tm1',
+    defaultModel: 'txprov/tm1',
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal(saved.data.routed, true);
+  assert.equal(saved.data.defaulted, true);
+  assert.ok(read(modelsFile).providers.txprov, 'models.json gained the provider');
+  assert.equal(read(routingFile).providers.txprov.testModel, 'txprov/tm1', 'routing.json gained the probe model');
+  assert.equal(read(cfgFile).defaultModel, 'txprov/tm1', 'config.json gained the default');
+  assert.equal(saved.data.modelsDoc.providers.txprov.apiKey, '***', 'the response is masked');
+
+  const del = await req('/api/provider/delete', { name: 'txprov' });
+  assert.equal(del.status, 200, JSON.stringify(del.data));
+  assert.equal(del.data.existed, true);
+  assert.ok(del.data.swept.includes('默认模型'), 'defaultModel swept');
+  assert.ok(del.data.swept.includes('回退链') === false, 'empty chain list is not reported as swept');
+  assert.equal(read(modelsFile).providers.txprov, undefined, 'provider gone from models.json');
+  assert.equal(read(cfgFile).defaultModel, null, 'defaultModel cleared in the SAME commit');
+});
+
+test('provider endpoints refuse an unsafe name without touching disk', async () => {
+  const modelsFile = path.join(tmpHome, '.pi', 'agent', 'models.json');
+  const before = fs.readFileSync(modelsFile, 'utf8');
+  const bad = await req('/api/provider/save', { name: '__proto__', provider: { models: [] } });
+  assert.equal(bad.status, 400, 'prototype keys are not provider names');
+  assert.equal(fs.readFileSync(modelsFile, 'utf8'), before, 'models.json untouched');
+  const noName = await req('/api/provider/delete', {});
+  assert.equal(noName.status, 400, 'a delete without a name is refused, not coerced');
+  assert.match(String(noName.data && noName.data.error), /provider name not allowed/, 'and the reason names the field');
+});
 test('aider import parses a real-shaped chat history (fixture)', async () => {
   fs.writeFileSync(path.join(tmpHome, '.aider.chat.history.md'), [
     '# aider chat history',

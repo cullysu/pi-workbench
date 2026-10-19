@@ -86,6 +86,13 @@ try:
     call('会话删除(校验)', 'POST', '/api/sessions/delete', {'path': os.path.join(home, 'outside.jsonl')}, want=400)
     call('模型读', 'GET', '/api/models', want=200)
     call('模型写', 'POST', '/api/models', {'providers': {}}, want=200)
+    # wave 28: the provider transaction endpoints — one commit for all three files
+    call('供应商保存(校验)', 'POST', '/api/provider/save', {'name': '__proto__', 'provider': {}}, want=400)
+    call('供应商保存', 'POST', '/api/provider/save',
+         {'name': 'sweep-prov', 'provider': {'baseUrl': 'https://example.com', 'models': [{'id': 'm1'}]},
+          'testModel': 'sweep-prov/m1', 'defaultModel': 'sweep-prov/m1'}, want=200)
+    call('供应商删除(校验)', 'POST', '/api/provider/delete', {}, want=400)
+    call('供应商删除', 'POST', '/api/provider/delete', {'name': 'sweep-prov'}, want=200)
     call('模型枚举', 'GET', '/api/models/available', want=200)
     call('供应商发现', 'POST', '/api/providers/discover', {'baseUrl': 'https://example.com'}, want=200)
     call('知识库填充(校验)', 'POST', '/api/providers/kbfill', {'provider': 'nope'}, want=400)

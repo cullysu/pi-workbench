@@ -432,10 +432,15 @@ const check = (name, ok, detail = '') => {
     app.includes('DROPPABLE_RPC') && app.includes('未能入队') && !app.includes('最早的一条待发消息被丢弃'),
     'queue policy comment/behavior missing');
 
-  // P3-3: both set-default sites check the config ack before touching cfg/chip
+  // P3-3: a set-default site must not touch cfg/chip before the write is acknowledged.
+  // Two sites, two shapes: the per-provider "设默认" button posts /api/config itself and
+  // checks the ack; the provider form now sets the default inside the provider
+  // transaction and only adopts it when the transaction reports defaulted=true.
   const setDefaultSites = app.split("api.post('/api/config', { defaultModel").length - 1;
-  check('P3-3 every set-default site checks the /api/config ack',
-    setDefaultSites >= 2 && app.includes("'默认模型保存失败：'"), `sites=${setDefaultSites}`);
+  check('P3-3 every set-default site checks the ack before touching cfg/chip',
+    setDefaultSites >= 1 && app.includes("'默认模型保存失败：'") &&
+    /if \(r\.defaulted && state\.cfg\) \{[\s\S]{0,200}?state\.cfg\.defaultModel = def\.value/.test(app),
+    `sites=${setDefaultSites}`);
 
   // P3-4: provider save works on a clone and reloads state from disk on partial failure
   check('P3-4 btn-prov-save clones modelsDoc and reloads config state on partial failure',
@@ -497,8 +502,12 @@ const check = (name, ok, detail = '') => {
   // P2-9/P2-10: advanced save reloads memory; provider delete sweeps dangling refs
   check('P2-9 advanced JSON save reloads state.modelsDoc',
     /btn-models-save[\s\S]{0,900}?await loadModelsEditor\(\)/.test(app), 'modelsDoc not reloaded');
-  check('P2-10 provider delete clears defaultModel and prunes chains',
-    /btn-prov-del[\s\S]{0,2200}?defaultModel: null/.test(app) && /btn-prov-del[\s\S]{0,2600}?chains: next/.test(app),
+  // wave 28 moved the sweep into the server transaction, so the front end no longer
+  // writes config.json / routing.json itself — it asks for the deletion and reports
+  // what the server swept.
+  check('P2-10 provider delete sweeps dangling refs in the same commit',
+    app.includes("api.post('/api/provider/delete', { name })") &&
+    /btn-prov-del[\s\S]{0,2600}?r\.swept/.test(app),
     'delete cleanup missing');
 
   // P3-13: numeric model fields must be escaped like every other attribute
@@ -540,4 +549,185 @@ const check = (name, ok, detail = '') => {
     (srv.match(/resolveInside\(/g) || []).length >= 5,
     'resolveInside not used at the call sites');
 }
+
+// 15) v1.3.8 review (wave 28): the five short-comings. Short-comings 1-3 are code
+// problems and are driven for real; 4-5 are honest-scope statements and are recorded,
+// not "fixed" by a patch.
+{
+  const repoRoot = path.resolve(path.dirname(decodeURI(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  const rd = (p) => fs.readFileSync(path.join(repoRoot, p), 'utf8');
+  const app = rd(path.join('public', 'app.js'));
+  const srv = rd('server.mjs');
+  const srcSrc = rd(path.join('lib', 'sources.mjs'));
+  const provSrc = rd(path.join('lib', 'providers.mjs'));
+  const ci = rd(path.join('.github', 'workflows', 'ci.yml'));
+
+  // --- short-coming 1: a provider change is one commit, not a three-request sequence
+  check('28-1 providers module owns the cross-file transaction',
+    provSrc.includes('export function createProviders') && provSrc.includes('export class ProviderError') &&
+    provSrc.includes('const CTX_KEYS = ') && provSrc.includes('function snapshot(') &&
+    provSrc.includes('function restore(') && provSrc.includes('function commit('),
+    'providers.mjs transaction surface missing');
+  check('28-1 server routes provider save/delete through the transaction',
+    srv.includes("import {createProviders, ProviderError} from './lib/providers.mjs'") &&
+    srv.includes('createProviders({') &&
+    srv.includes("['POST', '/api/provider/save', hProviderSave]") &&
+    srv.includes("['POST', '/api/provider/delete', hProviderDelete]"),
+    'server not wired to the provider transaction');
+  // the route sweep caught this one: remove() takes the NAME, not the request body
+  check('28-1 the delete handler passes the name, not the request object',
+    srv.includes('providers.remove(name)') && !srv.includes('providers.remove({ name })'),
+    'delete handler passes the body object to remove()');
+  const saveIdx = app.indexOf("$('#btn-prov-save')");
+  const delIdx = app.indexOf("$('#btn-prov-del')");
+  const saveBody = app.slice(saveIdx, delIdx > saveIdx ? delIdx : saveIdx + 3000);
+  check('28-1 the save handler makes ONE request instead of three',
+    saveBody.includes("api.post('/api/provider/save'") &&
+    !saveBody.includes("api.post('/api/routing'") && !saveBody.includes("api.post('/api/config'"),
+    'save handler still writes the other two files itself');
+  // bound the slice at the NEXT handler — a fixed-length window bleeds into the
+  // advanced-JSON save below and blames this handler for its /api/models call
+  const delEnd = app.indexOf("$('#", delIdx + 10);
+  const delBody = app.slice(delIdx, delEnd > delIdx ? delEnd : delIdx + 2600);
+  check('28-1 the delete handler makes ONE request instead of three',
+    delBody.includes("api.post('/api/provider/delete'") &&
+    !delBody.includes("api.post('/api/models'") && !delBody.includes("api.post('/api/config'"),
+    'delete handler still cleans references with its own requests');
+  check('28-1 a reported rollback failure re-reads disk instead of trusting memory',
+    saveBody.includes('r.rollback') && saveBody.includes('await reloadConfigState()'),
+    'failed-rollback path does not resync');
+
+  // behavioral: a failure on the LAST write restores the earlier files, and a rollback
+  // that itself fails is reported rather than swallowed.
+  {
+    const { createProviders, ProviderError } = await import('../lib/providers.mjs');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-prov-'));
+    const MODELS_FILE = path.join(tmp, 'models.json');
+    const ROUTING_FILE = path.join(tmp, 'routing.json');
+    const CFG_FILE = path.join(tmp, 'config.json');
+    const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
+    const realAtomic = (f, raw) => { fs.writeFileSync(f + '.tmp', raw); fs.renameSync(f + '.tmp', f); };
+    const isSafeKey = (k) => typeof k === 'string' && k.length > 0 && !['__proto__', 'constructor', 'prototype'].includes(k);
+
+    const before = {
+      [MODELS_FILE]: JSON.stringify({ providers: { a: { models: [{ id: 'm1' }] } } }, null, 2),
+      [ROUTING_FILE]: JSON.stringify({ chains: [['a/m1']] }, null, 2),
+      [CFG_FILE]: JSON.stringify({ defaultModel: 'a/m1' }, null, 2),
+    };
+    for (const [f, raw] of Object.entries(before)) fs.writeFileSync(f, raw);
+    // fail exactly once, on the commit phase only — otherwise the rollback itself would
+    // hit the same injected fault and we could never observe a clean restore
+    const bake = ({ failOn, failRollbackOn = null } = {}) => {
+      let phase = 'commit';
+      return createProviders({
+        MODELS_FILE, ROUTING_FILE, CFG_FILE, readJson, isSafeKey,
+        atomicWrite: (f, raw) => {
+          if (phase === 'commit' && f === failOn) { phase = 'rollback'; throw new Error('disk full (simulated)'); }
+          if (phase === 'rollback' && f === failRollbackOn) throw new Error('rollback also failed (simulated)');
+          realAtomic(f, raw);
+        },
+      });
+    };
+
+    let err = null;
+    try { bake({ failOn: CFG_FILE }).save({ name: 'a', provider: { models: [{ id: 'm2' }] }, testModel: 'a/m2', defaultModel: 'a/m2' }); }
+    catch (e) { err = e; }
+    const restored = Object.entries(before).every(([f, raw]) => fs.readFileSync(f, 'utf8') === raw);
+    check('28-1 a mid-transaction write failure rolls every file back',
+      err instanceof ProviderError && err.status === 500 && err.rollback.length === 0 &&
+      err.detail === '已回滚到修改前的状态' && restored,
+      'rollback did not restore the pre-images');
+
+    // a rollback that cannot write must be REPORTED, not swallowed
+    let err2 = null;
+    try { bake({ failOn: CFG_FILE, failRollbackOn: MODELS_FILE }).save({ name: 'a', provider: { models: [] }, defaultModel: 'a/x' }); }
+    catch (e) { err2 = e; }
+    check('28-1 a rollback that itself fails is reported, not swallowed',
+      err2 instanceof ProviderError && err2.rollback.length === 1 && /磁盘可能处于部分更新状态/.test(err2.detail || ''),
+      'failed rollback was silent');
+
+    // an "absent" file must come back absent, not as an empty object
+    const neverRouting = path.join(tmp, 'never-routing.json');
+    const absent = createProviders({
+      MODELS_FILE, ROUTING_FILE: neverRouting, CFG_FILE, readJson, isSafeKey,
+      atomicWrite: (f, raw) => {
+        if (f === CFG_FILE) throw new Error('disk full (simulated)');
+        realAtomic(f, raw);
+      },
+    });
+    try { absent.save({ name: 'a', provider: { models: [] }, testModel: 'a/x', defaultModel: 'a/x' }); } catch { /* expected */ }
+    check('28-1 rollback deletes a file that did not exist before the transaction',
+      !fs.existsSync(neverRouting), 'rollback left a file the transaction had created');
+
+    // deletion sweeps the references in the SAME commit
+    const rm = bake().remove('a');
+    check('28-1 deleting a provider sweeps defaultModel and chain entries in one commit',
+      rm.existed === true && rm.swept.length === 2 &&
+      readJson(CFG_FILE).defaultModel === null &&
+      Object.keys(readJson(MODELS_FILE).providers).length === 0 &&
+      JSON.stringify(readJson(ROUTING_FILE).chains) === '[]',
+      `remove did not sweep: ${JSON.stringify({ swept: rm.swept, chains: readJson(ROUTING_FILE).chains })}`);
+
+    // validation happens BEFORE the first byte is written
+    const bad = bake();
+    let err3 = null;
+    try { bad.save({ name: '__proto__', provider: { models: [] } }); } catch (e) { err3 = e; }
+    check('28-1 an unsafe provider name is refused before any write',
+      err3 instanceof ProviderError && err3.status === 400 && !fs.readFileSync(MODELS_FILE, 'utf8').includes('__proto__'),
+      'unsafe name was not refused up front');
+
+    for (const f of Object.keys(before)) { try { fs.unlinkSync(f); } catch { /* cleanup */ } }
+  }
+
+  // --- short-coming 2: "run now" must report a refusal, not look like it ran
+  check('28-2 the run-now button reports a refused run instead of resetting silently',
+    app.includes("api.post('/api/cron/run-now'") && app.includes('立即运行被拒绝') && app.includes('r.ok === false'),
+    'run-now answer still discarded');
+
+  // --- short-coming 3: the usage cache is bounded by the window it serves
+  check('28-3 the usage cache evicts entries outside the scanned window',
+    srcSrc.includes('for (const key of [...usageCache.keys()]) if (!scanned.has(key)) usageCache.delete(key);') &&
+    srcSrc.includes('const scanned = new Set(items.map((i) => i.f));'),
+    'usage cache still grows without bound');
+  check('28-3 the cache size is surfaced so the bound is visible',
+    srcSrc.includes('total.cachedFiles = usageCache.size;'),
+    'cache size not reported');
+
+  // --- the release process itself: a version cannot disagree with itself again
+  check('version identity is gated in CI, not discovered from an asset name',
+    ci.includes('node scripts/assert-version.mjs'),
+    'no version consistency gate');
+  {
+    // and the gate must actually fail on a tree where one manifest lags
+    const { execFileSync } = await import('node:child_process');
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-ver-'));
+    // pretty-printed: the lockfile anchors are line-based, exactly like the real files
+    const put = (rel, body) => {
+      const f = path.join(tmp, rel);
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, typeof body === 'string' ? body : JSON.stringify(body, null, 2) + '\n');
+    };
+    put('package.json', { name: 'pi-workbench', version: '9.9.9' });
+    put('runtime-package.json', { version: '9.9.9' });
+    put('tauri/tauri.conf.json', { version: '9.9.9' });
+    put('package-lock.json', { name: 'pi-workbench', version: '9.9.9', lockfileVersion: 3 });
+    put('runtime-package-lock.json', { name: 'pi-workbench-runtime', version: '9.9.9', lockfileVersion: 3 });
+    put('tauri/Cargo.toml', '[package]\nname = "pi-workbench"\nversion = "9.9.9"\n');
+    put('tauri/Cargo.lock', '[[package]]\nname = "pi-workbench"\nversion = "9.9.9"\n');
+    const runGate = () => {
+      try {
+        execFileSync(process.execPath, [path.join(repoRoot, 'scripts', 'assert-version.mjs'), tmp], { stdio: 'pipe' });
+        return 0;
+      } catch (e) { return e.status || 1; }
+    };
+    const consistent = runGate();
+    put('tauri/Cargo.toml', '[package]\nname = "pi-workbench"\nversion = "9.9.8"\n');
+    const drifted = runGate();
+    check('the version gate passes a consistent tree and fails a drifted one',
+      consistent === 0 && drifted === 1,
+      `consistent=${consistent} drifted=${drifted}`);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 

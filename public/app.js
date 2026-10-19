@@ -1757,8 +1757,10 @@ async function openImported(src, file) {
 }
 
 // ---------- providers tab (beginner flow: URL + key → discover models → pick) ----------
-// partial-commit recovery (v1.3.6 review P3-4): after a mid-sequence failure, pull all
-// three docs back from disk so memory matches what actually got saved
+// Disk is the source of truth after any provider transaction that reports a failed
+// rollback: the server told us it may be torn, so re-read all three docs rather than
+// trusting our own copy. (The happy path no longer needs this — the transaction either
+// commits all three files or restores the pre-images.)
 async function reloadConfigState() {
   const m = await api.get('/api/models').catch(() => null);
   if (m) state.modelsDoc = m;
@@ -1988,9 +1990,11 @@ $('#btn-kbfill').onclick = async () => {
 };
 $('#btn-prov-save').onclick = async () => {
   if (!state.modelsDoc || !state.editProv) return;
-  // v1.3.6 review P3-4: work on a CLONE — the pre-POST in-place mutation must not
-  // survive a refused save (memory must match disk), and the models→routing→config
-  // sequence can otherwise leave a cross-file partial commit
+  // v1.3.9 (review wave 28, shortcoming 1): one provider save is ONE server-side
+  // transaction. Writing models.json, then routing.json, then config.json from here
+  // meant a failure on the second or third leg left a cross-file partial commit that
+  // the UI could only paper over by reloading. The server now commits all three or
+  // restores the pre-images, so a failure here is a failure of the whole change.
   const doc = JSON.parse(JSON.stringify(state.modelsDoc));
   const prev = doc.providers[state.editProv] || {};
   const keyInput = $('#pf-key').value.trim();
@@ -2008,28 +2012,29 @@ $('#btn-prov-save').onclick = async () => {
   const prov = { ...prev, baseUrl: $('#pf-url').value.trim() || prev.baseUrl, api: $('#pf-api').value, models };
   if (keyInput) prov.apiKey = keyInput;
   else if (!prev.apiKey) delete prov.apiKey;
-  doc.providers[state.editProv] = prov;
-  const saved = await api.post('/api/models', doc).catch((e) => ({ error: e.message }));
-  if (saved.error) { // disk kept the old modelsDoc — adopt the server's doc back so memory matches (v1.3.6 review P3-4)
-    if (saved.modelsDoc) state.modelsDoc = saved.modelsDoc;
-    $('#models-status').textContent = '保存失败：' + saved.error; return;
-  }
-  state.modelsDoc = doc; // the save landed — memory adopts the clone that disk now holds
   const def = document.querySelector('input[name="pm-default"]:checked');
   const test = document.querySelector('input[name="pm-test"]:checked');
-  if (test) {
-    const rt = await api.post('/api/routing', { providers: { [state.editProv]: { testModel: test.value } } }).catch((e) => ({ error: e.message }));
-    if (rt.error) { $('#models-status').textContent = '路由保存失败：' + rt.error + '（模型已保存；正在重载路由/配置以对齐磁盘）'; await reloadConfigState(); return; }
+  const r = await api.post('/api/provider/save', {
+    name: state.editProv,
+    provider: prov,
+    testModel: test ? test.value : null,
+    defaultModel: def ? def.value : null,
+  }).catch((e) => ({ error: e.message }));
+  if (!r || r.error) {
+    // the server restored every pre-image; memory never moved, so there is nothing to adopt
+    $('#models-status').classList.remove('hidden');
+    $('#models-status').textContent = '保存失败：' + ((r && r.error) || '无响应') + (r && r.detail ? `（${r.detail}）` : '');
+    // a FAILED rollback means disk may hold a mix of old and new — re-read it and say so
+    if (r && Array.isArray(r.rollback) && r.rollback.length) { await reloadConfigState(); }
+    return;
   }
-  if (def) {
-    const cf = await api.post('/api/config', { defaultModel: def.value }).catch((e) => ({ error: e.message }));
-    if (cf.error) { $('#models-status').textContent = '默认模型保存失败：' + cf.error + '（模型已保存；正在重载配置以对齐磁盘）'; await reloadConfigState(); return; } // cfg must match disk — set it only on success (v1.3.6 review P3-3)
+  if (r.modelsDoc) state.modelsDoc = r.modelsDoc; // the masked doc the server now holds
+  if (r.defaulted && state.cfg) {
     state.cfg.defaultModel = def.value;
-    // the chip describes the RUNNING tab — with a live tab it must keep telling the
-    // truth; the new default applies from the next new session (openPiSession prefers
-    // cfg.defaultModel for isNew). Only with no live tab does the chip follow now.
     if (!state.tabId) { state.selModel = def.value; updateModelChip(); }
   }
+  if (r.routed) await loadRoutingUI().catch(() => {});
+  $('#models-status').classList.remove('hidden');
   $('#models-status').textContent = t('models_saved');
   renderCurrentCfg();
   setTimeout(() => { $('#models-status').textContent = ''; }, 3000);
@@ -2040,43 +2045,25 @@ $('#btn-prov-del').onclick = () => {
     { label: '取消' },
     { label: '删除', primary: true, cb: async () => {
       const name = state.editProv;
-      const keep = state.modelsDoc.providers[name];
-      delete state.modelsDoc.providers[name];
-      const r = await api.post('/api/models', state.modelsDoc).catch((e) => ({ error: e.message }));
+      // v1.3.9 (review wave 28, shortcoming 1): the reference cleanup used to be
+      // best-effort AFTER the deletion had already landed — a failed chain sweep left
+      // models.json and routing.json disagreeing, and defaultModel pointing at a
+      // provider that no longer existed. Deletion + cleanup are now one commit.
+      const r = await api.post('/api/provider/delete', { name }).catch((e) => ({ error: e.message }));
       if (!r || r.error) {
-        // F43: disk still has it — put it back instead of showing a deleted row
-        state.modelsDoc.providers[name] = keep;
         $('#models-status').classList.remove('hidden');
-        $('#models-status').textContent = `删除失败：${(r && r.error) || '无响应'}（未改动）`;
+        $('#models-status').textContent = `删除失败：${(r && r.error) || '无响应'}` + (r && r.detail ? `（${r.detail}）` : '') + '（未改动）';
         return;
       }
-      // v1.3.8 review P2-10: models.json alone left DANGLING references — a defaultModel
-      // pointing at the deleted provider made every new session fail, and a fallback chain
-      // naming its models kept "…/model" entries that can never resolve. Clean both here,
-      // where the deletion actually happens, and report what was swept.
-      const swept = [];
-      const dm = state.cfg && state.cfg.defaultModel;
-      if (dm && String(dm).startsWith(name + '/')) {
-        const cf = await api.post('/api/config', { defaultModel: null }).catch((e) => ({ error: e.message }));
-        if (cf && !cf.error) { state.cfg.defaultModel = null; state.selModel = null; updateModelChip(); swept.push('默认模型'); }
-      }
-      try {
-        const rt = await api.get('/api/routing').catch(() => null);
-        if (rt && Array.isArray(rt.chains)) {
-          const next = rt.chains
-            .map((c) => (Array.isArray(c) ? c.filter((m) => typeof m === 'string' && !m.startsWith(name + '/')) : c))
-            .filter((c) => Array.isArray(c) && c.length > 0);
-          if (JSON.stringify(next) !== JSON.stringify(rt.chains)) {
-            const sr = await api.post('/api/routing', { chains: next }).catch((e) => ({ error: e.message }));
-            if (sr && !sr.error) swept.push('回退链条目');
-          }
-        }
-      } catch { /* chain cleanup is best-effort; deletion itself already succeeded */ }
+      if (r.modelsDoc) state.modelsDoc = r.modelsDoc;
+      if (r.config && state.cfg) { state.cfg.defaultModel = r.config.defaultModel ?? null; if (!r.config.defaultModel) { state.selModel = null; updateModelChip(); } }
       state.editProv = null;
       await loadModelsEditor();
       await loadRoutingUI().catch(() => {});
       $('#models-status').classList.remove('hidden');
-      $('#models-status').textContent = swept.length ? `${t('models_saved')}（已清理：${swept.join('、')}）` : t('models_saved');
+      $('#models-status').textContent = (r.swept && r.swept.length)
+        ? `${t('models_saved')}（已清理：${r.swept.join('、')}）`
+        : t('models_saved');
     } },
   ]);
 };
@@ -2573,8 +2560,22 @@ function renderCronJobs() {
   box.querySelectorAll('.cron-run').forEach((b) => {
     b.onclick = async () => {
       b.textContent = '运行中…'; b.disabled = true;
-      try { await api.post('/api/cron/run-now', { id: b.dataset.id }); } catch { /* button restored below */ }
+      // v1.3.9 (review wave 28, shortcoming 2): the answer used to be discarded — the
+      // button reset and the list refreshed identically whether the run started or the
+      // server refused it (503 with {ok:false}, e.g. the concurrency budget was full),
+      // so "nothing happened" looked exactly like "it ran".
+      const r = await api.post('/api/cron/run-now', { id: b.dataset.id }).catch((e) => ({ error: e.message }));
       b.textContent = '立即运行'; b.disabled = false;
+      const st = $('#cron-status');
+      if (st) {
+        if (!r || r.error || r.ok === false) {
+          const why = (r && (r.error || r.lastStatus)) || '无响应';
+          st.textContent = `立即运行被拒绝：${why}`;
+          st.classList.remove('hidden');
+        } else {
+          st.textContent = '已开始运行';
+        }
+      }
       loadCron();
     };
   });

@@ -2,6 +2,35 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.3.9 — 2026-10-20
+
+### Fixed (from the v1.3.8 short-comings review — 5 items; three code problems, two honest-scope statements)
+
+**A provider is one commit, not three requests (short-coming 1):**
+- Saving a provider wrote `models.json`, then (optionally) `routing.json`, then (optionally) `config.json` as three separate HTTP requests from the page. A failure on the second or third leg left a cross-file partial commit — provider saved, fallback chain still naming a model that no longer existed, `defaultModel` pointing at a model that was just replaced — and the only recovery was "reload and hope".
+- New `lib/providers.mjs` owns the change: every document is written through `atomicWrite`, and if any write fails the pre-images are restored before the error is returned. A file that did not exist before the transaction is **deleted** again, because "absent" and "empty object" are different states to every reader here.
+- New endpoints `POST /api/provider/save` and `POST /api/provider/delete` do the whole change server-side. Deleting a provider now sweeps `defaultModel` and the fallback chains **in the same commit** instead of best-effort afterwards; the response reports what was swept, so the UI can say it.
+- Honesty: this is pre-image rollback, not a journal. A crash *between* two writes still leaves a partial commit, and a rollback that itself fails is **reported** (`detail` + `rollback[]`) rather than swallowed — the page then re-reads all three documents from disk instead of trusting its own copy.
+- The route sweep caught a real defect during this work: `hProviderDelete` passed the request object to `providers.remove()`, which takes the provider **name**, so every deletion failed with `provider name not allowed: [object Object]`. Fixed, and both endpoints are now in `scripts/route-sweep.py` (51 routes).
+
+**"立即运行" reports a refusal instead of looking like it ran (short-coming 2):**
+- The button posted `/api/cron/run-now` inside a `try`/`catch` that could never fire — `apiParse` resolves non-2xx to `{ error }` instead of throwing. So a refused run (503, concurrency budget full) reset the button and refreshed the list exactly like a started run.
+- Now the answer is checked: a refusal shows `立即运行被拒绝：<原因>` (including the job's `lastStatus`) in `#cron-status`, a start shows `已开始运行`.
+
+**The usage cache is bounded by the window it serves (short-coming 3):**
+- `usageCache` was keyed by file and never evicted, so a long-lived server kept an aggregate for every session file it had **ever** scanned — including files that fell out of the 300-newest window long ago and can never be read again from there.
+- `usageSummary()` now evicts every key outside the set it just scanned, and reports `total.cachedFiles` so the bound is visible instead of implied.
+
+**Scope statements (short-comings 4 and 5) — recorded, not patched:**
+- `public/app.js` (~2 990 lines) and `server.mjs` (~1 970 lines) are still large, and `app.js` is still one IIFE with global mutable state. `lib/providers.mjs` is the first real boundary extracted from that clump (a testable module with an explicit ctx contract), not evidence that the front end has been split.
+- No installer on any platform has been **installed and launched by a person** on this project's behalf: CI proves the mac dmgs carry the right Node (mounted, extracted, `lipo`), and that the Linux AppImage really boots — that is build verification, not acceptance. Windows install/upgrade and macOS Gatekeeper behaviour on a clean machine remain unverified.
+
+### Added
+- 16 new contract assertions (83 total, up from 67), including behavioral ones that drive `lib/providers.mjs` with an injected `atomicWrite`: a mid-transaction failure restores every pre-image, a rollback that itself fails is reported, an absent file comes back absent, deletion sweeps both references, and an unsafe name is refused before the first byte is written.
+- Two API-level tests: the three-document save/delete round trip (including that the response is masked and that `defaultModel` is cleared in the same commit), and a refusal test proving an unsafe name leaves `models.json` byte-identical.
+- `POST /api/provider/save` and `POST /api/provider/delete` in the route sweep, with their validation paths (51 routes).
+- `scripts/assert-version.mjs`, wired into the CI lint job: every manifest that carries the version must agree with `package.json`. v1.3.1 shipped assets named with the *previous* version because the tag was made before the bump; the gate is tested against a deliberately drifted fixture so it cannot silently stop working.
+
 ## 1.3.8 — 2026-10-20
 
 ### Fixed (from the independent v1.3.7 review — 14 items; release architecture, credential boundary, input validation)

@@ -12,6 +12,7 @@ import {cronPiArgs} from './lib/cron-args.mjs';
 import { collectProc } from './lib/io.mjs';
 import {createCron} from './lib/cron.mjs';
 import {createFailover} from './lib/failover.mjs';
+import {createProviders, ProviderError} from './lib/providers.mjs';
 import {createSources} from './lib/sources.mjs';
 import { killTree, spawnTreeOpts } from './lib/proctree.mjs';
 import {createKbSkills} from './lib/kb-skills.mjs';
@@ -261,6 +262,17 @@ const saveJson = (file, obj) => {
   atomicWrite(file, JSON.stringify(obj, null, 2));
   return obj;
 };
+// A provider spans models.json + routing.json + config.json. The client used to write
+// those one at a time and reconcile afterwards; lib/providers.mjs commits them together
+// and restores the pre-images if any single write fails.
+const providers = createProviders({
+  MODELS_FILE: PI_MODELS,
+  ROUTING_FILE,
+  CFG_FILE,
+  readJson,
+  atomicWrite,
+  isSafeKey,
+});
 // ---------- cron: scheduled pi prompt runs (lib/cron.mjs) ----------
 const CRON_FILE = path.join(CFG_DIR, 'cron.json');
 const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
@@ -991,6 +1003,79 @@ async function hModels(req, res, u) {
       atomicWrite(PI_MODELS, JSON.stringify(doc, null, 2));
     }
     return json(res, 200, { ...maskApiKeys(readJson(PI_MODELS) || { providers: {} }), meta: loadModelMeta() });
+}
+
+// One provider change = one transaction. The UI used to POST /api/models, then
+// /api/routing, then /api/config, and could only reload to reconcile when the second or
+// third leg failed (review wave 28, shortcoming 1). These handlers do the whole change
+// in lib/providers.mjs: pre-images are restored if any write fails, and a rollback that
+// itself fails is reported rather than swallowed.
+function providerError(res, e) {
+  if (e instanceof ProviderError) return json(res, e.status, { error: e.message, detail: e.detail || null, rollback: e.rollback || [] });
+  logErr('provider transaction: ' + redactSecrets((e && e.stack) || String(e)));
+  return json(res, 500, { error: (e && e.message) || 'provider transaction failed' });
+}
+async function hProviderSave(req, res, u) {
+    const body = await readBody(req);
+    const { name, provider, testModel = null, defaultModel = null } = body || {};
+    const prev = readJson(PI_MODELS) || { providers: {} };
+    const prevP = (prev.providers || {})[name] || {};
+    const clean = provider && typeof provider === 'object' && !Array.isArray(provider) ? { ...provider } : provider;
+    // the same credential-ownership rules the bulk /api/models save applies: a '***'
+    // sentinel (or a cleared key) must round-trip against the endpoint it came from,
+    // and a NEW endpoint must never inherit the old key or credential headers.
+    if (clean && typeof clean === 'object') {
+      const prevScrub = typeof prevP.baseUrl === 'string' ? scrubUrlCreds(prevP.baseUrl) : prevP.baseUrl;
+      const sameKnownEndpoint = !!prevP.baseUrl && typeof clean.baseUrl === 'string' && (clean.baseUrl === prevP.baseUrl || clean.baseUrl === prevScrub);
+      if (typeof clean.baseUrl === 'string' && clean.baseUrl === prevScrub && prevScrub !== prevP.baseUrl) clean.baseUrl = prevP.baseUrl;
+      if (typeof clean.baseUrl === 'string' && !sameKnownEndpoint) {
+        if (!clean.apiKey || clean.apiKey === KEY_SENTINEL) delete clean.apiKey;
+        if (clean.headers && typeof clean.headers === 'object') for (const k of Object.keys(clean.headers)) {
+          if (CRED_HEADER_RE.test(k) && (!clean.headers[k] || clean.headers[k] === KEY_SENTINEL)) delete clean.headers[k];
+        }
+      }
+      if (clean.apiKey === KEY_SENTINEL) {
+        if (prevP.apiKey && sameKnownEndpoint) clean.apiKey = prevP.apiKey;
+        else delete clean.apiKey;
+      }
+      if (clean.headers && typeof clean.headers === 'object') {
+        const storedH = prevP.headers && typeof prevP.headers === 'object' ? prevP.headers : {};
+        for (const k of Object.keys(clean.headers)) {
+          if (clean.headers[k] === KEY_SENTINEL) {
+            if (sameKnownEndpoint && storedH[k]) clean.headers[k] = storedH[k];
+            else delete clean.headers[k];
+          }
+        }
+      }
+    }
+    try {
+      const out = providers.save({ name, provider: clean, testModel, defaultModel });
+      return json(res, 200, {
+        ok: true,
+        modelsDoc: { ...maskApiKeys(out.models), meta: loadModelMeta() },
+        routing: out.routing,
+        config: out.config,
+        routed: out.routed,
+        defaulted: out.defaulted,
+      });
+    } catch (e) { return providerError(res, e); }
+}
+async function hProviderDelete(req, res, u) {
+    const body = await readBody(req);
+    const { name } = body || {};
+    try {
+      // remove() takes the NAME, not the request body — passing the object stringified
+      // to "[object Object]" and every deletion failed with "provider name not allowed"
+      const out = providers.remove(name);
+      return json(res, 200, {
+        ok: true,
+        existed: out.existed,
+        swept: out.swept,
+        modelsDoc: { ...maskApiKeys(out.models), meta: loadModelMeta() },
+        routing: out.routing,
+        config: out.config,
+      });
+    } catch (e) { return providerError(res, e); }
 }
 
 async function hModelsAvailable(req, res, u) {
@@ -1739,6 +1824,9 @@ const routes = [
   ['*', '/api/sessions/pi', hSessionsPi],
   ['POST', '/api/sessions/delete', hSessionsDelete],
   ['*', '/api/models', hModels],
+  // atomic provider transactions (review wave 28, shortcoming 1)
+  ['POST', '/api/provider/save', hProviderSave],
+  ['POST', '/api/provider/delete', hProviderDelete],
   ['*', '/api/models/available', hModelsAvailable],
   ['POST', '/api/providers/discover', hProvidersDiscover],
   ['POST', '/api/providers/kbfill', hProvidersKbfill],

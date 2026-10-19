@@ -27,6 +27,11 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run lint
+      - name: Version identity across every manifest
+        # v1.3.1 was tagged on a commit whose manifests still said 1.3.0, so the release
+        # shipped assets named with the previous version. One cheap check makes that class
+        # of mistake impossible: every file that carries the version must agree.
+        run: node scripts/assert-version.mjs
       - name: Dependency audit (root tree)
         run: npm audit --omit=dev --audit-level=high
       - name: Dependency audit (shipped runtime tree)

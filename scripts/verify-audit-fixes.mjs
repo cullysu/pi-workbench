@@ -507,12 +507,17 @@ const check = (name, ok, detail = '') => {
     'attribute escaping missing');
 
   // P1-1: the mac build must assemble a runtime PER architecture — one darwin-x64 node
-  // packed into both dmgs shipped an arm64 build that only ran under Rosetta
+  // packed into both dmgs shipped an arm64 build that only ran under Rosetta.
+  // The arch COMPARISON also has to speak lipo's vocabulary: the first version of this
+  // guard compared the literal "x64" against lipo's "x86_64" and failed every x64 build.
   check('P1-1 macOS builds bundle a per-arch Node runtime and assert it',
     ci.includes('for arch in arm64 x64') && ci.includes('darwin-$arch.tar.xz') && ci.includes('lipo -archs') && ci.includes('pkg-runtime-$arch.zip'),
     'per-arch runtime assembly missing');
+  check('P1-1 the arch assertions compare in lipo spelling (arm64 / x86_64)',
+    ci.includes('case "$arch" in arm64) want=arm64 ;; x64) want=x86_64 ;; esac') && ci.includes('*"$want"*)'),
+    'arch comparison still compares the literal package arch against lipo output');
   check('P1-1 each built dmg is unpacked and its bundled node arch verified',
-    ci.includes('hdiutil attach') && ci.includes('runtime.zip') && /\*"\$arch"\*\) ;;/.test(ci),
+    ci.includes('hdiutil attach') && ci.includes('runtime.zip') && ci.includes('got="$(lipo -archs "/tmp/rt-$arch/node")"'),
     'dmg arch verification missing');
 
   // P3-14: workflow actions pinned to immutable commits

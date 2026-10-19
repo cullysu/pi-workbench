@@ -338,6 +338,9 @@ jobs:
           v="${{ env.NODE_BUNDLE_VERSION }}"
           curl -fsSL "https://nodejs.org/dist/$v/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
           for arch in arm64 x64; do
+            # lipo spells the x64 slice "x86_64", not "x64" — comparing the literal
+            # arch name failed every x64 build with "bundled node is not x64".
+            case "$arch" in arm64) want=arm64 ;; x64) want=x86_64 ;; esac
             tarball="node-$v-darwin-$arch.tar.xz"
             curl -fsSL "https://nodejs.org/dist/$v/$tarball" -o "/tmp/$tarball"
             ( cd /tmp && grep "  $tarball\$" SHASUMS256.txt | sha256sum -c - )
@@ -345,10 +348,10 @@ jobs:
             cp "/tmp/node-$v-darwin-$arch/bin/node" pkg-build/node
             chmod +x pkg-build/node
             got="$(lipo -archs pkg-build/node)"
-            echo "bundling node arch=$arch (lipo: $got)"
+            echo "bundling node arch=$arch (lipo: $got, want $want)"
             case "$got" in
-              *"$arch"*) ;;
-              *) echo "::error::bundled node is not $arch (lipo: $got)"; exit 1 ;;
+              *"$want"*) ;;
+              *) echo "::error::bundled node is not $want (lipo: $got)"; exit 1 ;;
             esac
             node scripts/pin-runtime-deps.mjs pkg-build
             ( cd pkg-build && node ../scripts/write-manifest.mjs )
@@ -371,6 +374,7 @@ jobs:
           # the claim is "the arm64 dmg runs without Rosetta" — prove it on the artifact
           set -euo pipefail
           for arch in arm64 x64; do
+            case "$arch" in arm64) want=arm64 ;; x64) want=x86_64 ;; esac
             if [ "$arch" = arm64 ]; then dmg="$(ls dist_electron/*-arm64.dmg)"; else dmg="$(ls dist_electron/*.dmg | grep -v -- -arm64.dmg)"; fi
             echo "== $dmg"
             mnt="$RUNNER_TEMP/mnt-$arch"
@@ -382,11 +386,11 @@ jobs:
             rm -rf "/tmp/rt-$arch"; mkdir -p "/tmp/rt-$arch"
             ditto -x -k "$rt" "/tmp/rt-$arch"
             got="$(lipo -archs "/tmp/rt-$arch/node")"
-            echo "runtime node inside the $arch dmg: $got"
+            echo "runtime node inside the $arch dmg: $got (want $want)"
             hdiutil detach "$mnt" >/dev/null
             case "$got" in
-              *"$arch"*) ;;
-              *) echo "::error::$arch dmg bundles the wrong node (lipo: $got)"; exit 1 ;;
+              *"$want"*) ;;
+              *) echo "::error::$arch dmg bundles the wrong node (lipo: $got, want $want)"; exit 1 ;;
             esac
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -40,14 +40,17 @@
 
 从 [GitHub Releases](../../releases) 下载对应平台的安装包（以 1.3.2 为例）：
 
-| 平台 | 文件 |
-|---|---|---|
 | 平台 | 文件 | 怎么选 |
+|---|---|---|
 | Windows (Electron) | `PiWorkbench-Setup-<版本>.exe` | 功能最全的默认壳，不确定就选这个 |
-| Windows (Tauri 轻量壳) | `PiWorkbench-<版本>-Tauri-x64-setup.exe` | 同一功能面，体积更小（系统 WebView2） |
-| Linux | `PiWorkbench-<版本>-linux.AppImage` | 唯一 Linux 通道，`chmod +x` 后直接运行 |
-| macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` | 按 CPU 选；arm64 包内置 arm64 Node，无需 Rosetta |
+| Windows (Tauri 轻量壳) | `PiWorkbench-<版本>-Tauri-x64-setup.exe` | 同一功能面，体积更小（系统 WebView2）；**Tauri 壳仅 Windows** |
+| Linux | `PiWorkbench-<版本>-linux.AppImage` | 唯一 Linux 通道（Electron 壳），`chmod +x` 后直接运行 |
+| macOS (Apple Silicon) | `PiWorkbench-<版本>-macOS-arm64.dmg` | 按 CPU 选（Electron 壳）；arm64 包内置 arm64 Node，无需 Rosetta |
 | macOS (Intel) | `PiWorkbench-<版本>-macOS-x64.dmg` | 同上（内置 x64 Node） |
+
+> **Tauri 壳只支持 Windows。** `tauri/src/main.rs` 依赖 WebView2、NSIS、`System32\tar.exe` 与
+> `CommandExt::creation_flags`，非 Windows 目标会在编译期直接报错（`compile_error!` 会明确说出来）。
+> Linux/macOS 请用 Electron 壳——上面五个安装包里 Linux 与 macOS 的那三个都是 Electron 壳。
 
 安装包**内置 Node 运行时**（Windows/Linux 为 x64 官方二进制，macOS 按架构分别内置 arm64 / x64），**无需本机安装 Node.js**。`package.json` 的 `engines >= 22.19`（pi 0.85.0 的真实下限）仅约束源码开发环境：
 
@@ -78,11 +81,13 @@
 ```bash
 npm install
 npm run prepare-runtime   # 组装 pkg-build/（按提交进库的 runtime 锁文件 npm ci —— 与 CI 同一套依赖集）
-node server.mjs           # http://127.0.0.1:32123
+node server.mjs           # http://127.0.0.1:32123 —— 浏览器直接可用（见下方 token 说明）
 npm run electron          # 或: node_modules\.bin\electron .
 ```
 
-> 默认浏览器打开时**不带凭据**（这是有意的安全默认）：开发模式请用 `PIWB_EMBED_TOKEN=1 node server.mjs` 让首页内嵌本机 token，否则页面会因 403 空凭据而不可用（桌面壳和测试都显式带 token）。
+> **浏览器开发模式现在开箱可用。** 服务端在没有任何桌面壳传入 `PIWB_TOKEN` 时，会把本次启动的本机 token 内嵌进首页（只监听 `127.0.0.1`）；桌面壳（Electron/Tauri）走自己的 `PIWB_TOKEN`，页面里永远没有 token。若同一台机器上的其它本地账户不应拿到这份管理员凭据，用 `PIWB_EMBED_TOKEN=0 node server.mjs` 关闭内嵌，改为从 0600 的 `~/.pi-workbench/token.json` 取。
+>
+> v1.3.9 之前这里要求手工加 `PIWB_EMBED_TOKEN=1`，否则首页 403、界面连不上——那是文档里的一个未兑现前提，不是有意的默认。
 
 打包：`npx electron-builder --win nsis --x64`（产物在 `dist_electron/`，不随 git 提交）。可分发的安装包还需要捆绑 Node 的 `pkg-runtime.zip`（`scripts/make-runtime.mjs` 从 pkg-build/ 打包）——完整组装流程以 CI workflow 为准，它是组装逻辑的唯一事实源。
 

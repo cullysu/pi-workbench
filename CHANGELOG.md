@@ -2,6 +2,66 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.4.0 — 2026-10-21
+
+### Fixed (from the v1.3.9 unified review — 24 items: P1×3 / P2×7 / P3×14)
+
+**Stale cron locks can no longer be taken over twice (P1-1):**
+- Taking over a lock older than 30 minutes was `stat` → `unlink` → `create`. Two instances could both read "stale"; the second `unlink` then deleted the lock the **first had just recreated**, and both created one and ran the same unattended job — duplicate model calls, duplicate file writes, duplicate cost.
+- Takeover is now a `rename()` to a per-process grave name, which only one racer can win, followed by a re-check of the grave's mtime (a lock that was renewed between our `stat` and our `rename` is put back and the run is refused) and an `O_EXCL` create. Failing to put it back fails safe: the worst case is one skipped run, never a duplicate one.
+- Proven by a new behavioural test that runs **two real processes** against one stale lock and asserts exactly one spawn, plus a third case proving a fresh lock is never taken over.
+
+**The E2E job no longer runs Windows commands on Linux (P1-2):**
+- `scripts/chat-e2e.mjs` killed leftover probe instances with `netstat -ano` / `tasklist` / `taskkill` — unconditionally, while the e2e job runs on `ubuntu-latest`. On Linux `netstat -ano` parses yet never prints `LISTENING` (it prints `LISTEN`), so the block was silently **dead** on CI; a leftover instance meant a 20 s `waitPort` timeout instead of a self-heal.
+- Both ports (server and CDP) are now assigned by the OS at startup, so there is no fixed port to collide on and nothing to heal. The Windows-only block is gone rather than branched.
+
+**A Tauri supervisor restart keeps the page authenticated (P1-3):**
+- The shell spawned a server that generated its own per-boot token and read it from the 0600 token file once. When the supervisor restarted the server, the new process minted a **new** token while the already-loaded WebView kept presenting the old one — every `/api` call and the WS upgrade answered 403 until the user reloaded.
+- The shell now mints one token per launch and passes it as `PIWB_TOKEN` on every spawn (initial and restarts), the same model Electron has always used. An already-running server (different owner) still gets its token from env or the token file.
+
+**Cron file descriptors and locks are released on every path (P2-4, P2-5):**
+- The run-log descriptor was opened inside the `try`, so a synchronous throw afterwards leaked it; it is now declared outside and closed in the catch.
+- `shutdown()` killed children but never released the `.lock` files, so a restart blocked each of those jobs for up to 30 minutes until `bootReset` considered the lock stale. Locks are now registry-tracked and unlinked synchronously at shutdown (asserted by the race test).
+
+**`npm start` is a working browser workflow again (P2-6):**
+- Plain `node server.mjs` set neither `PIWB_TOKEN` nor `PIWB_EMBED_TOKEN`, so the page carried no credentials and every API call 403'd. The README told you to set a variable; nothing enforced that, and nothing said so at boot.
+- Embedding is now the **default** whenever no desktop shell supplied a token (`PIWB_EMBED_TOKEN=0` opts out to the 0600 token file only), and the boot log states which mode is live. A new test boots the server with **no** token variable at all and asserts both the usable page and the opt-out.
+- **Security note, stated plainly:** in embedded mode the token is in the served HTML. The server listens on `127.0.0.1` only, but another local account on the same machine could read it; that is why the opt-out exists, and why the desktop shells still keep the token out of the page.
+
+**MCP configuration is validated as data, and a failed connect is retryable (P2-7):**
+- `!s.command` accepted any truthy value, so `command: {}` or `command: 42` was persisted and handed to `spawn()` — through `cmd.exe /c` on Windows, i.e. an object coerced into a command line. `command` must now be a non-empty single-line string, `args` an array of strings, `env` an object.
+- `connect()` cached its promise before the first `await`, so a synchronous throw (now including that validation) stored a **rejected** promise forever. The rejection now clears the cache from any path.
+
+**Extension dialogs can no longer be answered into the void (P2-8):**
+- `reply()` discarded `wsSend()`'s acceptance flag. With the offline queue full, a `confirm`/`select` answer was dropped on the floor while the extension waited with no timeout — the dialog looked answered and the agent hung. The refusal is now reported in the status line.
+
+**Ledger scans are bounded and say so (P2-9):** each source walk is capped at 5 000 files (was `Infinity`), and `cappedSources` in the response reports how many walks were truncated. A truncated total is labelled, not silently partial.
+
+**Cron run logs have a retention policy (P2-10):** a 10 MB per-file cap existed but no file-count cap — a one-minute job created ~1 440 files a day forever. The newest 20 per job are kept, pruned after each run.
+
+**Keyboard and responsive fixes in the UI (P3-11 … P3-13):**
+- `--rail-w` lived on `#rail`, but `#log-drawer` is a **sibling** that offsets by it, so the 176 px narrow-window override reached the rail and left the drawer 44 px short. The variable now lives on `:root`; the drag handler writes through it and gives the breakpoint back to the media query.
+- The narrow-window rule was dead against the inline `width` the drag handler always wrote. Inline width is now applied only above the breakpoint.
+- Thinking blocks, tool cards, project rows, session rows and dropdown items were mouse-only divs. They are now `role=button` / `role=treeitem` / `role=menu` + `menuitem` with Enter/Space, arrow keys, Home/End and Escape returning focus to the anchor; `#project-tree` announces `role="tree"`.
+
+**Stated, not pretended (P3-14):** the Tauri shell is Windows-only (WebView2, NSIS, `System32\tar.exe`, `CommandExt::creation_flags`). A non-Windows target now fails with an explicit `compile_error!` instead of a confusing trait-method error, and both READMEs say so.
+
+**Build reproducibility and supply chain (P3-15 … P3-17):**
+- `manifest.json` embedded `new Date()`, so an identical tree produced different bytes on every build even with `SOURCE_DATE_EPOCH`. It now derives from `SOURCE_DATE_EPOCH` when set, and omits the timestamp otherwise (byte-identical manifests are asserted by a test that runs the generator twice).
+- `npx tauri build` became `npx tauri build -- --locked`, so the tree audited by `cargo audit --file tauri/Cargo.lock` is the tree actually compiled; a drift is a build failure instead of a silent refresh.
+- `playwright` is an exact devDependency, so `npm ci` pins the driver instead of `npx -y playwright@1.49.1` resolving it at run time. (The browser binary still comes from Playwright's CDN — no hash in the lockfile; only the driver is reproducible.)
+
+### Added
+- **`scripts/ui-a11y-probe.mjs`** — 14 browser assertions for the rendered behaviours a unit test cannot see: menu roles and roving focus, arrow/Home/End/Escape, the rail actually shrinking at the breakpoint with the drawer following it, `rpcTo` refusing a full offline queue, the refusal being visible, and a refused send leaving the draft in the composer.
+- **`tests/ledger.test.mjs`**, **`tests/backup.test.mjs`**, **`tests/providers.test.mjs`** — the three sources of ledger data (Codex cumulative diffs with a counter reset, ZCode model-io naming with v2 aggregates excluded, Claude last-wins dedupe) against real-shaped fixtures; backup import partial/invalid archives and the rollback-failure path; the provider transaction's rollback semantics.
+- **Six Rust tests** for the identity handshake (RFC 4231 known-answer vectors for both HMAC branches, proof-header parsing, constant-time comparison, token stability) — `cargo test --locked` previously compiled and ran zero tests.
+- `scripts/check-runtime.mjs` now resolves `require()`, bare dependencies under `node_modules`, and the non-JS artifacts the server opens by path (`package.json`, `public/*`, `data/models-kb.json`). Its blind spot — a path assembled from user input at runtime — is stated in the file rather than implied.
+- The action-pin guard in the contract suite parses every `uses:` line and requires a 40-hex ref, instead of "one pinned action exists somewhere and no `@vN` literal appears".
+
+### Changed
+- `npm test` now runs six suites (62 tests; was 42).
+- The contract suite is 101 assertions (was 83).
+
 ## 1.3.9 — 2026-10-20
 
 ### Fixed (from the v1.3.8 short-comings review — 5 items; three code problems, two honest-scope statements)

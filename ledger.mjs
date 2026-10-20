@@ -9,6 +9,21 @@ const DAY = 86400000;
 // F31 (v1.3.5 audit): count of scanned files that hit readJsonl's 200k-line cap —
 // surfaced through ledger()/usage so a giant window is labelled, not silently partial
 const truncatedFlag = { count: 0 };
+// P2-9 (v1.3.9 review): walkFiles() defaults to maxFiles=Infinity, so one ledger request
+// recursively stat'ed every session a user had ever produced — on a multi-year Codex or
+// Claude tree that is tens of thousands of files on the single-threaded HTTP thread, and
+// /api/ledger is reachable from the UI on every panel paint. Cap it and SAY it was capped.
+const LEDGER_MAX_FILES = 5000;
+const walkFlag = { capped: 0 };
+// One walk with a hard file budget; `capped` says the budget actually truncated the tree.
+function walkCapped(root, opts = {}) {
+  const files = walkFiles(root, { ...opts, maxFiles: LEDGER_MAX_FILES + 1 });
+  if (files.length > LEDGER_MAX_FILES) {
+    walkFlag.capped++;
+    return { files: files.slice(0, LEDGER_MAX_FILES), capped: true };
+  }
+  return { files, capped: false };
+}
 
 const deepFindUsage = (o) => {
   // 在任意嵌套结构里找带 input_tokens+output_tokens 的对象
@@ -42,7 +57,7 @@ function scanCodex(days, home) {
   const root = path.join(home, '.codex', 'sessions');
   const since = Date.now() - days * DAY;
   const recs = [];
-  for (const f of walkFiles(root)) {
+  for (const f of walkCapped(root).files) {
     let st; try { st = fs.statSync(f); } catch { continue; } // file rotated away mid-walk
     if (st.mtimeMs < since) continue;
     const { items: lines, truncated } = readJsonl(f, { hot: 'token_usage', wantMeta: true });
@@ -93,7 +108,7 @@ function scanZCode(days, home) {
   const recs = [];
   // 1) model-io：逐次调用（每次一条记录）
   const roll = path.join(home, '.zcode', 'cli', 'rollout');
-  for (const f of walkFiles(roll)) {
+  for (const f of walkCapped(roll).files) {
     let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
     // zcode rollouts use their own field names (cacheReadTokens/cacheWriteTokens) —
@@ -116,7 +131,7 @@ function scanZCode(days, home) {
   // 2) v2 会话文件是上述逐次调用的会话级聚合——只进 recent 列表，
   //    不进 byEngine/byDay/byModel，否则同一批 token 被算两遍
   const v2 = path.join(home, '.zcode', 'v2', 'sessions');
-  for (const f of walkFiles(v2, {exts: ['.json']})) {
+  for (const f of walkCapped(v2, {exts: ['.json']}).files) {
     let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
     let d = null;
@@ -132,7 +147,7 @@ function scanClaude(days, home) {
   const root = path.join(home, '.claude', 'projects');
   const since = Date.now() - days * DAY;
   const recs = [];
-  for (const f of walkFiles(root)) {
+  for (const f of walkCapped(root).files) {
     let st; try { st = fs.statSync(f); } catch { continue; }
     if (st.mtimeMs < since) continue;
     // the SAME api message id can appear in several jsonl rows (block + update) —
@@ -157,6 +172,7 @@ function scanClaude(days, home) {
 
 export function ledger({days = 30, engines = ['codex', 'zcode', 'claude'], home = process.env.PIWB_LEDGER_HOME || os.homedir()} = {}) {
   truncatedFlag.count = 0; // fresh per call — the flag reports THIS scan, not a running total
+  walkFlag.capped = 0;
   let recs = [];
   if (engines.includes('codex')) recs = recs.concat(scanCodex(days, home));
   if (engines.includes('zcode')) recs = recs.concat(scanZCode(days, home));
@@ -182,6 +198,7 @@ export function ledger({days = 30, engines = ['codex', 'zcode', 'claude'], home 
     days,
     sessions: recs.filter((r) => !r.aggregate).length,
     truncatedFiles: truncatedFlag.count, // F31: files whose scan hit the 200k-line cap
+    cappedSources: walkFlag.capped, // P2-9: sources whose file walk hit the 5000-file budget — the totals cover a prefix, not the whole tree
     byEngine: sortObj(byEngine),
     byDay: sortObj(byDay),
     byModel: sortObj(byModel),

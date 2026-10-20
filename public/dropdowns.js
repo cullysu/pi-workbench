@@ -13,11 +13,19 @@ function openDropdown(anchor, buildItems) {
   document.querySelectorAll('.wb-dropdown').forEach((d) => d.remove());
   const menu = document.createElement('div');
   menu.className = 'wb-dropdown';
+  // P3-13 (v1.3.9 review): these menus were mouse-only — plain divs with an onclick and no
+  // role, focus target, or key handling, so a keyboard user could open a menu and then be
+  // stuck in it (Escape did nothing, Tab walked into the page behind it). role=menu plus
+  // roving focus is the minimum the WAI-ARIA authoring practice asks for.
+  menu.setAttribute('role', 'menu');
+  menu.tabIndex = -1;
   const items = typeof buildItems === 'function' ? buildItems() : buildItems;
+  const rows = [];
   for (const it of items) {
     if (it.header) {
       const h = document.createElement('div');
       h.className = 'dd-header';
+      h.setAttribute('role', 'presentation');
       h.textContent = it.header;
       menu.appendChild(h);
       continue;
@@ -25,11 +33,15 @@ function openDropdown(anchor, buildItems) {
     if (it.sep) {
       const sep = document.createElement('div');
       sep.className = 'dd-sep';
+      sep.setAttribute('role', 'separator');
       menu.appendChild(sep);
       continue;
     }
     const row = document.createElement('div');
     row.className = 'dd-item';
+    row.setAttribute('role', 'menuitem');
+    row.tabIndex = -1;
+    row.setAttribute('aria-checked', it.checked ? 'true' : 'false');
     const check = document.createElement('span');
     check.className = 'dd-check';
     check.textContent = it.checked ? '✓' : '';
@@ -40,8 +52,23 @@ function openDropdown(anchor, buildItems) {
       menu.remove();
       if (it.cb) it.cb();
     };
+    rows.push(row);
     menu.appendChild(row);
   }
+  const focusRow = (i) => {
+    if (!rows.length) return;
+    const n = ((i % rows.length) + rows.length) % rows.length;
+    rows[n].focus();
+  };
+  menu.addEventListener('keydown', (e) => {
+    const at = rows.indexOf(document.activeElement);
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); menu.remove(); if (anchor && anchor.focus) anchor.focus(); return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); focusRow(at + 1); return; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); focusRow(at < 0 ? rows.length - 1 : at - 1); return; }
+    if (e.key === 'Home') { e.preventDefault(); focusRow(0); return; }
+    if (e.key === 'End') { e.preventDefault(); focusRow(rows.length - 1); return; }
+    if ((e.key === 'Enter' || e.key === ' ') && at >= 0) { e.preventDefault(); rows[at].click(); }
+  });
   document.body.appendChild(menu);
   const r = anchor.getBoundingClientRect();
   menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
@@ -52,6 +79,8 @@ function openDropdown(anchor, buildItems) {
     top = up > 8 ? up : Math.max(8, window.innerHeight - menu.offsetHeight - 8);
   }
   menu.style.top = top + 'px';
+  // focus lands on the current selection (or the first row) so the arrow keys have an origin
+  focusRow(Math.max(0, rows.findIndex((r) => r.getAttribute('aria-checked') === 'true')));
   setTimeout(() => {
     document.addEventListener('click', function close(e) {
       if (!menu.contains(e.target)) {

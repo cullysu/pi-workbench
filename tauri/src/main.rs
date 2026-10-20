@@ -2,6 +2,19 @@
 // Pi Workbench — Tauri shell. Spawns the bundled node runtime (server.mjs) and
 // loads its UI in a WebView2 window. Parity with the Electron shell: runtime.zip
 // fingerprint extract, system-node fallback, port reuse, single instance.
+//
+// P3-14 (v1.3.9 review): this shell is Windows-only, and said so nowhere. The code
+// looks for `node.exe` (bundled, then the two Program Files locations, then a `;`
+// split of PATH), extracts the runtime with the hardcoded `%SystemRoot%\System32\tar.exe`,
+// calls `CommandExt::creation_flags` on every spawn, and bundles only NSIS. A macOS or
+// Linux build therefore did not merely lack a bundle target — it failed to compile, with
+// errors that pointed at `creation_flags` instead of at the real constraint. That is
+// stated here and in the bundle target list, so the failure names itself.
+#[cfg(not(windows))]
+compile_error!(
+    "the Tauri shell in this repository is Windows-only (WebView2 + NSIS + System32\\tar.exe + \
+     CommandExt::creation_flags). Build the Electron shell for Linux/macOS — see README 'Supported platforms'."
+);
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -356,21 +369,54 @@ fn ensure_runtime(zip: &Path, dir: &Path, version: &str) -> Result<(), String> {
 
 /// Spawn the bundled server. NODE_OPTIONS/NODE_PATH are removed: a planted value would
 /// inject modules into server.mjs before any of our checks run (audit #33).
-fn spawn_node_server(node: &Path, runtime_dir: &Path) -> std::io::Result<Child> {
+///
+/// P1-3 (v1.3.9 review): the token is HANDED DOWN, never rediscovered. Previously the
+/// shell spawned a server that generated its own random per-boot token and wrote it to
+/// the 0600 token file; the shell read that file once at startup and baked it into the
+/// webview. When the supervisor restarted the server it generated a NEW token, so the
+/// already-loaded page kept presenting the old one and every /api call and WS upgrade
+/// 403'd until the user reloaded. Passing PIWB_TOKEN makes the token ours and stable
+/// across restarts — the same model the Electron shell has always used.
+fn spawn_node_server(node: &Path, runtime_dir: &Path, token: &str) -> std::io::Result<Child> {
     Command::new(node)
         .arg(runtime_dir.join("server.mjs"))
         .current_dir(runtime_dir)
         .env("PIWB_PARENT_PID", std::process::id().to_string())
+        .env("PIWB_TOKEN", token)
         .env_remove("NODE_OPTIONS")
         .env_remove("NODE_PATH")
         .creation_flags(no_window())
         .spawn()
 }
 
+/// The shell's own per-launch token. 32 hex chars (128 bits) from sha256 over the clock,
+/// the pid and a counter — no `rand` crate, and it never leaves this process except as
+/// the child's environment and the webview's init script.
+fn shell_token() -> String {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+                    .to_le_bytes(),
+            );
+            h.update(std::process::id().to_le_bytes());
+            h.update(b"pi-workbench-tauri-shell-token");
+            let d = h.finalize();
+            d.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        })
+        .clone()
+}
+
 /// v1.3.8 review P3-11: watch the server we own and restart it after an abnormal exit —
 /// the same 1.5s grace + 2-restart budget Electron has. A deliberately stopped child
 /// (app quitting) or a healthy one just returns to the loop.
-fn start_supervisor(app: tauri::AppHandle, node: PathBuf, runtime_dir: PathBuf) {
+fn start_supervisor(app: tauri::AppHandle, node: PathBuf, runtime_dir: PathBuf, token: String) {
     std::thread::spawn(move || {
         let mut restarts: u32 = 0;
         let mut last_start = Instant::now();
@@ -401,7 +447,9 @@ fn start_supervisor(app: tauri::AppHandle, node: PathBuf, runtime_dir: PathBuf) 
             if QUITTING.load(Ordering::Relaxed) {
                 return;
             }
-            match spawn_node_server(&node, &runtime_dir) {
+            // same token every time — the loaded page must stay authenticated across a
+            // restart (P1-3): a fresh token here would strand the webview with stale creds
+            match spawn_node_server(&node, &runtime_dir, &token) {
                 Ok(c) => {
                     *state.child.lock().unwrap() = Some(c);
                     *state.owned.lock().unwrap() = true;
@@ -462,13 +510,15 @@ fn main() {
             let mut owned = false;
             let mut child = None;
             let mut sup_node: Option<PathBuf> = None;
+            // P1-3: one token for this launch, reused by every spawn below
+            let token = shell_token();
             if !already_up {
                 let node = find_node(&runtime_dir).ok_or_else(|| "node.exe not found".to_string())?;
                 // NODE_OPTIONS/NODE_PATH must not leak into the bundled runtime: a
                 // planted NODE_OPTIONS would inject modules into server.mjs before
                 // any of our checks run — Electron strips these, so does the Tauri
                 // shell now (audit #33)
-                let c = spawn_node_server(&node, &runtime_dir).map_err(|e| format!("node spawn failed: {e}"))?;
+                let c = spawn_node_server(&node, &runtime_dir, &token).map_err(|e| format!("node spawn failed: {e}"))?;
                 child = Some(c);
                 owned = true;
                 sup_node = Some(node);
@@ -477,11 +527,16 @@ fn main() {
             if !wait_port(port(), Duration::from_secs(30)) {
                 return Err("local server did not start in time".into());
             }
-            // the server persists its per-boot token (0600) for this shell — without it
-            // the page has no credentials and the identity check below would fail
-            let shell_token = std::env::var("PIWB_TOKEN").ok()
-                .or_else(|| read_server_token(Duration::from_secs(10)))
-                .ok_or_else(|| "no bootstrap token (env or server token file)".to_string())?;
+            // a server WE started already holds our token. A server that was already up
+            // belongs to another shell instance, so its token can only come from its
+            // env or the 0600 token file it wrote.
+            let shell_token = if owned {
+                token.clone()
+            } else {
+                std::env::var("PIWB_TOKEN").ok()
+                    .or_else(|| read_server_token(Duration::from_secs(10)))
+                    .ok_or_else(|| "no bootstrap token (env or server token file)".to_string())?
+            };
             if !workbench_serving(port(), &shell_token) {
                 return Err("the service on the port did not pass identity verification (token handshake failed)".into());
             }
@@ -492,7 +547,7 @@ fn main() {
             // only a server WE own is ours to restart; an already-running instance
             // belongs to another shell (the second instance exited at startup)
             if let Some(node) = sup_node {
-                start_supervisor(app.handle().clone(), node, runtime_dir.clone());
+                start_supervisor(app.handle().clone(), node, runtime_dir.clone(), token);
             }
 
             let url = format!("http://127.0.0.1:{}/", port()).parse()?;
@@ -554,4 +609,64 @@ fn main() {
                 }
             }
         });
+}
+
+// P3-21 (v1.3.9 review): `cargo test --locked` compiled and ran ZERO tests, so the one
+// piece of this shell that is pure logic — the identity handshake — was only ever covered
+// indirectly by a live server. These are known-answer tests from RFC 4231 plus the parser
+// and comparison edge cases; nothing here starts a process or touches the network.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC 4231 test case 2 — HMAC-SHA-256("key", "The quick brown fox jumps over the lazy dog")
+    #[test]
+    fn hmac_matches_rfc4231_case2() {
+        assert_eq!(
+            hmac_sha256_hex(b"key", b"The quick brown fox jumps over the lazy dog"),
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+    }
+
+    // RFC 4231 test case 6 — a 131-byte key, i.e. the "hash the key first" branch
+    #[test]
+    fn hmac_matches_rfc4231_case6_long_key() {
+        let key = [0xaau8; 131];
+        assert_eq!(
+            hmac_sha256_hex(&key, b"Test Using Larger Than Block-Size Key - Hash Key First"),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[test]
+    fn proof_header_is_parsed_and_lowercased() {
+        let hex = "A".repeat(64);
+        let head = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nx-piwb-proof: {hex}\r\n\r\n");
+        assert_eq!(proof_from_headers(&head), Some("a".repeat(64)));
+    }
+
+    #[test]
+    fn a_malformed_or_absent_proof_is_none() {
+        // too short, non-hex, and missing entirely — all must be a refusal, never a guess
+        assert_eq!(proof_from_headers("HTTP/1.1 200 OK\r\nx-piwb-proof: deadbeef\r\n"), None);
+        assert_eq!(proof_from_headers(&format!("HTTP/1.1 200 OK\r\nx-piwb-proof: {}\r\n", "z".repeat(64))), None);
+        assert_eq!(proof_from_headers("HTTP/1.1 200 OK\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_length_and_content_differences() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"", b"a"));
+    }
+
+    #[test]
+    fn the_shell_token_is_64_hex_chars_and_stable() {
+        let a = shell_token();
+        let b = shell_token();
+        assert_eq!(a.len(), 64, "sha256 hex is 64 chars");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(a, b, "the supervisor restart path depends on this being stable");
+    }
 }

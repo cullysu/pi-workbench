@@ -150,3 +150,13 @@ finally:
     try: server.kill()
     except Exception: pass
     time.sleep(0.5)
+    # P3-18 (v1.3.9 review): the two mkdtemp() trees this sweep creates were never removed, so
+    # every local run (and every CI run on a reused runner) left a fake $HOME behind with a
+    # seeded pi session, a Codex rollout and a backup zip inside it. Named prefixes only —
+    # rmtree must never be pointed at a path this script did not itself create.
+    for d, prefix in ((home, 'piwb-sweep-'), (proj, 'piwb-sweepproj-')):
+        try:
+            if d and os.path.basename(d).startswith(prefix) and os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass

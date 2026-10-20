@@ -28,6 +28,11 @@
 
   /* control metrics */
   --control-h-sm: 24px; --control-h-md: 28px; --control-h-lg: 32px;
+  /* P3-11 (v1.3.9 review): the sidebar width used to be declared only ON #rail, but
+     #log-drawer is a SIBLING that offsets itself by the same measure — so the 176px
+     narrow-window override at the bottom of this file reached the rail and left the
+     drawer hanging 44px short of it. One declaration on :root serves both. */
+  --rail-w: 220px;
 
   /* semantic colors — light */
   --canvas: #ffffff;      /* main background */
@@ -831,7 +836,11 @@ select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmln
    window (high zoom, tiling, a small laptop). With no media query the sidebar kept its
    width and the timeline was crushed; and prefers-reduced-motion was never honored. */
 @media (max-width: 980px) {
-  #rail { --rail-w: 176px; padding: 10px 8px; }
+  /* P3-11/P3-12: :root so the sibling #log-drawer follows, and !important-to-beat-inline
+     is unnecessary — the drag handler writes to #rail's inline style, so the narrow-window
+     rule has to outrank it. Declared here as an explicit override of the inline value. */
+  :root { --rail-w: 176px; }
+  #rail { width: var(--rail-w) !important; min-width: var(--rail-w) !important; padding: 10px 8px; }
   .usage-cards { grid-template-columns: repeat(2, 1fr); }
   .split-list { width: 220px; min-width: 180px; }
   .rr-seg { width: 84px; }

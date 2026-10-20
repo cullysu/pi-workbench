@@ -124,8 +124,17 @@ class McpClient {
 
   async connect() {
     if (this.ready) return this.ready;
-    this.ready = (async () => {
-      const { command, args = [], env = {} } = this.conf;
+    const { command, args = [], env = {} } = this.conf;
+    // P2-7 (v1.3.9 review): a non-string command reached spawn() and, on Windows,
+    // cmd.exe /c — an object or number got coerced into a command line. Validate here
+    // too: the config route is not the only way a bridge gets constructed.
+    if (typeof command !== "string" || !command.trim()) {
+      throw new Error(`mcp server "${this.name}" has no usable command (got ${typeof command})`);
+    }
+    if (!Array.isArray(args) || args.some((a) => typeof a !== "string")) {
+      throw new Error(`mcp server "${this.name}" args must be an array of strings`);
+    }
+    const p = (async () => {
       // windows: npx/uvx etc. are .cmd shims — direct spawn() throws ENOENT, so go through cmd
       const useShell = process.platform === 'win32';
       const exe = useShell ? (process.env.ComSpec || 'cmd.exe') : command;
@@ -207,7 +216,13 @@ class McpClient {
         throw e;
       }
     })();
-    return this.ready;
+    // P2-7 (v1.3.9 review): the body reset `this.ready` on its OWN failure paths, but a
+    // throw from a path that forgot to (or from the validation above) left a REJECTED
+    // promise cached forever — every later call got the same stale rejection instead of a
+    // retry. Clearing here makes the reset path-independent.
+    p.catch(() => { if (this.ready === p) this.ready = null; });
+    this.ready = p;
+    return p;
   }
 
   async listTools() {

@@ -48,8 +48,16 @@ const PORT = Number(process.env.PIWB_PORT || 32123);
 // `node server.mjs` browser usage keeps the embedded mode via PIWB_EMBED_TOKEN=1
 // (plus a 0600 token file for tooling). See the shell repos' main entry points.
 const API_TOKEN = process.env.PIWB_TOKEN || crypto.randomBytes(24).toString('hex');
-const TOKEN_EMBED = process.env.PIWB_EMBED_TOKEN === '1';
 const TOKEN_FROM_ENV = !!process.env.PIWB_TOKEN; // the shell owns this token; we only hand it back
+// P2-6 (v1.3.9 review): `npm start` used to be unusable. Plain `node server.mjs` set
+// neither PIWB_TOKEN nor PIWB_EMBED_TOKEN, so the page got no credentials at all and every
+// /api call plus the WS upgrade 403'd — the documented browser workflow was dead unless the
+// user discovered an undocumented env var. Embedding is now the DEFAULT whenever no desktop
+// shell supplied a token; PIWB_EMBED_TOKEN=0 opts back out (headless/tooling mode keeps the
+// 0600 token file instead of shipping the token in HTML).
+const TOKEN_EMBED = process.env.PIWB_EMBED_TOKEN === '0'
+  ? false
+  : (process.env.PIWB_EMBED_TOKEN === '1' || !TOKEN_FROM_ENV);
 // v1.3.8 review P1-2: CAPTURE, THEN SCRUB. Every child we start (pi, MCP servers, tool
 // shells, cron runs, git, the file browser) inherits process.env, and pi can run arbitrary
 // commands — so keeping PIWB_TOKEN in the environment handed the GUI's admin credential to
@@ -1683,7 +1691,22 @@ async function hMcpConfig(req, res, u) {
       const servers = body.mcpServers;
       if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return json(res, 400, { error: 'mcpServers object required' });
       for (const [name, s] of Object.entries(servers)) {
-        if (!s || typeof s !== 'object' || !s.command) return json(res, 400, { error: `server "${name}" needs a command` });
+        // P2-7 (v1.3.9 review): `!s.command` accepted ANY truthy value, so `command: {}`
+        // or `command: 42` was persisted and then handed to spawn() — which on Windows
+        // goes through cmd.exe /c (extensions/mcp-bridge.js), i.e. an object coerced into
+        // a command line. A command must be a plain non-empty program token.
+        if (!s || typeof s !== 'object') return json(res, 400, { error: `server "${name}" must be an object` });
+        if (typeof s.command !== 'string' || !s.command.trim()) {
+          return json(res, 400, { error: `server "${name}" needs a command (non-empty string)` });
+        }
+        if (/[\r\n\0]/.test(s.command)) return json(res, 400, { error: `server "${name}" command must be a single line` });
+        if (s.args !== undefined && (!Array.isArray(s.args) || s.args.some((a) => typeof a !== 'string'))) {
+          return json(res, 400, { error: `server "${name}" args must be an array of strings` });
+        }
+        if (s.env !== undefined && (!s.env || typeof s.env !== 'object' || Array.isArray(s.env))) {
+          return json(res, 400, { error: `server "${name}" env must be an object` });
+        }
+        if (String(s.command).length > 500) return json(res, 400, { error: `server "${name}" command is too long` });
       }
       const prev = readJson(MCP_FILE) || { mcpServers: {} };
       const prevByName = prev.mcpServers && typeof prev.mcpServers === 'object' ? prev.mcpServers : {};
@@ -1954,6 +1977,13 @@ setInterval(() => { try { cron.tick(); } catch (e) { logErr('cron tick: ' + ((e 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (isMain) server.listen(PORT, '127.0.0.1', () => {
   console.log(`pi-workbench listening on http://127.0.0.1:${PORT}`);
+  // Say which credential mode is live. Before v1.3.9 the answer was "none" for a plain
+  // `node server.mjs`, and the only symptom was a UI that silently 403'd every request.
+  if (!TOKEN_FROM_ENV) {
+    console.log(TOKEN_EMBED
+      ? 'auth: token embedded in the served page (browser mode). PIWB_EMBED_TOKEN=0 keeps it in the token file only.'
+      : `auth: token file only — open http://127.0.0.1:${PORT} from a shell that reads ${TOKEN_FILE}`);
+  }
   // per-boot token file (0600 via atomicWrite on POSIX) for the desktop shells —
   // written only when the server owns the token generation
   if (!TOKEN_FROM_ENV) {

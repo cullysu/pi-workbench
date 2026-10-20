@@ -31,14 +31,18 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 
 Download the installer for your platform from [Releases](../../releases) (1.3.2 shown):
 
-| Platform | File |
-|---|---|---|
 | Platform | File | Which one |
+|---|---|---|
 | Windows (Electron) | `PiWorkbench-Setup-<version>.exe` | the default, full-featured shell — pick this if unsure |
-| Windows (Tauri lightweight) | `PiWorkbench-<version>-Tauri-x64-setup.exe` | same feature surface, smaller (system WebView2) |
-| Linux | `PiWorkbench-<version>-linux.AppImage` | the Linux channel; `chmod +x` and run |
-| macOS (Apple Silicon) | `PiWorkbench-<version>-macOS-arm64.dmg` | pick by CPU; the arm64 dmg bundles an arm64 Node — no Rosetta |
+| Windows (Tauri lightweight) | `PiWorkbench-<version>-Tauri-x64-setup.exe` | same feature surface, smaller (system WebView2); **Tauri shell is Windows-only** |
+| Linux | `PiWorkbench-<version>-linux.AppImage` | the Linux channel (Electron shell); `chmod +x` and run |
+| macOS (Apple Silicon) | `PiWorkbench-<version>-macOS-arm64.dmg` | pick by CPU (Electron shell); the arm64 dmg bundles an arm64 Node — no Rosetta |
 | macOS (Intel) | `PiWorkbench-<version>-macOS-x64.dmg` | same as above (bundles an x64 Node) |
+
+> **The Tauri shell supports Windows only.** `tauri/src/main.rs` depends on WebView2, NSIS,
+> `System32\tar.exe` and `CommandExt::creation_flags`; a non-Windows target fails at compile
+> time with an explicit `compile_error!` instead of a confusing trait-method error. Use the
+> Electron shell for Linux/macOS — the Linux and macOS installers above are all Electron.
 
 The installers **bundle a Node runtime** (Windows/Linux official x64 binaries; macOS per architecture — arm64 and x64 respectively), so **no system Node.js is needed**. `package.json` `engines >= 22.19` (pi 0.85.0's real floor) only constrains development from source:
 
@@ -69,13 +73,16 @@ Provider keys support `$ENV_NAME` references. The repo contains no keys, endpoin
 ```bash
 npm install
 npm run prepare-runtime   # assembles pkg-build/ (npm ci against the committed runtime lockfiles — the same dependency set CI uses)
-PIWB_EMBED_TOKEN=1 npm start   # dev server on http://127.0.0.1:32123; WITHOUT this flag the first page load has no
-                               # credentials, gets 403 and the UI cannot connect (the desktop shell and the tests always pass a token)
+npm start                 # http://127.0.0.1:32123 — opens usable in a browser (see the token note below)
 npm test                  # API test suite (isolated HOME)
 npm run electron          # Electron shell on the assembled runtime
-npx tauri build           # Tauri NSIS installer (run from tauri/; needs the Rust toolchain and the assembled runtime)
+npx tauri build --locked  # Tauri NSIS installer (Windows only; run from tauri/ — audit build tree == audited tree)
 npm run dist              # Electron NSIS installer (artifact in dist_electron/)
 ```
+
+> **Browser dev mode works out of the box now.** When no desktop shell supplies `PIWB_TOKEN`, the server embeds a per-launch token in the served page and listens on `127.0.0.1` only; both desktop shells pass their own `PIWB_TOKEN` so the page never carries one. If another local account on this machine should not hold that admin credential, start with `PIWB_EMBED_TOKEN=0 npm start` — the token then lives only in the 0600 `~/.pi-workbench/token.json`.
+>
+> Before v1.3.9 this section told you to set `PIWB_EMBED_TOKEN=1` or the UI would 403. That was an unmet documented prerequisite, not a deliberate default.
 
 > A distributable installer also needs the bundled `pkg-runtime.zip` (`scripts/make-runtime.mjs`, packed from `pkg-build/`); the CI workflow is the single source of truth for the whole assembly. The Tauri bundle is a thin shell that downloads/uses the same Node runtime — it is **not** a ~10 MB self-contained binary, so compare the published asset sizes in the release notes instead of assuming a number.
 

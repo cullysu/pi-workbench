@@ -97,12 +97,21 @@ jobs:
         run: node scripts/verify-audit-fixes.mjs
       - name: UI probe (headless Chromium via CDP)
         run: |
-          npx -y playwright@1.49.1 install --with-deps chromium
+          # P3-25: playwright is an exact devDependency now, so `npm ci` above is
+          # what pins the version — `npx -y playwright@1.49.1` resolved and
+          # installed an unpinned package at run time. The browser binary still
+          # comes from Playwright's CDN (no hash in the lockfile); only the
+          # driver is reproducible.
+          npx playwright install --with-deps chromium
           CHROME_EXE=$(find ~/.cache/ms-playwright -type f -name chrome -path '*chrome-linux*' | head -1)
           echo "chrome: $CHROME_EXE"
           CHROME_EXE="$CHROME_EXE" node scripts/ui-probe.mjs
           CHROME_EXE="$CHROME_EXE" node scripts/chat-e2e.mjs
           CHROME_EXE="$CHROME_EXE" node scripts/ui-contract-probe.mjs
+          # P3-20: the front end had no automated test at all — this one asserts the
+          # keyboard menu, the responsive rail width and the offline-queue draft
+          # survival in a real browser (all three are rendered behaviour, not source text)
+          CHROME_EXE="$CHROME_EXE" node scripts/ui-a11y-probe.mjs
 
   build:
     timeout-minutes: 60
@@ -167,7 +176,11 @@ jobs:
         run: |
           cargo --version
           cd tauri
-          npx tauri build # builds from the committed Cargo.lock — reproducible; lock refreshes happen in review, not at build time
+          # P3-16 (v1.3.9 review): `npx tauri build` lets cargo UPDATE Cargo.lock in place when
+          # the manifest drifted, so the tree audited by `cargo audit --file tauri/Cargo.lock`
+          # and the tree actually compiled could differ. --locked turns that silent refresh into
+          # a build failure — which is the whole point of auditing a committed lock.
+          npx tauri build -- --locked
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: tauri-installer

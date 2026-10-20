@@ -21,9 +21,17 @@ const require = createRequire(import.meta.url);
 const WebSocket = require('ws');
 
 const CHROME = process.env.CHROME_EXE
-  || path.join(process.env.LOCALAPPDATA, 'ms-playwright', 'chromium-1223', 'chrome-win64', 'chrome.exe');
-const PORT = 39985;
-const CDP_PORT = 9334;
+  || path.join(process.env.LOCALAPPDATA || '', 'ms-playwright', 'chromium-1223', 'chrome-win64', 'chrome.exe');
+// P1-2 (v1.3.9 review): the fixed 39985/9334 pair is what made the self-heal block
+// necessary in the first place, and on a busy CI runner a hardcoded port is a flake
+// generator. Ask the OS for two free ports at startup instead.
+const freePort = () => new Promise((resolve, reject) => {
+  const srv = net.createServer();
+  srv.once('error', reject);
+  srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+});
+const PORT = await freePort(); // server port — OS-assigned, so a leftover instance cannot collide
+const CDP_PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPLY = '1 加 1 等于 2。';
 // a Windows-directory TEMP poisons chrome profiles and fixture dirs
@@ -135,28 +143,12 @@ try {
   const shots = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'ui-shots');
   fs.mkdirSync(shots, { recursive: true });
 
-  // self-heal: a leftover probe instance (a crashed run) holds our ports — kill it by pid
-  {
-    const cp = require('node:child_process');
-    const out = cp.execSync('netstat -ano', { encoding: 'utf8' });
-    const pids = new Set(out.split('\n')
-      .filter((l) => l.includes('LISTENING') && (l.includes(':' + PORT + ' ') || l.includes(':' + CDP_PORT + ' ')))
-      .map((l) => l.trim().split(/\s+/).pop()));
-    for (const pid of pids) {
-      try {
-        // only kill a LEFTOVER COPY OF OURSELVES: verify the pid's image name is
-        // node/chrome before firing — a blind kill-by-port could hit an unrelated
-        // service that happens to hold the port
-        const img = cp.execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: 'utf8' }).trim();
-        if (!/^(node|chrome)\.exe/i.test(img.split(',')[0] || '')) {
-          console.log('self-heal: pid', pid, 'is not node/chrome — leaving it alone');
-          continue;
-        }
-        console.log('self-heal: killing leftover pid', pid);
-        cp.execSync('taskkill /PID ' + pid + ' /F');
-      } catch { /* gone already */ }
-    }
-  }
+  // P1-2 (v1.3.9 review): the old self-heal block killed leftovers by port using
+  // `netstat -ano` / `tasklist` / `taskkill` — Windows-only tools invoked unconditionally
+  // on the ubuntu-latest e2e runner, where `netstat -ano` never prints "LISTENING" and the
+  // whole block was silently dead. Ports are OS-assigned now (see PORT/CDP_PORT above), so
+  // there is no leftover to heal: a stale instance holds a DIFFERENT port. The failure mode
+  // it guarded against (waitPort timing out on someone else's socket) can no longer happen.
   if (!await waitPort(PORT, 20000)) throw new Error('server never opened');
   console.log('stage: server up');
 

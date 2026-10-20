@@ -33,7 +33,13 @@ const manifestOnly = files.filter((f) => f !== 'manifest.json');
 files.length = 0;
 files.push(...manifestOnly);
 if (!files.length) throw new Error('manifest would cover zero files — the runtime tree is wrong');
-const manifest = { generatedAt: new Date().toISOString(), files: {} };
+// P3-15 (v1.3.9 review): `generatedAt: new Date()` gave an identical tree a different
+// manifest.json on every build, so the runtime zip could never be byte-reproducible even with
+// SOURCE_DATE_EPOCH set — make-runtime.mjs pins the zip mtimes and this line injected
+// wall-clock noise straight back in. The timestamp is provenance, not identity: derive it
+// from SOURCE_DATE_EPOCH when the build asks for reproducibility, omit it otherwise.
+const epoch = Number(process.env.SOURCE_DATE_EPOCH);
+const manifest = epoch ? { generatedAt: new Date(epoch * 1000).toISOString(), files: {} } : { files: {} };
 for (const rel of files) {
   const buf = fs.readFileSync(path.join(root, rel));
   manifest.files[rel] = { size: buf.length, sha256: createHash('sha256').update(buf).digest('hex') };

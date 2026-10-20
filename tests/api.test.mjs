@@ -509,3 +509,57 @@ test('update/check reports the current version alongside the latest tag', async 
   assert.equal(typeof r.data.current, 'string');
   assert.ok('updateAvailable' in r.data);
 });
+
+// P2-6 (v1.3.9 review): `npm start` — a plain `node server.mjs` with NEITHER PIWB_TOKEN
+// nor PIWB_EMBED_TOKEN — served a page with no credentials, so every /api call and the WS
+// upgrade answered 403 and the documented browser workflow was dead. The default is now
+// "embed"; PIWB_EMBED_TOKEN=0 is the explicit opt-out. Both ends are asserted here because
+// a default nobody tests is how this broke in the first place.
+test('plain `node server.mjs` serves a usable page, and PIWB_EMBED_TOKEN=0 opts out', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-embed-'));
+  const port = await new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => resolve(p)); });
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const boot = (extraEnv) => {
+    // strip every token variable the runner might be carrying: this test is about the
+    // ABSENCE of one, so an inherited PIWB_TOKEN would silently invert it
+    const env = { ...process.env, PIWB_PORT: String(port), HOME: home, USERPROFILE: home, ...extraEnv };
+    for (const k of ['PIWB_TOKEN', 'PIWB_EMBED_TOKEN']) delete env[k];
+    Object.assign(env, extraEnv);
+    return spawn(process.execPath, [path.join(ROOT, '..', 'server.mjs')], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  };
+  const waitUp = async () => {
+    for (let i = 0; i < 120; i++) {
+      try { const r = await fetch(base + '/'); if (r.ok) return r; } catch { /* not yet */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    throw new Error('server never came up');
+  };
+  const stop = (c) => new Promise((resolve) => { c.once('exit', resolve); try { c.kill(); } catch { resolve(); } });
+
+  let child = boot({});
+  try {
+    const page = await waitUp();
+    const html = await page.text();
+    const m = html.match(/__API_TOKEN = "([0-9a-f]+)"/);
+    assert.ok(m, 'the default mode embeds a token in the served page');
+    const withToken = await fetch(base + '/api/config', { headers: { 'x-api-token': m[1] } });
+    assert.equal(withToken.status, 200, 'the embedded token is accepted by /api/*');
+    const withoutToken = await fetch(base + '/api/config');
+    assert.equal(withoutToken.status, 403, 'and it is still an auth boundary, not open access');
+  } finally {
+    await stop(child);
+  }
+
+  child = boot({ PIWB_EMBED_TOKEN: '0' });
+  try {
+    const page = await waitUp();
+    const html = await page.text();
+    assert.equal(/__API_TOKEN = "/.test(html), false, 'PIWB_EMBED_TOKEN=0 keeps the token out of the page');
+  } finally {
+    await stop(child);
+  }
+  fs.rmSync(home, { recursive: true, force: true });
+});

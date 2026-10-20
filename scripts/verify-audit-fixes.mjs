@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { spawn, execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { PassThrough } from 'node:stream';
 import { createCron } from '../lib/cron.mjs';
 import { createSources } from '../lib/sources.mjs';
@@ -529,10 +531,21 @@ const check = (name, ok, detail = '') => {
     ci.includes('hdiutil attach') && ci.includes('runtime.zip') && ci.includes('got="$(lipo -archs "/tmp/rt-$arch/node")"'),
     'dmg arch verification missing');
 
-  // P3-14: workflow actions pinned to immutable commits
-  check('P3-14 CI actions are pinned to commit SHAs',
-    !/@v\d+(\s|$)/m.test(ci) && /uses:\s*[^@\s]+@[0-9a-f]{40}/.test(ci),
-    'mutable action tags still present');
+  // P3-14: workflow actions pinned to immutable commits.
+  // P3-24 (v1.3.9 review): the old guard was two regexes — "no @vN anywhere" plus "at least
+  // one 40-hex SHA exists". That passes a file where ONE action is pinned and another still
+  // says `@v4`, as long as the loose tag is not literally `@v<digit>`. Parse every `uses:`
+  // line instead and require the ref after @ to be exactly 40 lowercase hex characters.
+  const usesLines = ci.split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^-?\s*uses:/.test(l))
+    .map((l) => l.replace(/^-?\s*uses:\s*/, '').split('#')[0].trim())
+    // a reusable-workflow call (`./.github/workflows/x.yml`) has no ref to pin
+    .filter((ref) => !ref.startsWith('./'));
+  const badRefs = usesLines.filter((ref) => !/@[0-9a-f]{40}$/.test(ref));
+  check('P3-14/P3-24 every workflow action is pinned to a 40-hex commit SHA',
+    usesLines.length > 0 && badRefs.length === 0,
+    `${usesLines.length} uses: lines, unpinned: ${badRefs.join(', ') || '(none listed)'}`);
 
   // P3-11: the Tauri shell must supervise its own server like Electron does
   const rs = rd(path.join('tauri', 'src', 'main.rs'));
@@ -561,6 +574,15 @@ const check = (name, ok, detail = '') => {
   const srcSrc = rd(path.join('lib', 'sources.mjs'));
   const provSrc = rd(path.join('lib', 'providers.mjs'));
   const ci = rd(path.join('.github', 'workflows', 'ci.yml'));
+  // wave 29: files the v1.3.9 review named, read once
+  const cronSrc = rd(path.join('lib', 'cron.mjs'));
+  const ledgerSrc = rd('ledger.mjs');
+  const mcpSrc = rd(path.join('extensions', 'mcp-bridge.js'));
+  const apiTest = rd(path.join('tests', 'api.test.mjs'));
+  const indexHtml = rd(path.join('public', 'index.html'));
+  const ddSrc = rd(path.join('public', 'dropdowns.js'));
+  const runtimeSrc = rd(path.join('scripts', 'check-runtime.mjs'));
+  const rs = rd(path.join('tauri', 'src', 'main.rs'));
 
   // --- short-coming 1: a provider change is one commit, not a three-request sequence
   check('28-1 providers module owns the cross-file transaction',
@@ -728,6 +750,187 @@ const check = (name, ok, detail = '') => {
       `consistent=${consistent} drifted=${drifted}`);
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+
+  // =====================================================================
+  // v1.3.9 unified review (24 items). Structural where the claim is about shape,
+  // BEHAVIOURAL where the claim is about what the code does under contention —
+  // the cron lock takeover is the whole point of P1-1, and a regex would only
+  // assert that someone wrote the word "rename".
+  // =====================================================================
+  // --- P1-1: stale-lock takeover is atomic (two real processes, one winner)
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-lock-'));
+    const runs = path.join(tmp, 'runs');
+    fs.mkdirSync(runs, { recursive: true });
+    const cronFile = path.join(tmp, 'cron.json');
+    fs.writeFileSync(cronFile, JSON.stringify({ jobs: [] }));
+    // a "pi" that stays alive for a few seconds, so the winner keeps holding its lock
+    // while the loser checks — a fast-exiting child would release it and make the race
+    // unobservable.
+    const slowPi = path.join(tmp, 'slow-pi.mjs');
+    fs.writeFileSync(slowPi, 'setTimeout(() => process.exit(0), 4000);\n');
+    const worker = path.join(tmp, 'worker.mjs');
+    fs.writeFileSync(worker, `
+import fs from 'node:fs';
+import { spawn } from 'node:child_process';
+import { createCron } from ${JSON.stringify(pathToFileURL(path.join(repoRoot, 'lib', 'cron.mjs')).href)};
+const [runsDir, cronFile, piCli, jobJson] = process.argv.slice(2);
+const cron = createCron({
+  CRON_FILE: cronFile, CRON_RUNS_DIR: runsDir, HOME: ${JSON.stringify(tmp)},
+  SECRET_ENV: {}, PI_CLI: piCli, cronPiArgs: () => [],
+  broadcast: () => {},
+  readJson: (f) => JSON.parse(fs.readFileSync(f, 'utf8')),
+  saveJson: (f, d) => fs.writeFileSync(f, JSON.stringify(d)),
+  spawn,
+});
+const ok = cron.runCronJob(JSON.parse(jobJson));
+let lockAlive = false;
+try { lockAlive = fs.existsSync(require_runs_join()); } catch { /* ignore */ }
+function require_runs_join() { return runsDir + '/' + JSON.parse(jobJson).id + '.lock'; }
+process.stdout.write('RESULT:' + ok + '\\n');
+cron.shutdown();
+await new Promise((r) => setTimeout(r, 250));
+process.stdout.write('LOCK_AFTER_SHUTDOWN:' + fs.existsSync(require_runs_join()) + '\\n');
+process.exit(0);
+`);
+    const job = { id: 'race1', name: 'race', prompt: 'p', kind: 'interval', everyMin: 5, enabled: true };
+    const lockPath = path.join(runs, job.id + '.lock');
+    // seed a lock that is stale by the scheduler's own definition (30 min)
+    fs.writeFileSync(lockPath, JSON.stringify({ pid: 1, at: 0 }));
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+    fs.utimesSync(lockPath, old, old);
+
+    const runWorker = () => new Promise((resolve) => {
+      const c = spawn(process.execPath, [worker, runs, cronFile, slowPi, JSON.stringify(job)], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      c.stdout.on('data', (d) => { out += d; });
+      c.stderr.on('data', (d) => { out += d; });
+      c.on('exit', () => resolve(out));
+    });
+    const both = [runWorker(), runWorker()]; // started in the same tick: this is the race
+    const outs = await Promise.all(both);
+    const results = outs.map((o) => (/RESULT:(true|false)/.exec(o) || [])[1]);
+    const wins = results.filter((r) => r === 'true').length;
+    check('P1-1 two processes racing for a stale cron lock produce exactly ONE run',
+      wins === 1, `results=${JSON.stringify(results)} outs=${JSON.stringify(outs).slice(0, 400)}`);
+    check('P2-5 shutdown releases its lock file instead of leaving a 30-minute block',
+      outs.every((o) => /LOCK_AFTER_SHUTDOWN:false/.test(o)), outs.map((o) => (/LOCK_AFTER_SHUTDOWN:(\w+)/.exec(o) || [])[1]).join(','));
+
+    // a FRESH lock is not taken over by anybody
+    const fresh = { ...job, id: 'race2' };
+    fs.writeFileSync(path.join(runs, fresh.id + '.lock'), JSON.stringify({ pid: 2, at: Date.now() }));
+    const one = await new Promise((resolve) => {
+      const c = spawn(process.execPath, [worker, runs, cronFile, slowPi, JSON.stringify(fresh)], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      c.stdout.on('data', (d) => { out += d; });
+      c.stderr.on('data', (d) => { out += d; });
+      c.on('exit', () => resolve(out));
+    });
+    check('P1-1 a lock that is still fresh is never taken over',
+      /RESULT:false/.test(one), one.slice(0, 200));
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // --- P2-10: run logs are pruned to a bounded count
+  check('P2-10 cron run logs are pruned to a fixed newest-N window',
+    cronSrc.includes('const CRON_KEEP_LOGS = 20;') && cronSrc.includes('pruneRunLogs(runDir)') &&
+    cronSrc.includes('stat.slice(CRON_KEEP_LOGS)'),
+    'no log retention');
+
+  // --- P1-3: the Tauri supervisor restarts with the SAME token
+  check('P1-3 the Tauri shell hands its own token to every spawn, including restarts',
+    rs.includes('fn spawn_node_server(node: &Path, runtime_dir: &Path, token: &str)') &&
+    rs.includes('.env("PIWB_TOKEN", token)') &&
+    rs.includes('start_supervisor(app.handle().clone(), node, runtime_dir.clone(), token)') &&
+    rs.includes('spawn_node_server(&node, &runtime_dir, &token)'),
+    'the supervisor can restart the server with a different token');
+
+  // --- P2-6: plain `node server.mjs` is usable, and the opt-out still exists
+  check('P2-6 the browser workflow is the DEFAULT, with an explicit opt-out',
+    /const TOKEN_EMBED = process\.env\.PIWB_EMBED_TOKEN === '0'\s*\n?\s*\? false/.test(srv) &&
+    srv.includes("process.env.PIWB_EMBED_TOKEN === '1' || !TOKEN_FROM_ENV"),
+    'embed is still opt-in only');
+  check('P2-6 and it is locked by a test that boots the server with no token env at all',
+    apiTest.includes('plain `node server.mjs` serves a usable page') &&
+    apiTest.includes("for (const k of ['PIWB_TOKEN', 'PIWB_EMBED_TOKEN']) delete env[k]"),
+    'no test for the default credential mode');
+
+  // --- P2-7: MCP command/args/env are validated as data, not truthiness
+  check('P2-7 an MCP command must be a non-empty single-line string',
+    srv.includes("typeof s.command !== 'string' || !s.command.trim()") &&
+    srv.includes('/[\\r\\n\\0]/.test(s.command)') &&
+    srv.includes("Array.isArray(s.args)"),
+    'MCP command validation is still a truthiness test');
+  check('P2-7 a rejected connect promise is never cached forever',
+    mcpSrc.includes('p.catch(() => { if (this.ready === p) this.ready = null; })') &&
+    mcpSrc.includes('if (typeof command !== "string" || !command.trim())'),
+    'connect() can cache a rejection');
+
+  // --- P2-8: an extension reply that cannot be sent is visible
+  check('P2-8 the extension reply path checks wsSend acceptance',
+    /const ok = wsSend\(/.test(app) && app.includes('离线队列已满——扩展请求的回复未能送出'),
+    'extension replies can be dropped silently');
+
+  // --- P2-9: the ledger walk is bounded and says so
+  check('P2-9 ledger scans are capped by a file budget that is reported',
+    ledgerSrc.includes('const LEDGER_MAX_FILES = 5000;') &&
+    ledgerSrc.includes('walkCapped(') && ledgerSrc.includes('cappedSources: walkFlag.capped'),
+    'ledger walk is unbounded or silent about truncation');
+
+  // --- P3-13: keyboard operability of the disclosure widgets and the tree
+  check('P3-13 thinking blocks, tool cards, project rows and session rows are keyboard reachable',
+    app.includes('function wireToggle(') && app.includes('function wireTreeItem(') &&
+    app.includes('wireThinking(el)') && app.includes('wireTreeItem(head, selectThisProject)') &&
+    app.includes('wireTreeItem(d, () => d.click())'),
+    'mouse-only interactive divs remain');
+  check('P3-13 the project tree announces itself as a tree',
+    indexHtml.includes('id="project-tree" class="session-list" role="tree"'),
+    'no tree role on the container');
+  check('P3-13 the dropdown menus are role=menu with a roving focus ring',
+    ddSrc.includes("menu.setAttribute('role', 'menu')") &&
+    ddSrc.includes("row.setAttribute('role', 'menuitem')") &&
+    ddSrc.includes("e.key === 'ArrowDown'") && ddSrc.includes("e.key === 'Escape'"),
+    'dropdown keyboard support missing');
+
+  // --- P3-14: the Windows-only trait of the Tauri shell is stated, not implied
+  check('P3-14 a non-Windows Tauri build fails with an explicit message',
+    rs.includes('#[cfg(not(windows))]') && rs.includes('compile_error!') &&
+    rs.includes('Windows-only'),
+    'Tauri still pretends to be portable');
+
+  // --- P3-15: the runtime manifest is reproducible when the build asks for it
+  {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-man-'));
+    // write-manifest walks a fixed top-level allowlist (lib/, public/, package.json, …),
+    // so the fixture has to look like a runtime tree, not like two loose files
+    fs.mkdirSync(path.join(tmp, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'lib', 'a.js'), 'export const a = 1;\n');
+    fs.writeFileSync(path.join(tmp, 'package.json'), '{"name":"fixture"}\n');
+    const run = (env) => {
+      execFileSync(process.execPath, [path.join(repoRoot, 'scripts', 'write-manifest.mjs')], {
+        cwd: tmp, env: { ...process.env, ...env }, stdio: 'pipe',
+      });
+      return fs.readFileSync(path.join(tmp, 'manifest.json'), 'utf8');
+    };
+    const m1 = run({ SOURCE_DATE_EPOCH: '1700000000' });
+    const m2 = run({ SOURCE_DATE_EPOCH: '1700000000' });
+    check('P3-15 SOURCE_DATE_EPOCH makes manifest.json byte-identical across builds',
+      m1 === m2 && m1.includes('2023-11-14T22:13:20.000Z'),
+      'manifest still embeds wall-clock time');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  // --- P3-23: the runtime self-check understands require() and bare dependencies
+  check('P3-23 the runtime self-check resolves require(), bare deps and non-JS artifacts',
+    runtimeSrc.includes('require\\(\\s*[\'"]') && runtimeSrc.includes('function resolveBare(') &&
+    runtimeSrc.includes('MISSING DEP:') && runtimeSrc.includes('MISSING ARTIFACT:'),
+    'self-check is still ESM-import-only');
+
+  // --- P3-21: the Rust handshake has tests instead of none
+  check('P3-21 the Tauri handshake has known-answer tests (RFC 4231)',
+    rs.includes('mod tests') && rs.includes('f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8'),
+    'no Rust unit tests');
+
 }
 
 

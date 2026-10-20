@@ -317,7 +317,7 @@ function blockEl(cur, idx, kind) {
     el = document.createElement('div');
     el.className = 'thinking open';
     el.innerHTML = `<div class="th-label">${ICONS.sparkles}<span>${t('thought')}</span></div><div class="th-body"></div>`;
-    el.onclick = () => el.classList.toggle('open');
+    wireThinking(el);
     cur.el.appendChild(el);
     const body = el.querySelector('.th-body');
     cur.blocks.set(idx, { el, body, kind });
@@ -392,7 +392,7 @@ function onMessageEnd(message) {
       el.className = 'thinking open';
       el.innerHTML = `<div class="th-label">${ICONS.sparkles}<span>${t('thought')}</span></div><div class="th-body"></div>`;
       el.querySelector('.th-body').textContent = block.thinking;
-      el.onclick = () => el.classList.toggle('open');
+      wireThinking(el);
       cur.el.appendChild(el);
     } else if (block.type === 'toolCall') {
       sawContent = true;
@@ -451,9 +451,49 @@ function toolCardHtml(id, name, args, status) {
   </div>`;
 }
 function prettyJson(s) { try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; } }
+// P3-13 (v1.3.9 review): thinking blocks and tool cards were disclosure widgets built out of
+// plain <div>s with a mouse-only onclick — no role, no tab stop, no Enter/Space, and no
+// aria-expanded, so a keyboard or screen-reader user could not open either one. One helper
+// keeps every one of them behaving the same way.
+function wireToggle(handle, target = handle) {
+  if (!handle || !target) return handle;
+  handle.setAttribute('role', 'button');
+  handle.tabIndex = 0;
+  const sync = () => handle.setAttribute('aria-expanded', target.classList.contains('open') ? 'true' : 'false');
+  sync();
+  const toggle = () => { target.classList.toggle('open'); sync(); };
+  handle.onclick = toggle;
+  handle.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+  });
+  return handle;
+}
+function wireThinking(el) {
+  // the LABEL is the button, not the container — role=button on the container would fold
+  // the whole thought body into the accessible name
+  if (!el) return el;
+  wireToggle(el.querySelector('.th-label') || el, el);
+  return el;
+}
+// P3-13: project rows and session rows are the primary navigation and were mouse-only
+// divs too. They contain their own action buttons, so role="button" would be invalid ARIA
+// (nested interactive content) — they are treeitems in a tree instead, which is what they
+// visually are, and Enter/Space selects the row exactly like a click.
+function wireTreeItem(el, onActivate, role = 'treeitem') {
+  if (!el) return el;
+  el.setAttribute('role', role);
+  el.tabIndex = 0;
+  el.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (e.target !== el) return; // a focused child button keeps its own keys
+    e.preventDefault();
+    onActivate(e);
+  });
+  return el;
+}
 function wireToolCard(card) {
   if (!card) return;
-  card.querySelector('.tool-head').onclick = () => card.classList.toggle('open');
+  wireToggle(card.querySelector('.tool-head'), card);
 }
 function onToolStart(ev) {
   // F22: a tool started this turn — after this, an auto-resend would double-run it
@@ -497,7 +537,19 @@ function onToolEnd(ev) {
 function handleUiRequest(ev) {
   const { id, method } = ev;
   const reqTab = state.tabId; // the answer must return to the tab that ASKED — reading the global at click time mailed confirmations to whatever tab the user had switched to (audit #14)
-  const reply = (data) => wsSend({ type: 'rpc', tabId: reqTab, data: { type: 'extension_ui_response', id, ...data } });
+  // P2-8 (v1.3.9 review): wsSend() reports whether the frame was queued and this caller
+  // used to discard that answer. While offline the queue is capped at 200, and once it is
+  // full every one of these answers was dropped on the floor — the extension on the other
+  // side waits with no timeout, so the dialog looked answered and the agent stayed stuck.
+  // A reply that cannot be sent must be visible, not silent.
+  const reply = (data) => {
+    const ok = wsSend({ type: 'rpc', tabId: reqTab, data: { type: 'extension_ui_response', id, ...data } });
+    if (!ok) {
+      const sl = $('#statusline');
+      if (sl) sl.textContent = '离线队列已满——扩展请求的回复未能送出，连接恢复后扩展会继续等待，请重试该操作';
+    }
+    return ok;
+  };
   if (method === 'notify') { $('#statusline').textContent = `[${ev.notifyType || 'info'}] ${ev.message || ''}`; return; }
   if (method === 'confirm') {
     modal(ev.title || 'confirm', ev.message || '', [
@@ -805,7 +857,7 @@ function renderReplay(entries) {
           const th = document.createElement('div'); th.className = 'thinking open';
           th.innerHTML = `<div class="th-label">${ICONS.sparkles}<span>${t('thought')}</span></div><div class="th-body"></div>`;
           th.querySelector('.th-body').textContent = b.thinking;
-          th.onclick = () => th.classList.toggle('open');
+          wireThinking(th);
           inner.appendChild(th);
         } else if (b.type === 'toolCall') {
           const w = document.createElement('div');
@@ -1507,7 +1559,7 @@ async function renderProjectTree(useCache = false) {
           <button class="pa-btn" data-act="more" title="更多">${DOTS_ICON}</button>
         </span>
       </div>`;
-    head.onclick = (e) => {
+    const selectThisProject = (e) => {
       if (e.target.closest('.pa-btn')) return;
       // switching the working context detaches the previous project's live tab —
       // the notice bar keeps [切回]/[结束] so the run stays manageable (audit #10)
@@ -1518,6 +1570,11 @@ async function renderProjectTree(useCache = false) {
       state.expanded.add(p.path);
       renderProjectTree();
     };
+    head.onclick = selectThisProject;
+    // P3-13: keyboard entry point for the same action, with the expand state exposed
+    wireTreeItem(head, selectThisProject);
+    head.setAttribute('aria-expanded', open ? 'true' : 'false');
+    head.setAttribute('aria-selected', state.project?.path === p.path ? 'true' : 'false');
     head.querySelector('.proj-caret').onclick = (e) => {
       e.stopPropagation();
       if (state.expanded.has(p.path)) state.expanded.delete(p.path); else state.expanded.add(p.path);
@@ -1560,6 +1617,9 @@ async function renderProjectTree(useCache = false) {
           if (state.project?.path !== p.path) selectProject(p);
           openPiSession({ sessionPath: s.file });
         };
+        // P3-13: same action from the keyboard — Enter/Space on the row opens the session
+        wireTreeItem(d, () => d.click());
+        d.setAttribute('aria-selected', state.sessionFile === s.file ? 'true' : 'false');
         d.querySelector('[data-act="del"]').onclick = (e) => {
           e.stopPropagation();
           askDeleteSession(p, s);
@@ -1729,7 +1789,7 @@ async function openImported(src, file) {
     } else if (e.kind === 'thinking') {
       const el = msgShell('assistant', e.ts ? Date.parse(e.ts) : null);
       el.querySelector('.msg-body').innerHTML = `<div class="thinking"><div class="th-label">${ICONS.sparkles}<span>${t('thought')}</span></div><div class="th-body">${esc(e.text)}</div></div>`;
-      el.querySelector('.thinking').onclick = (ev) => ev.currentTarget.classList.toggle('open');
+      wireThinking(el.querySelector('.thinking'));
     } else if (e.kind === 'toolcall') {
       const el = msgShell('assistant', e.ts ? Date.parse(e.ts) : null);
       const body = el.querySelector('.msg-body');
@@ -2824,12 +2884,21 @@ function emptyStateHtml(g, meta) {
   const handle = $('#sb-resize');
   const rail = $('#rail');
   if (!handle || !rail) return;
+  // P3-11/P3-12 (v1.3.9 review): --rail-w must live on :root, not on #rail — #log-drawer is
+  // a sibling that offsets by it. And the inline width must not outrank the narrow-window
+  // media query, so the saved width is re-applied only while the viewport is wide enough.
+  const NARROW = 980;
+  const applyW = (w) => {
+    rail.style.width = w + 'px';
+    document.documentElement.style.setProperty('--rail-w', w + 'px');
+  };
+  const clearW = () => {
+    rail.style.removeProperty('width');
+    document.documentElement.style.removeProperty('--rail-w');
+  };
   let saved = 0; try { saved = Number(localStorage.getItem('railW')); } catch { /* storage may be denied */ }
-  if (saved >= 180 && saved <= 480) {
-    rail.style.width = saved + 'px';
-    rail.style.setProperty('--rail-w', saved + 'px');
-  }
-  rail.style.setProperty('width', (saved >= 180 ? saved : 220) + 'px');
+  let savedOk = saved >= 180 && saved <= 480;
+  if (savedOk && window.innerWidth > NARROW) applyW(saved);
   let dragging = false, startX = 0, startW = 220;
   handle.addEventListener('mousedown', (e) => {
     dragging = true; startX = e.clientX; startW = rail.getBoundingClientRect().width;
@@ -2839,15 +2908,21 @@ function emptyStateHtml(g, meta) {
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
     const w = Math.min(480, Math.max(180, startW + e.clientX - startX));
-    rail.style.width = w + 'px';
-    rail.style.setProperty('--rail-w', w + 'px');
+    applyW(w);
   });
   window.addEventListener('mouseup', () => {
     if (!dragging) return;
     dragging = false;
     const w = Math.round(rail.getBoundingClientRect().width);
+    saved = w; savedOk = w >= 180 && w <= 480;
     try { localStorage.setItem('railW', String(w)); } catch { /* storage may be denied */ }
     document.body.classList.remove('rail-dragging');
+  });
+  // a resize across the breakpoint re-establishes the right owner: media query below the
+  // breakpoint, the user's saved width above it
+  window.addEventListener('resize', () => {
+    if (window.innerWidth <= NARROW) clearW();
+    else if (savedOk) applyW(saved);
   });
 })();
 

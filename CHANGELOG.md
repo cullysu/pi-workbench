@@ -2,6 +2,47 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.4.1 — 2026-10-21
+
+### Fixed (from the v1.4.0 full-repository review — 3 confirmed / 3 hardening)
+
+Every item was reproduced before it was fixed. Items 1, 2, 3 and 6 are locked by tests that
+were run against the unfixed code and observed to fail (see "Verification" for the exact
+results); 4 and 5 are covered by new tests, with the caveat stated there.
+
+**One corrupt row disabled the whole scheduler (review #1):**
+- `cron.json` is hand-editable and restorable from a backup. `tick()` treated every `jobs` entry as an object, so a single non-object row (`{"jobs":[null]}`, `42`, a truncated restore) threw on the first property read. The heartbeat caught it, logged it, and left the row on disk — **every later tick failed identically, so no scheduled job ever ran again.**
+- `tick()` and `bootReset()` now drop non-object rows instead of trusting the file's shape, and persist the cleaned list. The valid jobs behind a bad row run, and the bad row does not come back.
+- Regression test: a file holding `[null, <valid job>, 42, "nope"]` must spawn the valid job exactly once, and must end up with that job alone on disk.
+
+**Corruption also disabled its own repair path (review #2):**
+- `hCronDelete` did `d.jobs.filter(...)` and `hCronRunNow` did `d.jobs.find(...)`. With `jobs: null` or a `null` element both threw and answered **500** — from the endpoints that are the only way to clean such a file.
+- One `cronRows()` accessor now normalises the array for the list, delete and run-now paths; delete is also the repair path, so a single delete sweeps the bad rows with it. A guard asserts no read path indexes the raw array again.
+
+**One deleted session file 500'd the whole session list (review #3):**
+- `piSessionInfo()` answers `null` for a file that vanished between the directory listing and its `stat` (rotation, an agent cleaning up, the user deleting it). The handler's filter only guarded the `cwd` comparison — and with no `cwd` parameter the `||` short-circuited, so `null` reached `sort()`'s `b.mtime` and threw. That is the panel's **commonest** request.
+- The row is now dropped where it is produced (the same shape `lib/sources.mjs` already used for its own listing).
+- Regression test: 400 session files are deleted out from under 25 concurrent list requests. Against the unfixed code, request **0** answered 500; with the fix all 25 answer 200 and no null row is ever served.
+
+**Tauri extracted before it verified — and stamped before it verified (review #4):**
+- The archive went straight to `tar.exe` and its hashes were checked *afterwards*, while the Electron shell has always refused escaping members before writing anything. Second half, which the review did not name: the version stamp was written **before** `verify_runtime_manifest`, so a tree that failed verification was already stamped as current — the next launch skipped extraction on the matching stamp and failed the identical check again, permanently.
+- Members are now listed with the same `tar.exe` and refused if any path escapes (traversal, absolute, drive-relative, NTFS stream); the tree is built in a sibling staging directory, verified **there**, and only then renamed into place; the stamp is written last, so "extracted" and "verified" cannot come apart.
+- Proven against the real `tar.exe` with a real zip containing `../escape.txt`: it is refused before extraction, and the refusal names the offending member. Four new Rust tests cover the predicate.
+
+**The model probe could hang for its full timeout (review #5):**
+- `stderr` had **no reader at all**. An unread pipe is a deadlock: the child blocks once the pipe is full, and the probe simply waits out its 20 s timeout. `stdout` also accumulated with no ceiling, and every concurrent panel request spawned its own pi process.
+- stderr is now drained, accumulated stdout is capped at 1 MiB, and concurrent callers share one probe (single-flight).
+- **Honest scope:** the block itself was **not** reproduced here — a synthetic child writing 8 MiB to stderr completed in ~270 ms on Windows, where the pipe buffer absorbed it, so on this platform the hang is latent rather than demonstrated. Draining stderr is required on POSIX pipes, which is where CI and the released Linux build run. The bounds and the single-flight collapse are unconditional.
+
+**MCP config accepted values that cannot be spawned (review #6):**
+- `env` was checked to be an object but its **values** were not, so `{"K":{}}` persisted and reached `spawn()` as an object; env names were unvalidated; `args` had no count or size budget, so an oversized list died at connect time with `E2BIG` — far from the screen that accepted it.
+- Values must be strings, names cannot contain `=` or NUL, and args are capped at 64 entries / 8192 characters total.
+
+### Verification
+
+- The full suite (`npm test`) is **65 tests**, the contract suite is **120 assertions**, and `cargo test --locked` is **10 tests**. `eslint` 0, `assert-version` consistent, route sweep 51/51, `check-runtime` 0 missing.
+- Falsification, run against the unfixed code and then re-run green with the fix: the corrupt-cron test answered **500** on delete and spawned **0** jobs on tick (`Cannot read properties of null (reading 'enabled')`); the vanishing-file test answered **500** on request 0 of 25; the MCP test accepted an object `env` value. See "Honest scope" under item 5 for what could not be reproduced.
+
 ## 1.4.0 — 2026-10-21
 
 ### Fixed (from the v1.3.9 unified review — 24 items: P1×3 / P2×7 / P3×14)

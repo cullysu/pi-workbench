@@ -284,6 +284,12 @@ const providers = createProviders({
 // ---------- cron: scheduled pi prompt runs (lib/cron.mjs) ----------
 const CRON_FILE = path.join(CFG_DIR, 'cron.json');
 const CRON_RUNS_DIR = path.join(CFG_DIR, 'cron-runs');
+// v1.4.0 review #2: cron.json is hand-editable and restorable from a backup, so a
+// non-object row is a real state. Every read path below used to index it directly —
+// `d.jobs.filter((j) => j.id !== id)` and `d.jobs.find((j) => j.id === id)` both threw on
+// `null`, answering 500 from the endpoints that are the ONLY way to clean such a file.
+// One accessor, used by every reader, so the rule can't drift apart again.
+const cronRows = (d) => (d && Array.isArray(d.jobs) ? d.jobs.filter((j) => j && typeof j === 'object' && !Array.isArray(j)) : []);
 const cron = createCron({
   CRON_FILE, CRON_RUNS_DIR, HOME, SECRET_ENV, PI_CLI, broadcast, readJson, saveJson, spawn,
   get knownProject() { return knownProject; },
@@ -891,7 +897,13 @@ async function hProjectsRemove(req, res, u) {
 async function hSessionsPi(req, res, u) {
     const cwdQ = u.searchParams.get('cwd');
     const files = listJsonFiles(PI_SESSIONS, 2);
-    const items = files.map(piSessionInfo).filter((s) => !cwdQ || (s.cwd && path.resolve(s.cwd) === path.resolve(cwdQ)));
+    // v1.4.0 review #3: piSessionInfo answers null for a file that vanished between the
+    // listing and its stat (rotation, an agent cleaning up, the user deleting it). The
+    // filter below only guarded the cwd comparison — with no `cwd` param the `||`
+    // short-circuited and the null reached sort()'s `b.mtime` and threw, so ONE dropped
+    // file 500'd the whole list on the commonest request the panel makes. Drop the row
+    // where it is produced; lib/sources.mjs already does this for its own omp listing.
+    const items = files.map(piSessionInfo).filter((s) => s && (!cwdQ || (s.cwd && path.resolve(s.cwd) === path.resolve(cwdQ))));
     items.sort((a, b) => b.mtime - a.mtime);
     return json(res, 200, { sessions: items.slice(0, 300) });
 }
@@ -1086,24 +1098,61 @@ async function hProviderDelete(req, res, u) {
     } catch (e) { return providerError(res, e); }
 }
 
+// v1.4.0 review #5: this probe starts a whole pi process, and three things about it were
+// unbounded. (1) stderr had NO reader, so a child that wrote 64KB to stderr blocked on a
+// full pipe and the probe simply waited out its 20-second timeout; (2) stdout accumulated
+// with no ceiling — one line without a newline grew the string for the entire window;
+// (3) every concurrent panel request spawned its own pi, each loading the full agent
+// bundle. Single-flight collapses concurrent callers onto one probe, which bounds (3)
+// outright; the caps bound (1) and (2).
+const MODELS_PROBE_MAX_STDOUT = 1 << 20; // a reply that never terminates within 1MiB is not the rpc protocol
+let modelsProbe = null;
+function probeModels() {
+  if (modelsProbe) return modelsProbe;
+  const p = new Promise((resolve) => {
+    let buf = '';
+    let settled = false;
+    let to = null;
+    const proc = spawn(process.execPath, [PI_CLI, '--mode', 'rpc', '--no-session'], { cwd: HOME, env: { ...process.env, ...SECRET_ENV }, windowsHide: true });
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(to);
+      try { killTree(proc); } catch { /* exited already */ }
+      resolve(v);
+    };
+    to = setTimeout(() => done({ models: [] }), 20000);
+    proc.stdout.setEncoding('utf8');
+    proc.stdout.on('data', (c) => {
+      buf += c;
+      let i;
+      while ((i = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
+        let ev; try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === 'response' && ev.command === 'get_available_models') return done(ev.data || { models: [] });
+      }
+      if (buf.length > MODELS_PROBE_MAX_STDOUT) done({ models: [] });
+    });
+    // draining stderr is the point, not the text: an unread pipe blocks the child, and
+    // the child is the thing we are waiting on
+    proc.stderr.setEncoding('utf8');
+    proc.stderr.on('data', () => { /* discarded — draining keeps the pipe from filling */ });
+    proc.on('error', () => done({ models: [] }));
+    try {
+      proc.stdin.write(JSON.stringify({ id: 'm1', type: 'get_available_models' }) + '\n');
+      proc.stdin.end();
+    } catch { /* died before accepting input — error/timeout handlers resolve */ }
+  });
+  modelsProbe = p;
+  // clear the slot from every path (the promise never rejects, but a throw in the
+  // executor would otherwise pin a permanently-settled probe against all later callers)
+  p.then(() => { modelsProbe = null; }, () => { modelsProbe = null; });
+  return p;
+}
+
 async function hModelsAvailable(req, res, u) {
     // short-lived rpc to enumerate models (uses pi's own catalog + models.json)
-    const proc = spawn(process.execPath, [PI_CLI, '--mode', 'rpc', '--no-session'], { cwd: HOME, env: { ...process.env, ...SECRET_ENV }, windowsHide: true });
-    const result = await new Promise((resolve) => {
-      let buf = ''; const to = setTimeout(() => { try { killTree(proc); } catch { /* exited already */ } resolve({ models: [] }); }, 20000);
-      proc.stdout.setEncoding('utf8');
-      proc.stdout.on('data', (c) => {
-        buf += c;
-        let i;
-        while ((i = buf.indexOf('\n')) !== -1) {
-          const line = buf.slice(0, i).replace(/\r$/, ''); buf = buf.slice(i + 1);
-          let ev; try { ev = JSON.parse(line); } catch { continue; }
-          if (ev.type === 'response' && ev.command === 'get_available_models') { clearTimeout(to); try { killTree(proc); } catch { /* exited already */ }; resolve(ev.data || { models: [] }); }
-        }
-      });
-      proc.on('error', () => { clearTimeout(to); resolve({ models: [] }); });
-      try { proc.stdin.write(JSON.stringify({ id: 'm1', type: 'get_available_models' }) + '\n'); } catch { /* died before accepting input — error/timeout handlers resolve */ }
-    });
+    const result = await probeModels();
     return json(res, 200, result);
 }
 
@@ -1331,6 +1380,9 @@ async function hCron(req, res, u) {
     // bootReset deliberately does NOT run here: it clears running flags, and a
     // panel refresh during a live run would clear the lock and double-spawn the job
     const d = readJson(CRON_FILE) || { jobs: [] };
+    // the panel must never receive a row it can only crash on — same accessor as every
+    // other reader, so the list endpoint cannot disagree with the scheduler about shape
+    d.jobs = cronRows(d);
     return json(res, 200, d);
 }
 
@@ -1341,7 +1393,9 @@ async function hCronDelete(req, res, u) {
     // executing for up to 15 more minutes
     if (cron.cancelJob(id)) logErr(`cron job ${id} cancelled: deleted while running`);
     const d = readJson(CRON_FILE) || { jobs: [] };
-    d.jobs = d.jobs.filter((j) => j.id !== id);
+    // delete is also the repair path for a corrupt file: normalising here means one
+    // delete cleans out every bad row, not just the one the user aimed at
+    d.jobs = cronRows(d).filter((j) => j.id !== id);
     saveJson(CRON_FILE, d);
     return json(res, 200, d);
 }
@@ -1484,7 +1538,7 @@ async function hCronRunNow(req, res, u) {
     const { id } = await readBody(req);
     if (!isJobId(id)) return json(res, 400, { error: 'bad job id' });
     const d = readJson(CRON_FILE) || { jobs: [] };
-    const job = d.jobs.find((j) => j.id === id);
+    const job = cronRows(d).find((j) => j.id === id);
     if (!job) return json(res, 404, { error: 'job not found' });
     const started = cron.runCronJob(job);
     saveJson(CRON_FILE, d);
@@ -1703,8 +1757,25 @@ async function hMcpConfig(req, res, u) {
         if (s.args !== undefined && (!Array.isArray(s.args) || s.args.some((a) => typeof a !== 'string'))) {
           return json(res, 400, { error: `server "${name}" args must be an array of strings` });
         }
+        // v1.4.0 review #6: a count/length budget on args. spawn() hands these to the OS
+        // verbatim; past the platform's argument ceiling the child dies with E2BIG/ENAMETOOLONG
+        // at connect time, far from the config screen that accepted them.
+        if (Array.isArray(s.args)) {
+          if (s.args.length > 64) return json(res, 400, { error: `server "${name}" has too many args (max 64)` });
+          const total = s.args.reduce((n, a) => n + a.length, 0);
+          if (total > 8192) return json(res, 400, { error: `server "${name}" args are too long in total (max 8192 chars)` });
+        }
         if (s.env !== undefined && (!s.env || typeof s.env !== 'object' || Array.isArray(s.env))) {
           return json(res, 400, { error: `server "${name}" env must be an object` });
+        }
+        // v1.4.0 review #6: env VALUES were unchecked, so `{"env":{"K":{}}}` persisted and
+        // reached spawn() as an object — coerced to "[object Object]" or rejected by Node,
+        // depending on version. Values must be strings; keys must not contain '=' or NUL.
+        if (s.env) {
+          for (const [k, v] of Object.entries(s.env)) {
+            if (typeof v !== 'string') return json(res, 400, { error: `server "${name}" env.${k} must be a string` });
+            if (!k || /[=\0]/.test(k)) return json(res, 400, { error: `server "${name}" env name "${k}" is not a valid variable name` });
+          }
         }
         if (String(s.command).length > 500) return json(res, 400, { error: `server "${name}" command is too long` });
       }

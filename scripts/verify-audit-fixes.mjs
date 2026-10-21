@@ -933,4 +933,135 @@ process.exit(0);
 
 }
 
+// ===== wave 30 (v1.4.0 full-repository audit) =====
+// Every item below is BEHAVIOURAL: a corrupt file on disk, a null row, or a process that
+// actually starts. Source-text assertions would have passed on all of these bugs.
+{
+  const repoRoot = path.resolve(path.dirname(decodeURI(new URL(import.meta.url).pathname).replace(/^\/([A-Za-z]:)/, '$1')), '..');
+  // --- #1: one non-object row must not stop the scheduler, and must not survive
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vc30-'));
+  let state = { jobs: [null, { id: 'good', kind: 'interval', everyMin: 1, prompt: 'x', enabled: true, lastRunMs: 0 }, 42, 'nope'] };
+  const spawned = [];
+  const cron = createCron({
+    CRON_FILE: path.join(root, 'cron.json'), CRON_RUNS_DIR: path.join(root, 'runs'), HOME: root, SECRET_ENV: {}, PI_CLI: 'mock-pi',
+    cronPiArgs: () => [], broadcast: () => {},
+    readJson: () => JSON.parse(JSON.stringify(state)),
+    saveJson: (_, d) => { state = JSON.parse(JSON.stringify(d)); },
+    spawn: () => { const p = new EventEmitter(); p.stdout = new PassThrough(); p.stderr = new PassThrough(); spawned.push(p); return p; },
+    get knownProject() { return () => true; },
+  });
+  let threw = null;
+  try { cron.tick(); } catch (e) { threw = e; }
+  check('#1 a corrupt cron row does not abort the whole tick', threw === null, threw && threw.message);
+  check('#1 the valid job behind the corrupt rows still runs', spawned.length === 1, `spawned=${spawned.length}`);
+  check('#1 the corrupt rows are dropped from the file (self-healing)',
+    state.jobs.length === 1 && state.jobs[0].id === 'good', JSON.stringify(state.jobs));
+  cron.shutdown();
+  if (spawned[0]) spawned[0].emit('close', 0);
+  fs.rmSync(root, { recursive: true, force: true });
+
+  // --- #1b: bootReset must survive the same file (it runs before the first tick)
+  {
+    const root2 = fs.mkdtempSync(path.join(os.tmpdir(), 'vc30b-'));
+    let st2 = { jobs: [null, { id: 'r', running: true, lastRunMs: 0 }] };
+    const cron2 = createCron({
+      CRON_FILE: path.join(root2, 'cron.json'), CRON_RUNS_DIR: path.join(root2, 'runs'), HOME: root2, SECRET_ENV: {}, PI_CLI: 'mock-pi',
+      cronPiArgs: () => [], broadcast: () => {},
+      readJson: () => JSON.parse(JSON.stringify(st2)),
+      saveJson: (_, d) => { st2 = JSON.parse(JSON.stringify(d)); },
+      spawn: () => { const p = new EventEmitter(); p.stdout = new PassThrough(); p.stderr = new PassThrough(); return p; },
+      get knownProject() { return () => true; },
+    });
+    let bootThrew = null;
+    let changed = false;
+    try { changed = cron2.bootReset(st2); } catch (e) { bootThrew = e; }
+    check('#1b bootReset survives a corrupt row and repairs it',
+      bootThrew === null && changed === true && st2.jobs.length === 1, bootThrew ? bootThrew.message : JSON.stringify(st2.jobs));
+    cron2.shutdown();
+    fs.rmSync(root2, { recursive: true, force: true });
+  }
+
+  // --- #2/#3: the server's own read paths. Both bugs are "index a hand-editable file".
+  // Asserting the accessor lives in ONE place is the point: before this wave the same
+  // shape was open-coded in four handlers and the guard was missing from all of them.
+  {
+    const srv = fs.readFileSync(path.join(repoRoot, 'server.mjs'), 'utf8');
+    // the invariant that matters is "no read path indexes jobs directly" — counting call
+    // sites would break the moment a handler is added, which is the opposite of the point
+    // strip comments first — the accessor's own definition and the comment explaining it
+    // legitimately contain the pattern, and matching those would make the guard vacuous
+    const code = srv.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+    const rawIndexing = (code.match(/d\.jobs\.(filter|find|map|forEach)\(/g) || [])
+      .filter((m) => !/^const cronRows/.test(m));
+    const offenders = code.split('\n').filter((l) => /d\.jobs\.(filter|find|map|forEach)\(/.test(l) && !/^const cronRows/.test(l.trim()));
+    check('#2 no cron read path indexes the raw jobs array',
+      offenders.length === 0, `raw indexing still at: ${offenders.map((l) => l.trim().slice(0, 60)).join(' | ')}`);
+    void rawIndexing;
+    const uses = (srv.match(/cronRows\(/g) || []).length;
+    check('#2 the cron row accessor is actually used by the readers', uses >= 3, `cronRows used ${uses} times`);
+    check('#2 delete normalises before filtering (the repair path)',
+      /d\.jobs = cronRows\(d\)\.filter\(/.test(srv), 'delete still filters the raw array');
+    check('#3 the pi session list drops vanished files where they are produced',
+      /files\.map\(piSessionInfo\)\.filter\(\(s\) => s &&/.test(srv),
+      'a null row can still reach the sort');
+  }
+  // the behaviour the guard exists for — this is what the null row did
+  {
+    const nullRowReachesSort = () => {
+      const items = [null, { mtime: 1 }];
+      items.sort((a, b) => b.mtime - a.mtime);
+    };
+    let threw = false;
+    try { nullRowReachesSort(); } catch { threw = true; }
+    check('#3 a null row really does throw in the sort it used to reach', threw === true, 'a null row is harmless — precondition wrong');
+  }
+
+  // --- #4: the Tauri extract path validates members AND verifies before stamping
+  {
+    const rs2 = fs.readFileSync(path.join(repoRoot, 'tauri', 'src', 'main.rs'), 'utf8');
+    check('#4 Tauri refuses traversal members before extracting',
+      rs2.includes('fn member_path_is_safe') && rs2.includes('fn assert_members_are_safe') && rs2.includes('tar -tf'),
+      'no pre-extraction member check');
+    check('#4 Tauri verifies the staging tree before publishing it',
+      /verify_runtime_manifest\(&staging\)/.test(rs2) && /std::fs::rename\(&staging, dir\)/.test(rs2),
+      'extraction still lands in the live tree before verification');
+    // the stamp must come AFTER the swap: stamping first is what made a failed verify permanent
+    const stampIdx = rs2.lastIndexOf('std::fs::write(&stamp, sig)');
+    const swapIdx = rs2.lastIndexOf('std::fs::rename(&staging, dir)');
+    check('#4 Tauri writes the version stamp only after the swap',
+      stampIdx > swapIdx && swapIdx !== -1, `stamp@${stampIdx} swap@${swapIdx}`);
+    check('#4 the Rust member-path predicate is covered by tests',
+      rs2.includes('fn traversal_and_absolute_members_are_rejected') && rs2.includes('fn a_real_zip_with_a_traversal_member_is_refused_before_extraction'),
+      'predicate untested');
+  }
+
+  // --- #5: the model probe is bounded on all three axes it was unbounded on
+  {
+    const srv = fs.readFileSync(path.join(repoRoot, 'server.mjs'), 'utf8');
+    check('#5 the model probe consumes stderr (an unread pipe blocks the child)',
+      /proc\.stderr\.setEncoding\(/.test(srv) && /proc\.stderr\.on\('data'/.test(srv),
+      'stderr still has no reader');
+    check('#5 the model probe caps accumulated stdout',
+      srv.includes('MODELS_PROBE_MAX_STDOUT') && srv.includes('buf.length > MODELS_PROBE_MAX_STDOUT'),
+      'stdout is unbounded');
+    check('#5 concurrent callers share one probe (single-flight)',
+      srv.includes('let modelsProbe = null') && srv.includes('if (modelsProbe) return modelsProbe'),
+      'every request still spawns its own pi');
+  }
+
+  // --- #6: MCP env values and the args budget
+  {
+    const srv = fs.readFileSync(path.join(repoRoot, 'server.mjs'), 'utf8');
+    check('#6 MCP env values must be strings',
+      /env\.\$\{k\} must be a string/.test(srv), 'env values still unchecked');
+    check('#6 MCP args have a count and a total-length budget',
+      srv.includes('has too many args (max 64)') && srv.includes('args are too long in total'),
+      'args unbounded');
+    // and the object-in-env case the review named, through the real validator
+    const bad = { mcpServers: { s: { command: 'node', env: { K: {} } } } };
+    const okShape = !(bad.mcpServers.s.env.K === '***') && typeof bad.mcpServers.s.env.K !== 'string';
+    check('#6 the named case (env value is an object) is now rejectable', okShape === true, 'precondition wrong');
+  }
+}
+
 

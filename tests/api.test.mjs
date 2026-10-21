@@ -563,3 +563,89 @@ test('plain `node server.mjs` serves a usable page, and PIWB_EMBED_TOKEN=0 opts 
   }
   fs.rmSync(home, { recursive: true, force: true });
 });
+
+// wave 30 #1/#2: cron.json is hand-editable, so a corrupt row is a real state — and the
+// endpoints below are the ONLY way to clean it. Before this wave the delete, run-now and
+// list handlers each indexed the raw array, so the corruption disabled its own repair.
+test('a corrupt cron.json is readable, listable, deletable and self-cleaning', async () => {
+  const cfgDir = path.join(tmpHome, '.pi-workbench');
+  const cronFile = path.join(cfgDir, 'cron.json');
+  fs.mkdirSync(cfgDir, { recursive: true });
+  const good = { id: 'job-ok', name: 'ok', kind: 'interval', everyMin: 60, prompt: 'x', enabled: true };
+  fs.writeFileSync(cronFile, JSON.stringify({ jobs: [null, good, 42, 'text'] }));
+
+  const list = await req('/api/cron');
+  assert.equal(list.status, 200, 'listing a corrupt file must not 500');
+  assert.deepEqual(list.data.jobs.map((j) => j.id), ['job-ok'], 'only real jobs are listed');
+
+  // run-now finds the valid job through the same corrupt file
+  const run = await req('/api/cron/run-now', { id: 'job-ok' });
+  assert.ok(run.status === 200 || run.status === 503, `run-now answered ${run.status} instead of finding the job`);
+
+  // delete is the repair path: it succeeds and sweeps the bad rows with it
+  fs.writeFileSync(cronFile, JSON.stringify({ jobs: [null, good, 42] }));
+  const del = await req('/api/cron/delete', { id: 'job-ok' });
+  assert.equal(del.status, 200, 'deleting through a corrupt file must not 500');
+  const after = JSON.parse(fs.readFileSync(cronFile, 'utf8'));
+  assert.deepEqual(after.jobs, [], 'the delete also removed the non-object rows');
+
+  // and the jobs key itself being null is not a crash either
+  fs.writeFileSync(cronFile, JSON.stringify({ jobs: null }));
+  assert.equal((await req('/api/cron')).status, 200, 'jobs:null must list');
+  assert.equal((await req('/api/cron/delete', { id: 'nope' })).status, 200, 'jobs:null must delete');
+});
+
+// wave 30 #3: a session file that vanishes between the directory listing and its stat.
+// piSessionInfo answers null for it; that null used to reach the sort and 500 the whole
+// list on the panel's commonest request (no ?cwd).
+test('a session file that vanishes mid-list is skipped, and never 500s the list', async () => {
+  const dir = path.join(tmpHome, '.pi', 'agent', 'sessions', 'race');
+  fs.mkdirSync(dir, { recursive: true });
+  // Enough files that the window between the directory read and each file's stat is real:
+  // walkFiles() lists them, piSessionInfo() then stats them one by one, and the deleter
+  // below pulls them out from under that loop — which is the production race (rotation, an
+  // agent cleaning up, the user deleting a session), not a synthetic one.
+  const N = 400;
+  for (let i = 0; i < N; i++) {
+    fs.writeFileSync(path.join(dir, `s${String(i).padStart(3, '0')}.jsonl`),
+      JSON.stringify({ type: 'session', cwd: tmpProj, id: `race-${i}` }) + '\n');
+  }
+  let deleting = true;
+  const sweep = (async () => {
+    for (let i = 0; i < N && deleting; i++) {
+      try { fs.rmSync(path.join(dir, `s${String(i).padStart(3, '0')}.jsonl`), { force: true }); } catch { /* already gone */ }
+      if (i % 12 === 0) await new Promise((r) => setImmediate(r));
+    }
+  })();
+
+  let sawNull = false;
+  for (let i = 0; i < 25; i++) {
+    const r = await req('/api/sessions/pi');
+    assert.equal(r.status, 200, `request ${i} answered ${r.status} while files were disappearing`);
+    if (r.data.sessions.some((s) => !s || !s.file)) sawNull = true;
+  }
+  deleting = false;
+  await sweep;
+  assert.equal(sawNull, false, 'a null row must never reach the panel');
+  // and the listing is healthy again once the directory settles
+  fs.writeFileSync(path.join(dir, 'after.jsonl'), JSON.stringify({ type: 'session', cwd: tmpProj, id: 'after' }) + '\n');
+  const after = await req('/api/sessions/pi');
+  assert.equal(after.status, 200);
+  assert.ok(after.data.sessions.some((s) => s.id === 'after'), 'the list recovers once the directory is stable');
+  const rc = await req('/api/sessions/pi?cwd=' + encodeURIComponent(tmpProj));
+  assert.equal(rc.status, 200, 'the cwd-filtered list must answer 200 too');
+});
+
+// wave 30 #6: env values and args budgets, through the real validator
+test('MCP save refuses a non-string env value and an oversized args list', async () => {
+  const badEnv = await req('/api/mcp/config', { mcpServers: { s: { command: 'node', args: [], env: { K: { nested: true } } } } });
+  assert.equal(badEnv.status, 400, 'an object env value must be refused, not coerced at spawn');
+  const badName = await req('/api/mcp/config', { mcpServers: { s: { command: 'node', args: [], env: { 'A=B': 'x' } } } });
+  assert.equal(badName.status, 400, "an env name containing '=' must be refused");
+  const many = await req('/api/mcp/config', { mcpServers: { s: { command: 'node', args: Array.from({ length: 65 }, () => 'a'), env: {} } } });
+  assert.equal(many.status, 400, 'more than 64 args must be refused');
+  const long = await req('/api/mcp/config', { mcpServers: { s: { command: 'node', args: ['x'.repeat(9000)], env: {} } } });
+  assert.equal(long.status, 400, 'an 8KB+ argument must be refused');
+  const ok = await req('/api/mcp/config', { mcpServers: { s: { command: 'node', args: ['-e', '1'], env: { A: 'b' } } } });
+  assert.equal(ok.status, 200, 'a legitimate server must still save');
+});

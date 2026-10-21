@@ -326,8 +326,72 @@ fn verify_runtime_manifest(dir: &Path) -> Result<(), String> {
     }
 }
 
+/// Is this archive member name safe to extract under the runtime directory?
+///
+/// v1.4.0 review #4: the Electron shell has always refused zip-slip members before
+/// writing anything (electron-main.cjs: "zip-slip blocked"), but this shell handed the
+/// archive straight to `tar.exe` and only checked hashes AFTERWARDS — so an archive whose
+/// members escape the destination would have written its files first and been rejected
+/// second. Splitting on both separators catches `../`, `..\` and mixed forms; a `:` in
+/// any component rejects drive-relative (`C:evil`) and NTFS alternate-data-stream names.
+fn member_path_is_safe(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    if name.starts_with('/') || name.starts_with('\\') {
+        return false; // absolute or UNC
+    }
+    for part in name.split(['/', '\\']) {
+        if part == ".." {
+            return false;
+        }
+        if part.contains(':') {
+            return false;
+        }
+    }
+    true
+}
+
+/// List the archive with the same `tar.exe` that will extract it and refuse the whole
+/// thing if any member could land outside the destination. The listing and the
+/// extraction therefore agree on what the members are.
+fn assert_members_are_safe(zip: &Path, tar: &Path) -> Result<(), String> {
+    let out = Command::new(tar)
+        .arg("-tf")
+        .arg(zip)
+        .creation_flags(no_window())
+        .output()
+        .map_err(|e| format!("tar list failed: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("runtime.zip is not a readable archive (tar -tf exit {})", out.status.code().unwrap_or(-1)));
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    let mut seen = 0usize;
+    for line in listing.lines() {
+        let name = line.trim_end_matches('\r');
+        if name.is_empty() {
+            continue;
+        }
+        seen += 1;
+        if !member_path_is_safe(name) {
+            return Err(format!("runtime.zip contains an unsafe member path — refusing to extract: {name}"));
+        }
+    }
+    if seen == 0 {
+        return Err("runtime.zip lists zero members — refusing to extract".to_string());
+    }
+    Ok(())
+}
+
 /// Extract runtime.zip when the fingerprint changed.
 /// Stamp = `version|zipSize|zipMtime` — same scheme as the Electron shell.
+///
+/// v1.4.0 review #4, second half: the stamp used to be written BEFORE
+/// `verify_runtime_manifest` ran, so a tree that failed verification was already stamped
+/// as current — the next launch skipped extraction on the matching stamp and failed the
+/// identical check again, permanently, with no way back short of reinstalling. The tree
+/// is now built in a sibling directory, verified there, and only then swapped in; the
+/// stamp is written last, so "extracted" and "verified" cannot come apart.
 fn ensure_runtime(zip: &Path, dir: &Path, version: &str) -> Result<(), String> {
     let stamp = dir.join(".version");
     let mut sig = format!("v{version}");
@@ -345,24 +409,44 @@ fn ensure_runtime(zip: &Path, dir: &Path, version: &str) -> Result<(), String> {
     {
         return Ok(());
     }
-    if dir.exists() {
-        std::fs::remove_dir_all(dir).map_err(|e| format!("clear runtime failed: {e}"))?;
-    }
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let tar = Path::new(&std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
         .join("System32")
         .join("tar.exe");
-    let status = Command::new(tar)
+    assert_members_are_safe(zip, &tar)?;
+    // build in a sibling of the real dir: same volume, so the swap below is a rename
+    let staging = dir.with_file_name(format!(
+        "{}.staging-{}",
+        dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "runtime".into()),
+        std::process::id()
+    ));
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging).map_err(|e| format!("clear staging failed: {e}"))?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let status = Command::new(&tar)
         .args(["-xf"])
         .arg(zip)
         .arg("-C")
-        .arg(dir)
+        .arg(&staging)
         .creation_flags(no_window())
         .status()
         .map_err(|e| format!("tar spawn failed: {e}"))?;
     if !status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
         return Err(format!("tar extract failed: {}", status.code().unwrap_or(-1)));
     }
+    // verify in the staging tree — the live tree keeps serving whatever it had
+    if let Err(e) = verify_runtime_manifest(&staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("candidate runtime rejected, keeping the existing tree: {e}"));
+    }
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).map_err(|e| format!("clear runtime failed: {e}"))?;
+    }
+    std::fs::rename(&staging, dir).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staging);
+        format!("runtime swap failed: {e}")
+    })?;
     std::fs::write(&stamp, sig).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -668,5 +752,125 @@ mod tests {
         assert_eq!(a.len(), 64, "sha256 hex is 64 chars");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(a, b, "the supervisor restart path depends on this being stable");
+    }
+
+    // v1.4.0 review #4: the member-path predicate that replaces "trust tar.exe, verify after".
+    #[test]
+    fn ordinary_member_paths_are_safe() {
+        for n in ["server.mjs", "lib/cron.mjs", "node_modules/ws/index.js", "./a/b.js", "a/b/c/", "dir\\sub\\file.js"] {
+            assert!(member_path_is_safe(n), "{n} should be safe");
+        }
+    }
+
+    #[test]
+    fn traversal_and_absolute_members_are_rejected() {
+        for n in [
+            "../evil.js",
+            "../../evil.js",
+            "a/../../evil.js",
+            "..\\evil.js",
+            "a\\..\\..\\evil.js",
+            "a/../b/../../evil.js",
+            "/etc/passwd",
+            "\\Windows\\System32\\evil.dll",
+            "",
+        ] {
+            assert!(!member_path_is_safe(n), "{n} should be refused");
+        }
+    }
+
+    #[test]
+    fn windows_drive_and_stream_names_are_rejected() {
+        // drive-relative and NTFS alternate-data-stream forms never belong in a runtime
+        for n in ["C:evil.js", "C:/Windows/evil.dll", "a/b:C", "dir/file.txt:stream"] {
+            assert!(!member_path_is_safe(n), "{n} should be refused");
+        }
+    }
+
+    // The real thing: a zip carrying `../escape.txt`, listed by the real tar.exe that
+    // would extract it. This is the check the review could not verify — it is verified here.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_zip_with_a_traversal_member_is_refused_before_extraction() {
+        // under the crate's own target/ rather than %TEMP%: the test only needs a scratch
+        // directory, and staying inside the build tree keeps it writable everywhere
+        let dir = Path::new("target").join(format!("zip-slip-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip = dir.join("evil.zip");
+        // build a zip by hand: one stored entry named `../escape.txt`
+        let name = b"../escape.txt";
+        let body = b"owned";
+        let mut out: Vec<u8> = Vec::new();
+        let mut crc = 0u32;
+        // CRC-32 (IEEE) of the body — required for the local header
+        let mut table = [0u32; 256];
+        for i in 0..256u32 {
+            let mut c = i;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
+            }
+            table[i as usize] = c;
+        }
+        crc = !crc;
+        for b in body {
+            crc = table[((crc ^ *b as u32) & 0xFF) as usize] ^ (crc >> 8);
+        }
+        crc = !crc;
+        let put16 = |v: &mut Vec<u8>, x: u16| v.extend_from_slice(&x.to_le_bytes());
+        let put32 = |v: &mut Vec<u8>, x: u32| v.extend_from_slice(&x.to_le_bytes());
+        put32(&mut out, 0x04034b50);
+        put16(&mut out, 20);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put32(&mut out, crc);
+        put32(&mut out, body.len() as u32);
+        put32(&mut out, body.len() as u32);
+        put16(&mut out, name.len() as u16);
+        put16(&mut out, 0);
+        out.extend_from_slice(name);
+        out.extend_from_slice(body);
+        let cd_start = out.len();
+        put32(&mut out, 0x02014b50);
+        put16(&mut out, 20);
+        put16(&mut out, 20);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put32(&mut out, crc);
+        put32(&mut out, body.len() as u32);
+        put32(&mut out, body.len() as u32);
+        put16(&mut out, name.len() as u16);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put32(&mut out, 0);
+        put32(&mut out, 0);
+        out.extend_from_slice(name);
+        let cd_len = out.len() - cd_start;
+        put32(&mut out, 0x06054b50);
+        put16(&mut out, 0);
+        put16(&mut out, 0);
+        put16(&mut out, 1);
+        put16(&mut out, 1);
+        put32(&mut out, cd_len as u32);
+        put32(&mut out, cd_start as u32);
+        put16(&mut out, 0);
+        std::fs::write(&zip, &out).unwrap();
+
+        let tar = Path::new(&std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))
+            .join("System32")
+            .join("tar.exe");
+        let res = assert_members_are_safe(&zip, &tar);
+        assert!(res.is_err(), "a traversal member must be refused, got {res:?}");
+        assert!(
+            res.unwrap_err().contains("../escape.txt"),
+            "the refusal must name the offending member"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

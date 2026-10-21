@@ -9,7 +9,15 @@ import path from 'node:path';
 import net from 'node:net';
 import WebSocket from 'ws';
 
-const PORT = 39998;
+// Ports are picked by the OS (port 0) so a leftover instance cannot be mistaken
+// for this probe's server. (v1.4.1 review #4)
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer();
+  s.unref();
+  s.on('error', reject);
+  s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+});
+const PORT = await freePort(); // server port — OS-assigned, not the fixed 39998
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const waitPort = (port, timeoutMs) => new Promise((resolve) => {
@@ -24,6 +32,32 @@ const waitPort = (port, timeoutMs) => new Promise((resolve) => {
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-wsprobe-'));
 const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-wsproj-'));
+
+// One cleanup path shared by finally and the process hooks: process.exit() (the
+// watchdog) and an uncaught throw both skip finally, which used to leak a scratch
+// HOME/project per run on a long-lived runner. exit() is sync-only, so the bounded
+// retry below is a sync wait rather than a timer. (v1.4.1 review #9)
+const TMP_DIRS = [home, proj];
+let tmpCleaned = false;
+function cleanupTmpDirs() {
+  if (tmpCleaned) return;
+  tmpCleaned = true;
+  const retryUntil = Date.now() + 3000;
+  const pending = TMP_DIRS.slice();
+  while (pending.length) {
+    for (let i = pending.length - 1; i >= 0; i--) {
+      try { fs.rmSync(pending[i], { recursive: true, force: true }); pending.splice(i, 1); } catch { /* windows may hold a handle — retry below */ }
+    }
+    if (!pending.length || Date.now() > retryUntil) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); // sync sleep (no timers inside exit)
+  }
+  for (const d of pending) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* give up */ } }
+}
+process.on('exit', cleanupTmpDirs);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { cleanupTmpDirs(); process.exit(1); });
+}
+
 const child = spawn(process.execPath, [path.resolve('server.mjs')], {
   cwd: process.cwd(),
   env: { ...process.env, PIWB_EMBED_TOKEN: '1', PIWB_PORT: String(PORT), HOME: home, USERPROFILE: home },
@@ -172,6 +206,5 @@ try {
     } else child.kill();
   } catch { /* already gone */ }
   await new Promise((r) => setTimeout(r, 500));
-  try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* windows may hold a handle */ }
-  try { fs.rmSync(proj, { recursive: true, force: true }); } catch { /* ditto */ }
+  cleanupTmpDirs(); // same function as the exit hooks — one cleanup path (v1.4.1 review #9)
 }

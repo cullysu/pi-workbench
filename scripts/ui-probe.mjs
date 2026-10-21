@@ -14,8 +14,16 @@ const WebSocket = require('ws');
 
 const CHROME = process.env.CHROME_EXE
   || path.join(process.env.LOCALAPPDATA, 'ms-playwright', 'chromium-1223', 'chrome-win64', 'chrome.exe');
-const PORT = 39990;
-const CDP_PORT = 9333;
+// Ports are picked by the OS (port 0) so a leftover instance can never be mistaken
+// for this probe's server or CDP endpoint. (v1.4.1 review #4)
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer();
+  s.unref();
+  s.on('error', reject);
+  s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+});
+const PORT = await freePort(); // server port — OS-assigned, not the fixed 39990
+const CDP_PORT = await freePort(); // chrome CDP — OS-assigned, not the fixed 9333
 const BASE = `http://127.0.0.1:${PORT}`;
 
 const waitPort = (port, timeoutMs) => new Promise((resolve) => {
@@ -42,6 +50,34 @@ const USERTMP = process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, '
 fs.mkdirSync(USERTMP, { recursive: true });
 const home = fs.mkdtempSync(path.join(USERTMP, 'piwb-uiprobe-'));
 const proj = fs.mkdtempSync(path.join(USERTMP, 'piwb-uiproj-'));
+
+// Scratch HOME / project / chrome profile are registered here and removed by ONE
+// function called from finally and from the process hooks: an uncaught throw or an
+// externally killed run skips finally and used to leave the dirs behind. exit() may
+// only do sync work. The bounded retry is sync on purpose: a killed chrome needs ~1s
+// to release its profile handles, so a single rmSync attempt fails with EPERM.
+// (v1.4.1 review #9)
+const TMP_DIRS = [home, proj];
+let tmpCleaned = false;
+function cleanupTmpDirs() {
+  if (tmpCleaned) return;
+  tmpCleaned = true;
+  const retryUntil = Date.now() + 3000;
+  const pending = TMP_DIRS.slice();
+  while (pending.length) {
+    for (let i = pending.length - 1; i >= 0; i--) {
+      try { fs.rmSync(pending[i], { recursive: true, force: true }); pending.splice(i, 1); } catch { /* windows handles — retry below */ }
+    }
+    if (!pending.length || Date.now() > retryUntil) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); // sync sleep (no timers inside exit)
+  }
+  for (const d of pending) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* give up: a live chrome still owns it */ } }
+}
+process.on('exit', cleanupTmpDirs);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { cleanupTmpDirs(); process.exit(1); });
+}
+
 fs.writeFileSync(path.join(proj, 'calc.py'), 'print(1/0)\n');
 const cfgDir = path.join(home, '.pi-workbench');
 fs.mkdirSync(cfgDir, { recursive: true });
@@ -75,6 +111,7 @@ const server = spawn(process.execPath, [path.resolve('server.mjs')], {
 
 // ---------- start chromium ----------
 const profile = fs.mkdtempSync(path.join(USERTMP, 'piwb-uichrome-'));
+TMP_DIRS.push(profile); // registered as soon as it exists (v1.4.1 review #9)
 const chrome = spawn(CHROME, [
   '--headless=new', '--remote-debugging-port=' + CDP_PORT,
   '--user-data-dir=' + profile, '--no-first-run', '--disable-gpu',
@@ -218,5 +255,5 @@ try {
   try { chrome.kill(); } catch { /* gone */ }
   try { server.kill(); } catch { /* gone */ }
   await new Promise((r) => setTimeout(r, 800));
-  for (const d of [home, proj, profile]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* windows handles */ } }
+  cleanupTmpDirs(); // same function as the exit hooks (v1.4.1 review #9)
 }

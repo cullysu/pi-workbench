@@ -2227,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "pi-workbench"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "serde_json",
  "sha2",

@@ -2,6 +2,108 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.4.2 — 2026-10-22
+
+### Fixed (from the v1.4.1 independent review — 11 items: 3 defects confirmed and fixed, 5 engineering gaps fixed, 3 accepted with reasons)
+
+Every item was checked against the audited HEAD `7b7b8c1` before anything was touched. The
+review's own scope is stated in its text (read-only, no dynamic exploitation) and is not
+upgraded here into claims we did not test.
+
+**The shell's API token was derived, not random (review #1, high):**
+- `tauri/src/main.rs::shell_token()` was `sha256(clock nanos + pid + a fixed string)` — a pure
+  function of inputs a local process can roughly observe, minted as a bearer credential for the
+  whole local API and the WS upgrade. Its doc comment also claimed 32 hex chars while the code
+  produced 64.
+- It is now 32 bytes from the OS CSPRNG (`BCryptGenRandom` with the system-preferred RNG on
+  Windows, `/dev/urandom` elsewhere), minted once per process because the supervisor restart path
+  requires the loaded page to keep presenting the same credential. The identity-check nonce got
+  the same treatment. A CSPRNG failure says so on stderr instead of silently degrading.
+- `windows-sys` is already a dependency, so this added a FEATURE (`Win32_Security_Cryptography`),
+  not a crate — `Cargo.lock` is otherwise untouched and `cargo build --locked` still holds.
+
+**Windows MCP servers were re-parsed by cmd.exe (review #2, high):**
+- The bridge passed `command` and each arg as separate argv elements to `cmd.exe /d /s /c`. Node
+  quotes those for `CommandLineToArgvW`; cmd then re-parses the joined line with its own rules, so
+  an argument like `a&b` (no space, never quoted) became two commands.
+- New `extensions/mcp-cmdline.js`: bare-safe tokens pass verbatim, anything cmd would split is
+  double-quoted, and `"`, `%`, `!`, CR/LF are REFUSED rather than half-escaped (no faithful
+  escape exists for them on a `/c` line). The bridge builds one line, wraps it for `/s`, and sets
+  `windowsVerbatimArguments` so Node does not quote it a second time.
+- Proven by round-tripping a real `cmd.exe` against both a direct exe and a `.cmd` shim: all
+  argument shapes arrive intact; the pre-fix construction demonstrably splits `a&b`.
+- **This fix exposed a second bug, which was mine and was caught by the API suite, not by
+  inspection:** `hMcpInstall` copies only the entry file into
+  `~/.pi/agent/extensions/mcp-bridge/index.js`, so the new sibling import could not resolve there
+  — `ERR_MODULE_NOT_FOUND`. pi would fail to load the extension while the endpoint still answered
+  `ok:true`, which is the exact failure class this endpoint has been fixed for before. The install
+  now copies every relative import of the entry, fails closed if a source file is missing, and
+  `tests/api.test.mjs` asserts the installed extension is self-contained.
+
+**A failed `icacls` was invisible (review #3, low):**
+- Both call sites wrapped `spawnSync('icacls', …)` in a try/catch. `spawnSync` reports a non-zero
+  exit through `status`, it does not throw — so the catch could never fire and a credential file
+  silently kept its inherited (broad) DACL, with Windows ignoring the 0600 the writer had set.
+- New `lib/win-acl.mjs` returns the outcome (`ok`/`failed`/`skipped` + reason) and reports through
+  an injected sink: the server logs it to `server.log`, and backup export/import results carry
+  `aclWarnings` so the UI can show that a file was NOT tightened. `ctx.acl` makes the Windows-only
+  branch reachable from a test on any OS.
+
+**Test/probe ports are OS-assigned (review #4):** `tests/api.test.mjs` (39944) and the
+`failover-e2e` / `ui-probe` / `ui-contract-probe` / `ws-probe` fixed ports were replaced with the
+repo's existing `freePort()` pattern, so a leftover instance can no longer be mistaken for the
+probe's own server.
+
+**SBOM pin assertion checks every physical copy (review #7):** `sbom.mjs` keys components by
+`name@version@<path>` and records a `path` property, and `assert-sbom-pins.mjs` now collects all
+components matching a pinned name and requires *each physical copy* to carry the pinned version,
+naming the offending paths. Previously the first map entry silently shadowed the rest — the very
+mechanism by which undici 8.9.0 once shipped while the gate stayed green.
+
+**Runtime assembly fails closed (review #8):** `make-runtime.mjs` used to warn and skip an
+unreadable file and still write `pkg-runtime.zip`, deferring the damage to pack time or user
+launch. It now lists every unreadable path, exits 1 and ships nothing; `PIWB_RUNTIME_ALLOW_MISSING`
+is the explicit escape hatch. `check-runtime.mjs` names `extensions/mcp-bridge.js` and
+`extensions/mcp-cmdline.js` as artifacts, because the bridge is loaded by pi and the import walk
+can never reach it on its own.
+
+**Probe scratch directories no longer leak (review #9):** the watchdogs call `process.exit(2)`,
+which skips `finally`, so temp HOME/project/Chrome-profile directories survived killed runs. Each
+probe now has one `cleanupTmpDirs()` shared by `finally` and the `exit`/`SIGINT`/`SIGTERM` hooks,
+with a bounded synchronous retry (a killed Chrome holds the profile for ~1s, so a single `rmSync`
+would EPERM and the fix would be decorative).
+
+**`update/check` reported nothing about the local version when GitHub was unreachable** (found by
+this wave's own gate run, not by the review): `current` came from a local `package.json` read that
+sat *after* the fetch, so the offline catch path omitted it and `npm test` failed on a machine with
+no route to GitHub. `current` is now read first and returned on both paths; the offline path still
+omits `updateAvailable`, because offline means *unknown*, and the UI renders "already up to date"
+only on an explicit false.
+
+### Accepted, with reasons (review #5, #6, #10, #11)
+- **#5 packaged-runtime verification** is real and stays open: CI boots the Linux AppImage, while
+  the Windows/macOS/Tauri artifacts are built and uploaded but never launched. Closing it needs
+  post-install launch steps on those runners — infrastructure, not a code edit in this tree.
+- **#6 `check-runtime.mjs` is a regex approximation** — true, and stated in the file's own header;
+  it cannot see a path assembled from user input at runtime. Not silently re-laid-out here.
+- **#10 `server.mjs` size** (~2,000 lines) is an architecture item. Splitting for its own sake
+  would churn the file the review credits for defensive depth; it belongs with the existing
+  "domain split" queue rather than to this wave.
+- **#11 source-string assertions in `verify-audit-fixes.mjs`** is fair: those checks would have
+  passed *before* fixes #2 and #3 as well as after, because both defects read as reasonable code.
+  The new checks therefore import the real modules and drive the failure paths, and the round-trip
+  through `cmd.exe` plus the injected `icacls` result are behaviour, not text.
+
+### Verification (2026-10-22, Windows, HEAD before this commit)
+`npm test` **74/74**; `verify-audit-fixes.mjs` **125 PASS / 0 FAIL**; `route-sweep.py` **51 routes,
+0 failures**; `ws-probe`, `failover-e2e`, `chat-e2e`, `ui-contract-probe`, `ui-a11y-probe` all
+`ALL PASS` (exit 0); `ui-probe` `ALL PASS` 3/3 re-runs, after one earlier run exited 1 with the
+failing line not captured before I re-ran it — reported as-is, not as a clean bill; `cargo test
+--offline` **11 passed** (includes the new `token_entropy_comes_from_the_os_rng`); `eslint .` clean;
+`assert-version` agrees on 1.4.2 across all seven manifests.
+**Not run:** three-OS packaging and any post-install launch (see #5); no dynamic exploitation of
+#1/#2/#3, matching the review's own scope.
+
 ## 1.4.1 — 2026-10-21
 
 ### Fixed (from the v1.4.0 full-repository review — 3 confirmed / 3 hardening)

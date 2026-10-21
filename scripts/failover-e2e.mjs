@@ -23,7 +23,15 @@ import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const WebSocket = require('ws');
 
-const PORT = 39987;
+// Ports are picked by the OS (port 0): a fixed port that is already taken either
+// fails the bind or makes waitPort() believe a stranger's server is ours. (v1.4.1 review #4)
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer();
+  s.unref();
+  s.on('error', reject);
+  s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+});
+const PORT = await freePort(); // server port — OS-assigned, not the fixed 39987
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPLY = '1 加 1 等于 2。';
 
@@ -75,6 +83,33 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const kids = [];
 let child = null;
 let ws = null;
+
+// Every scratch dir this run creates is registered here and removed by ONE function,
+// called from finally and from the process hooks (watchdog exit(2) / uncaught throw
+// both skip finally, and each skipped run used to leave a HOME + project behind on
+// the self-hosted runner). exit() may only do sync work, so the bounded retry is a
+// sync wait rather than a timer. (v1.4.1 review #9)
+const TMP_DIRS = [];
+let tmpCleaned = false;
+function cleanupTmpDirs() {
+  if (tmpCleaned) return;
+  tmpCleaned = true;
+  const retryUntil = Date.now() + 3000;
+  const pending = TMP_DIRS.slice();
+  while (pending.length) {
+    for (let i = pending.length - 1; i >= 0; i--) {
+      try { fs.rmSync(pending[i], { recursive: true, force: true }); pending.splice(i, 1); } catch { /* windows may hold a handle — retry below */ }
+    }
+    if (!pending.length || Date.now() > retryUntil) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); // sync sleep (no timers inside exit)
+  }
+  for (const d of pending) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* give up */ } }
+}
+process.on('exit', cleanupTmpDirs);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { cleanupTmpDirs(); process.exit(1); });
+}
+
 setTimeout(() => { console.log('GLOBAL WATCHDOG: 240s cap hit'); process.exit(2); }, 240000).unref();
 
 try {
@@ -86,6 +121,7 @@ try {
 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-fo-'));
   const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-fop-'));
+  TMP_DIRS.push(home, proj); // register before any write: a throw below must still clean up
   const cfgDir = path.join(home, '.pi-workbench');
   fs.mkdirSync(cfgDir, { recursive: true });
   fs.mkdirSync(path.join(home, '.pi', 'agent'), { recursive: true });
@@ -198,4 +234,5 @@ try {
   } catch { /* already gone */ }
   await new Promise((r) => setTimeout(r, 500));
   for (const k of kids) { try { k.close(); } catch { /* mock already closed */ } }
+  cleanupTmpDirs(); // same function as the exit hooks (v1.4.1 review #9)
 }

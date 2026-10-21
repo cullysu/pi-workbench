@@ -136,19 +136,9 @@ fn which_node_from_path() -> Option<PathBuf> {
 /// old `HTTP/1. + 200` check AND get handed the token.
 fn workbench_serving(port: u16, token: &str) -> bool {
     use std::io::{Read, Write};
-    // 16 random bytes hex — nonce freshness is what makes a captured proof useless
-    let nonce = {
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            .to_le_bytes());
-        h.update(std::process::id().to_le_bytes());
-        let d = h.finalize();
-        d.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>()
-    };
+    // 16 random bytes hex — freshness is what makes a captured proof useless, and taking
+    // them from the OS RNG makes the nonce unpredictable as well (v1.4.1 review #1)
+    let nonce = random_hex(16);
     let expect = hmac_sha256_hex(token.as_bytes(), nonce.as_bytes());
     let mut stream = match TcpStream::connect(("127.0.0.1", port)) {
         Ok(s) => s,
@@ -473,28 +463,71 @@ fn spawn_node_server(node: &Path, runtime_dir: &Path, token: &str) -> std::io::R
         .spawn()
 }
 
-/// The shell's own per-launch token. 32 hex chars (128 bits) from sha256 over the clock,
-/// the pid and a counter — no `rand` crate, and it never leaves this process except as
+/// Fill `buf` from the operating system's CSPRNG. The Tauri shell in this repository is
+/// Windows-only (see the compile_error at the top of this file); the POSIX branch is kept
+/// so the file still reads as portable code.
+#[cfg(windows)]
+fn os_random(buf: &mut [u8]) -> bool {
+    // BCryptGenRandom with a NULL algorithm handle uses the system-preferred RNG.
+    // windows-sys is already a dependency — only the Win32_Security_Cryptography FEATURE is
+    // new, so Cargo.lock is untouched and `cargo build --locked` (CI P3-16) stays valid.
+    use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        ) == 0
+    }
+}
+
+#[cfg(not(windows))]
+fn os_random(buf: &mut [u8]) -> bool {
+    use std::io::Read;
+    match std::fs::File::open("/dev/urandom") {
+        Ok(mut f) => f.read_exact(buf).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// `bytes` OS-random bytes as lowercase hex.
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    if !os_random(&mut buf) {
+        // Practically unreachable on the platforms this shell builds for. Never degrade
+        // SILENTLY back to the predictable derivation this fix removed (#1): say so on
+        // stderr, then mix the clock, the pid and a heap address, so a failure at least
+        // does not hand out a constant.
+        eprintln!("[pi-workbench] OS CSPRNG unavailable — shell token entropy degraded");
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        h.update(std::process::id().to_le_bytes());
+        h.update((buf.as_ptr() as usize).to_le_bytes());
+        buf = h.finalize().to_vec();
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The shell's own per-launch token: 64 hex chars (32 OS-random bytes) minted once per
+/// process and then cached, because the supervisor restart path requires the loaded page
+/// to keep presenting the SAME credential (P1-3). It never leaves this process except as
 /// the child's environment and the webview's init script.
+///
+/// v1.4.1 review #1: this used to be sha256(clock nanos + pid + a fixed string) — a pure
+/// function of guessable inputs, so a local process that knew roughly when the shell
+/// started could enumerate candidate bearer tokens for the local API. 128 bits from the OS
+/// RNG instead, with no new crate.
 fn shell_token() -> String {
     static TOKEN: OnceLock<String> = OnceLock::new();
-    TOKEN
-        .get_or_init(|| {
-            use sha2::{Digest, Sha256};
-            let mut h = Sha256::new();
-            h.update(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-                    .to_le_bytes(),
-            );
-            h.update(std::process::id().to_le_bytes());
-            h.update(b"pi-workbench-tauri-shell-token");
-            let d = h.finalize();
-            d.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        })
-        .clone()
+    TOKEN.get_or_init(|| random_hex(32)).clone()
 }
 
 /// v1.3.8 review P3-11: watch the server we own and restart it after an abnormal exit —
@@ -749,9 +782,26 @@ mod tests {
     fn the_shell_token_is_64_hex_chars_and_stable() {
         let a = shell_token();
         let b = shell_token();
-        assert_eq!(a.len(), 64, "sha256 hex is 64 chars");
+        assert_eq!(a.len(), 64, "32 OS-random bytes are 64 hex chars");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(a, b, "the supervisor restart path depends on this being stable");
+    }
+
+    // v1.4.1 review #1: the token used to be sha256(clock nanos + pid + a fixed string) —
+    // a pure function of guessable inputs, i.e. no secret at all. The entropy must now come
+    // from the OS RNG, which this asserts behaviourally rather than by reading the source.
+    #[test]
+    fn token_entropy_comes_from_the_os_rng() {
+        assert!(os_random(&mut [0u8; 0]), "a zero-length request must still succeed");
+        let a = random_hex(32);
+        let b = random_hex(32);
+        assert_eq!(a.len(), 64, "32 bytes is 64 hex chars");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "two independent OS-RNG draws must not collide");
+        assert_ne!(a, "0".repeat(64), "the CSPRNG returned a zero buffer");
+        let mut buf = [0u8; 32];
+        assert!(os_random(&mut buf));
+        assert!(buf.iter().any(|&x| x != 0), "the CSPRNG returned all zeroes");
     }
 
     // v1.4.0 review #4: the member-path predicate that replaces "trust tar.exe, verify after".

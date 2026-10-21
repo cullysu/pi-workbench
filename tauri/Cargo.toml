@@ -1,6 +1,6 @@
 [package]
 name = "pi-workbench"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2021"
 
 [build-dependencies]
@@ -12,7 +12,7 @@ sha2 = "0.10"
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Security"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography"] }
 
 [profile.release]
 strip = true

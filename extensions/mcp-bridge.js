@@ -15,6 +15,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { buildCmdLine } from "./mcp-cmdline.js";
+
 const MCP_CONFIG = path.join(os.homedir(), ".pi", "agent", "mcp.json");
 const CALL_TIMEOUT_MS = 120000;
 const START_TIMEOUT_MS = 30000;
@@ -138,9 +140,14 @@ class McpClient {
       // windows: npx/uvx etc. are .cmd shims — direct spawn() throws ENOENT, so go through cmd
       const useShell = process.platform === 'win32';
       const exe = useShell ? (process.env.ComSpec || 'cmd.exe') : command;
-      const argv = useShell ? ['/d', '/s', '/c', command, ...args] : args;
+      // v1.4.1 review #2: build ONE command line in cmd's own dialect instead of handing cmd a
+      // pre-split argv (an arg like `a&b` was unquoted and cmd split it into two commands).
+      // The outer quotes are what cmd's /s flag strips, and windowsVerbatimArguments stops Node
+      // from quoting our line a second time, so the line is parsed exactly once.
+      const argv = useShell ? ['/d', '/s', '/c', `"${buildCmdLine(command, args)}"`] : args;
       const proc = this.proc = spawn(exe, argv, {
         cwd: os.homedir(),
+        windowsVerbatimArguments: useShell,
         // v1.3.8 review P1-2: the GUI admin token is scrubbed from server.mjs's own
         // environment, but this bridge is also loaded by pi, which inherits whatever the
         // shell gave it. Drop it again here so a third-party MCP server can never read it

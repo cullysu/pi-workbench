@@ -37,6 +37,10 @@ const ARTIFACTS = [
   'public/app.js',
   'public/style.css',
   'data/models-kb.json',
+  // the MCP bridge is loaded by pi, not by server.mjs, so the import walk below can never
+  // reach it — name it and its helper explicitly or a zip missing them passes this check
+  'extensions/mcp-bridge.js',
+  'extensions/mcp-cmdline.js',
 ];
 
 const RESOLVE_EXT = ['.mjs', '.js', '.cjs', '.json'];

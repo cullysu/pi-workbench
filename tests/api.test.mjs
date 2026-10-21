@@ -11,7 +11,16 @@ import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
-const PORT = 39944;
+// The suite port is OS-assigned at startup (port 0) instead of the fixed 39944: a
+// leftover instance on that port answered the token scrape and made the suite fail
+// against a stranger's server. (v1.4.1 review #4)
+const freePort = () => new Promise((resolve, reject) => {
+  const s = net.createServer();
+  s.unref();
+  s.on('error', reject);
+  s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+});
+const PORT = await freePort();
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -286,6 +295,19 @@ test('mcp bridge install: copies extension into scratch extensions dir', { timeo
   assert.equal(fs.existsSync(dest), true, 'bridge file installed');
   const src = fs.readFileSync(path.join(ROOT, '..', 'extensions', 'mcp-bridge.js'), 'utf8');
   assert.equal(fs.readFileSync(dest, 'utf8'), src);
+  // pi loads the extension from THIS directory, so every relative import of the entry must have
+  // been copied beside it. Installing only the entry produced an extension that threw
+  // ERR_MODULE_NOT_FOUND at load time while the endpoint answered ok:true (v1.4.1 review #2 —
+  // the module the bridge now imports for cmd quoting was the first such helper).
+  const installedSrc = fs.readFileSync(dest, 'utf8');
+  const relDeps = [...installedSrc.matchAll(/(?:import|export)[^'"`]*?from\s*['"](\.[^'"]+)['"]/g)].map((m) => m[1]);
+  assert.ok(relDeps.length > 0, 'the installed entry does have a sibling import (the guard must not be vacuous)');
+  for (const dep of relDeps) {
+    const target = path.join(path.dirname(dest), dep);
+    assert.equal(fs.existsSync(target), true, `installed extension must ship its dependency ${dep}`);
+    const sourceOf = path.join(ROOT, '..', 'extensions', dep);
+    assert.equal(fs.readFileSync(target, 'utf8'), fs.readFileSync(sourceOf, 'utf8'), `${dep} is the shipped source`);
+  }
 });
 
 test('cron is a real endpoint now, mcp stays gone', async () => {
@@ -506,8 +528,13 @@ test('cron rejects a cwd outside the registered projects', async () => {
 test('update/check reports the current version alongside the latest tag', async () => {
   const r = await req('/api/update/check');
   assert.equal(r.status, 200);
-  assert.equal(typeof r.data.current, 'string');
-  assert.ok('updateAvailable' in r.data);
+  // `current` is local truth and must be answered even when GitHub is unreachable, which is the
+  // normal state of a CI runner without a route (this assertion used to fail there). The two
+  // network outcomes are both accepted; only the offline contract is asserted.
+  assert.equal(typeof r.data.current, 'string', 'current version is always reported');
+  // the online payload still carries updateAvailable; the offline one flags itself with `error`
+  // instead (v1.4.1 gate run: a runner with no route to github used to fail this test)
+  if (!r.data.error) assert.ok('updateAvailable' in r.data, 'the online payload carries updateAvailable');
 });
 
 // P2-6 (v1.3.9 review): `npm start` — a plain `node server.mjs` with NEITHER PIWB_TOKEN

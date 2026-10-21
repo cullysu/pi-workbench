@@ -49,13 +49,14 @@ function backupZip(t, label = 'incoming') {
   return zpath;
 }
 
-function makeBT(t, fsish) {
+function makeBT(t, fsish, extra = {}) {
   return createBackupTerminal({
     CFG_DIR: t.cfgDir, HOME: t.home, ...t.files,
     PI_SKILLS: path.join(t.home, '.pi', 'skills'),
     CODEX_SESSIONS: path.join(t.home, '.codex'), CLAUDE_PROJECTS: path.join(t.home, '.claude'),
     VERSION: '1.3.9', listSkills: () => ({ skills: [] }), createZip, readZip,
     spawn: () => { throw new Error('unused'); }, fs: fsish, path,
+    ...extra,
   });
 }
 
@@ -149,4 +150,26 @@ test('an invalid archive aborts before touching anything', async () => {
   const bt = makeBT(t, realFs);
   await assert.rejects(() => bt.importBackupZip(zpath), /内容结构与备份格式不符/);
   assert.equal(realFs.readFileSync(t.files.CFG_FILE, 'utf8'), before, 'no target touched on a rejected archive');
+});
+
+// v1.4.1 review #3: the ACL step was invisible. `icacls` reporting failure was swallowed and
+// nothing anywhere said the credential-bearing export kept its inherited DACL, so the fix is
+// not "call icacls harder" but "never let the result disappear" — asserted at the receipt.
+test('a failed icacls reaches the backup receipt instead of vanishing (review #3)', async () => {
+  const t = tree();
+  const bt = makeBT(t, realFs, {
+    acl: { platform: 'win32', env: { USERNAME: 'me' }, run: () => ({ status: 1, stderr: 'Access is denied.' }) },
+  });
+  const out = await bt.exportBackupZip(false);
+  assert.ok(Array.isArray(out.aclWarnings) && out.aclWarnings.length >= 1, 'the receipt must carry the ACL failure');
+  assert.match(out.aclWarnings[0], /icacls failed \(1\)/);
+});
+
+test('a clean ACL run adds nothing to the receipt (review #3)', async () => {
+  const t = tree();
+  const bt = makeBT(t, realFs, {
+    acl: { platform: 'win32', env: { USERNAME: 'me' }, run: () => ({ status: 0, stdout: 'Successfully processed 1 files' }) },
+  });
+  const out = await bt.exportBackupZip(false);
+  assert.equal(out.aclWarnings, undefined, 'no noise when nothing failed');
 });

@@ -17,7 +17,8 @@ import {createSources} from './lib/sources.mjs';
 import { killTree, spawnTreeOpts } from './lib/proctree.mjs';
 import {createKbSkills} from './lib/kb-skills.mjs';
 import {createBackupTerminal} from './lib/backup-terminal.mjs';
-import { spawn, spawnSync } from 'node:child_process';
+import { restrictWindowsAcl } from './lib/win-acl.mjs';
+import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -251,9 +252,11 @@ function loadRouting() {
 // actually carries secrets, applied to the final name after the rename.
 const ACL_FILE_RE = /^(token|routing\.json|cron\.json|config\.json|models\.json|mcp\.json|settings\.json|model-meta\.json)$/i;
 function restrictAcl(file) {
-  if (process.platform !== 'win32' || !process.env.USERNAME) return;
   if (!ACL_FILE_RE.test(path.basename(file))) return;
-  try { spawnSync('icacls', [file, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:F`], { windowsHide: true, stdio: 'ignore' }); } catch { /* best effort */ }
+  // v1.4.1 review #3: spawnSync reports a non-zero exit through `status`, it does not throw —
+  // so the old try/catch swallowed EVERY failure and a credential file silently kept its
+  // inherited ACL (Windows ignores the 0600 above). The outcome now goes to the server log.
+  restrictWindowsAcl(file, { warn: (line) => logErr(line) });
 }
 // atomic write: tmp+rename so a crash mid-write can never leave a torn config
 // (Windows rename replaces existing files — no unlink dance needed)
@@ -1408,14 +1411,20 @@ const semverGt = (a, b) => {
 };
 
 async function hUpdateCheck(req, res, u) {
+    // `current` comes from the LOCAL package.json — it is knowable with no network, and the UI
+    // prints it when `updateAvailable` is false. Read it before the fetch so an unreachable or
+    // slow GitHub still answers with it (found during the v1.4.1 gate run: with no route to
+    // github the field was missing and `npm test` failed on a purely environmental condition).
+    const cur = readJson(path.join(__dirname, 'package.json'))?.version || null;
     try {
       const r = await fetch('https://api.github.com/repos/cullysu/pi-workbench/releases/latest', { signal: AbortSignal.timeout(8000), headers: { 'user-agent': 'pi-workbench' } });
       const j = await r.json();
-      const cur = readJson(path.join(__dirname, 'package.json'))?.version || null;
       const latest = String(j.tag_name || '').replace(/^v/, '');
       return json(res, 200, { latest: j.tag_name || null, url: j.html_url || null, current: cur, updateAvailable: !!(cur && latest && semverGt(latest, cur)) });
     } catch (e) {
-      return json(res, 200, { latest: null, error: String(e.message || e).slice(0, 100) });
+      // no `updateAvailable` here on purpose: offline means UNKNOWN, and the UI claims "already
+      // up to date" only on an explicit false.
+      return json(res, 200, { latest: null, current: cur, error: String(e.message || e).slice(0, 100) });
     }
 }
 
@@ -1828,6 +1837,22 @@ async function hMcpInstall(req, res, u) {
     // ok:true while the engine finds nothing
     fs.copyFileSync(bridge, path.join(destDir, 'index.js'));
     fs.copyFileSync(path.join(srcDir, 'package.json'), path.join(destDir, 'package.json'));
+    // v1.4.1 review #2 follow-up: the bridge imports a sibling module (the cmd quoting helper).
+    // An extension is loaded from ITS OWN directory, so copying only the entry left
+    // `import './mcp-cmdline.js'` unresolvable — pi's loader then threw ERR_MODULE_NOT_FOUND
+    // and the extension silently stopped working while this endpoint still answered ok:true.
+    // Copy every relative import of the entry beside it, and fail closed if the source is gone
+    // (an install that reports success but produces an unloadable extension is the bug being
+    // fixed here, not an acceptable degraded mode).
+    const entrySrc = fs.readFileSync(bridge, 'utf8');
+    const relDeps = [...entrySrc.matchAll(/(?:import|export)[^'"`]*?from\s*['"](\.[^'"]+)['"]/g)].map((m) => m[1]);
+    for (const dep of relDeps) {
+      const from = path.join(srcDir, dep);
+      if (!fs.existsSync(from)) return json(res, 500, { ok: false, error: `bridge dependency missing: ${dep}` });
+      const to = path.join(destDir, dep);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+    }
     // typebox is resolved from the extension's own node_modules (pi documents this flow).
     // The packaged runtime bundles it — copy across and skip npm entirely on clean machines.
     const bundledTypebox = path.join(__dirname, 'node_modules', 'typebox');

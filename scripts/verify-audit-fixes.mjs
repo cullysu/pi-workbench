@@ -1062,6 +1062,36 @@ process.exit(0);
     const okShape = !(bad.mcpServers.s.env.K === '***') && typeof bad.mcpServers.s.env.K !== 'string';
     check('#6 the named case (env value is an object) is now rejectable', okShape === true, 'precondition wrong');
   }
+
+  // --- v1.4.1 review #2/#3: the two Node-side fixes, locked by BEHAVIOUR.
+  // A source-string assertion would have passed both before and after these fixes — the old
+  // cmd construction and the old swallowing try/catch both read as perfectly reasonable code.
+  // So these drive the real failure path instead.
+  {
+    const { quoteCmdArg, buildCmdLine } = await import(pathToFileURL(path.join(repoRoot, 'extensions', 'mcp-cmdline.js')).href);
+    check('#2 an argument cmd would split is quoted, not passed bare',
+      quoteCmdArg('a&b') === '"a&b"' && quoteCmdArg('--yes') === '--yes', 'a&b -> ' + quoteCmdArg('a&b'));
+    const refused = ['q"uote', 'pct%VAR%', 'bang!x', 'nl\nx'].every((b) => {
+      try { quoteCmdArg(b); return false; } catch { return true; }
+    });
+    check('#2 the characters cmd cannot escape are refused outright', refused, 'a half-escaped argument slipped through');
+    const line = buildCmdLine('C:\\Program Files\\app\\run.cmd', ['a&b']);
+    check('#2 the whole line is built once, in cmd quoting',
+      line === '"C:\\Program Files\\app\\run.cmd" "a&b"', line);
+
+    const { restrictWindowsAcl } = await import(pathToFileURL(path.join(repoRoot, 'lib', 'win-acl.mjs')).href);
+    const warned = [];
+    const denied = restrictWindowsAcl('C:\\cfg\\token.json', {
+      platform: 'win32', env: { USERNAME: 'u' }, warn: (l) => warned.push(l),
+      run: () => ({ status: 1, stderr: 'Access is denied.' }),
+    });
+    check('#3 a non-zero icacls exit is REPORTED, not swallowed',
+      denied.status === 'failed' && warned.length === 1 && /icacls failed \(1\)/.test(warned[0]),
+      JSON.stringify({ status: denied.status, warned }));
+    check('#3 a clean icacls run stays quiet',
+      restrictWindowsAcl('x.json', { platform: 'win32', env: { USERNAME: 'u' }, warn: () => {}, run: () => ({ status: 0 }) }).status === 'ok',
+      'a clean run reported a problem');
+  }
 }
 
 

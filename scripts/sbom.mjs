@@ -8,6 +8,7 @@ import path from 'node:path';
 const root = path.resolve(process.argv[2] || '.');
 const comps = [];
 const seen = new Set();
+const posixRel = (from, to) => path.relative(from, to).split(path.sep).join('/');
 const walk = (dir) => {
   let entries = [];
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -18,7 +19,11 @@ const walk = (dir) => {
     let pkg = null;
     try { pkg = JSON.parse(fs.readFileSync(path.join(p, 'package.json'), 'utf8')); } catch { pkg = null; }
     if (pkg && pkg.name) {
-      const key = `${pkg.name}@${pkg.version || '0.0.0'}`;
+      // (v1.4.1 review #7) key components by PHYSICAL PATH, not name@version:
+      // two physical copies of the same name+version (e.g. a nested node_modules
+      // copy) used to collapse into one component and lose path provenance.
+      const nmRel = posixRel(root, dir); // e.g. node_modules/x/node_modules
+      const key = `${pkg.name}@${pkg.version || '0.0.0'}@${nmRel}/${e.name}`;
       if (!seen.has(key)) {
         seen.add(key);
         comps.push({
@@ -28,6 +33,7 @@ const walk = (dir) => {
           version: pkg.version || '0.0.0',
           purl: `pkg:npm/${pkg.name}@${pkg.version || '0.0.0'}`,
           ...(pkg.license ? { licenses: [{ license: { name: String(pkg.license) } }] } : {}),
+          properties: [{ name: 'path', value: `${nmRel}/${e.name}` }],
         });
       }
     }

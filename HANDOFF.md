@@ -309,3 +309,16 @@ route-sweep **51/0** · ws / failover / chat / ui / ui-contract / ui-a11y 全 AL
 cargo **13/13** · assert-version **all agree on 1.4.3** · dev audit 本机复现 **19 advisories（5 high）**。
 **未做**：三平台打包与安装后启动（#5/F50）、动态利用复现、崩溃安全 journal（M9 核心）、
 M15 拆分。红先验证方式：单文件 `git stash push` → 跑锁 → `stash pop` → 校验修复仍在。
+
+---
+
+## 12. v1.4.3 发布终验记录（2026-10-23）
+
+发布提交链：wave-32 `bdc9e1e` → CI 修正两连（`e464c6a` 去掉 --offline；`c147b2e` cargo test 限定
+Windows runner——ubuntu 没有 GTK 依赖树，而 Tauri 壳本来就 Windows-only）→ CI run
+`39815546767` **8/8 success**（含新 cargo test 步骤）→ tag `v1.4.3` → release
+<https://github.com/cullysu/pi-workbench/releases/tag/v1.4.3>（`latest`，7 资产）。
+
+终验：tag 解引用 = HEAD = CI sha = release target_commitish；线上 SHA256SUMS 与本地逐字节一致；
+重下 sbom + Tauri exe 哈希 MATCH；SBOM app=1.4.3、139 components；两个 exe FileVersion=1.4.3。
+**仍未做**：三平台安装包实机验收（#5/F50）、代码签名（F07）、崩溃安全 journal（M9）、M15 拆分。

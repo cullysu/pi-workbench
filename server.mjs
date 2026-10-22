@@ -50,15 +50,22 @@ const PORT = Number(process.env.PIWB_PORT || 32123);
 // (plus a 0600 token file for tooling). See the shell repos' main entry points.
 const API_TOKEN = process.env.PIWB_TOKEN || crypto.randomBytes(24).toString('hex');
 const TOKEN_FROM_ENV = !!process.env.PIWB_TOKEN; // the shell owns this token; we only hand it back
-// P2-6 (v1.3.9 review): `npm start` used to be unusable. Plain `node server.mjs` set
-// neither PIWB_TOKEN nor PIWB_EMBED_TOKEN, so the page got no credentials at all and every
-// /api call plus the WS upgrade 403'd — the documented browser workflow was dead unless the
-// user discovered an undocumented env var. Embedding is now the DEFAULT whenever no desktop
-// shell supplied a token; PIWB_EMBED_TOKEN=0 opts back out (headless/tooling mode keeps the
-// 0600 token file instead of shipping the token in HTML).
-const TOKEN_EMBED = process.env.PIWB_EMBED_TOKEN === '0'
-  ? false
-  : (process.env.PIWB_EMBED_TOKEN === '1' || !TOKEN_FROM_ENV);
+// P2-6 (v1.3.9 review): `npm start` used to be unusable — no token variable meant the page
+// got no credentials at all, so the documented browser workflow 403'd itself dead. The
+// v1.3.9 fix made "embed the token in the served HTML" the DEFAULT whenever no desktop shell
+// supplied one. The v1.4.2 review (H2) is right that this default contradicts the comment
+// above: any local process — any other user account on a shared machine included — can GET "/"
+// and read the admin token out of the HTML, then call /api/term/exec.
+// The default is now OFF: `npm start` prints exactly what to set, and the page teaches the
+// same thing. Embedding is an explicit opt-in (PIWB_EMBED_TOKEN=1) for the single-user case,
+// or you keep using the desktop shells, which hand the token over out-of-band.
+const TOKEN_EMBED = process.env.PIWB_EMBED_TOKEN === '1'
+  ? true
+  : (process.env.PIWB_EMBED_TOKEN === '0' || TOKEN_FROM_ENV
+      ? false
+      : (() => { console.log('[boot] no PIWB_TOKEN and no PIWB_EMBED_TOKEN — the page will 403 until you either\n' +
+          '         set PIWB_EMBED_TOKEN=1 (single-user machine, token ships in the HTML) or\n' +
+          '         PIWB_EMBED_TOKEN=0 + the 0600 token file (headless/tooling).'); return false; })());
 // v1.3.8 review P1-2: CAPTURE, THEN SCRUB. Every child we start (pi, MCP servers, tool
 // shells, cron runs, git, the file browser) inherits process.env, and pi can run arbitrary
 // commands — so keeping PIWB_TOKEN in the environment handed the GUI's admin credential to
@@ -324,37 +331,82 @@ const failover = createFailover({ SECRET_ENV, readJson, loadRouting, saveRouting
 const { splitModel, keyEnvsFor, keyEnvAt, hasLiteralKey, coolModel, coolKey, clearCool, modelCooled, providerCooled, envOverrideFor, nextInChain, sameModelNewKey, providerCooledOut } = failover;
 
 // provider URLs are user-supplied: only http(s) may leave the box (no file:, ftp:, data:...)
-// Local addresses stay allowed on purpose — ollama/LM Studio on 127.0.0.1 are first-class providers.
+// Local addresses stay allowed BY DEFAULT — ollama/LM Studio on 127.0.0.1 are first-class
+// providers, and this is a single-user local tool whose server already requires the admin
+// token for every config change. That is a POLICY, stated here rather than implied
+// (v1.4.2 review M7): a multi-user host can forbid loopback/link-local targets entirely by
+// starting the server with PIWB_DISALLOW_LOCAL_URLS=1 — the UI's own probe then reports the
+// refusal in its status line instead of silently reaching an internal service.
+const LOCAL_URL_HOSTNAMES = new Set(['localhost']);
+const isLocalUrlHostname = (hostname) => {
+  const h = String(hostname || '').toLowerCase();
+  if (LOCAL_URL_HOSTNAMES.has(h) || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  if (h === '::1' || h === '[::1]' || h === '::' || h.endsWith('.ipv6-literal.net')) return true;
+  // IPv4 literals: loopback / link-local / private ranges that must never be probed on a shared host
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) {
+    const o = h.split('.').map(Number);
+    if (o[0] === 127 || o[0] === 10 || o[0] === 0 || (o[0] === 169 && o[1] === 254) || (o[0] === 192 && o[1] === 168) || (o[0] === 172 && o[1] >= 16 && o[1] <= 31)) return true;
+  }
+  return false;
+};
 const assertHttpUrl = (raw) => {
   let parsed;
   try { parsed = new URL(String(raw || '')); } catch { return null; }
   if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) return null;
+  if (process.env.PIWB_DISALLOW_LOCAL_URLS === '1' && isLocalUrlHostname(parsed.hostname)) return null;
   return parsed;
 };
 // fetch + streaming size cap: a misbehaving endpoint must not balloon server memory
 // (content-length alone is not enough — chunked responses omit it)
+// v1.4.2 review M7: `redirect: 'manual'` + a hop budget. Node's default fetch FOLLOWS a
+// cross-host 302 and re-attaches the caller's headers — including the `x-api-key` /
+// `authorization` this module puts on — so a provider (or an attacker who can answer its
+// baseUrl) could bounce a probe to any other host and collect the credential. Following
+// manually means each hop is re-checked by the same loop, and credentials are only ever
+// attached to the URL the caller actually named.
+const MAX_REDIRECT_HOPS = 3;
+// credentials belong to the endpoint the caller named. On a redirect the same headers must
+// NOT be replayed to the new host (that is the leak M7 proved: Node's default follow sent
+// x-api-key across a 302 verbatim). The response body/keepalive bits survive; auth does not.
+const STRIP_ON_REDIRECT = /^(authorization|x-api-key|x-goog-api-key|cookie|anthropic-version)$/i;
 async function fetchJsonCapped(url, opts = {}, maxBytes = 2e6) {
-  const r = await fetch(url, opts);
-  let buf;
-  if (r.body && typeof r.body.getReader === 'function') {
-    const reader = r.body.getReader();
-    const chunks = [];
-    let total = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.length;
-      if (total > maxBytes) { try { await reader.cancel(); } catch { /* already cancelled */ } throw new Error(`response too large (> ${maxBytes} bytes)`); }
-      chunks.push(value);
+  let current = String(url);
+  let hopOpts = opts;
+  for (let hop = 0; ; hop++) {
+    const r = await fetch(current, { ...hopOpts, redirect: 'manual' });
+    if (r.status >= 300 && r.status < 400) {
+      const loc = r.headers.get('location');
+      if (!loc) return { r, j: {} };
+      if (hop >= MAX_REDIRECT_HOPS) throw new Error(`too many redirects (> ${MAX_REDIRECT_HOPS})`);
+      const next = new URL(loc, current); // relative Locations resolve against the current hop
+      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error(`redirect to a non-http(s) URL refused: ${next.protocol}`);
+      current = String(next);
+      const headers = {};
+      for (const [k, v] of Object.entries(hopOpts.headers || {})) { if (!STRIP_ON_REDIRECT.test(k)) headers[k] = v; }
+      hopOpts = { ...hopOpts, headers };
+      continue;
     }
-    buf = Buffer.concat(chunks);
-  } else {
-    buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length > maxBytes) throw new Error(`response too large (> ${maxBytes} bytes)`);
+    let buf;
+    if (r.body && typeof r.body.getReader === 'function') {
+      const reader = r.body.getReader();
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.length;
+        if (total > maxBytes) { try { await reader.cancel(); } catch { /* already cancelled */ } throw new Error(`response too large (> ${maxBytes} bytes)`); }
+        chunks.push(value);
+      }
+      buf = Buffer.concat(chunks);
+    } else {
+      buf = Buffer.from(await r.arrayBuffer());
+      if (buf.length > maxBytes) throw new Error(`response too large (> ${maxBytes} bytes)`);
+    }
+    let j = {};
+    try { j = JSON.parse(buf.toString('utf8')); } catch { j = {}; }
+    return { r, j };
   }
-  let j = {};
-  try { j = JSON.parse(buf.toString('utf8')); } catch { j = {}; }
-  return { r, j };
 }
 
 // per-protocol auth: anthropic wants x-api-key (+ version header), google wants
@@ -634,7 +686,8 @@ wss.on('connection', (ws) => {
       return;
     }
     if (msg.type === 'open') {
-      const { tabId, cwd, sessionPath, model, thinking, name } = msg;
+      const { tabId, cwd, model, thinking, name } = msg;
+      let sessionPath = msg.sessionPath; // let-bound: the TOCTOU fix below replaces a symlink path with its verified realpath
       // pi runs inside a registered project (or HOME) — same boundary as the file browser
       if (cwd && !knownProject(cwd) && path.resolve(cwd) !== path.resolve(HOME)) {
         ws.send(JSON.stringify({ type: 'open-denied', tabId }));
@@ -662,6 +715,10 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({ type: 'open-denied', tabId, reason: 'sessionPath outside sessions dir' }));
           return;
         }
+        // v1.4.2 review M8 (TOCTOU): the realpath check verified `real`, but the RAW string
+        // went to the child — a symlink swapped between this check and the spawn would make
+        // pi follow it outside the sessions root. The verified path IS what we hand over.
+        sessionPath = real;
       }
       // F20 (v1.3.5 audit): an open WITHOUT an explicit model used to bypass every
       // default-provider gate entirely (prov stayed null → no disabled check, no key
@@ -1250,9 +1307,13 @@ async function hProvidersTest(req, res, u) {
 }
 
 async function hRouting(req, res, u) {
-    const routing = loadRouting();
+    // v1.4.2 review M13: `loadRouting()` used to run BEFORE the body arrived, so two
+    // concurrent saves both based their edits on the same on-disk snapshot and the slower
+    // response silently overwrote the faster one's chains / provider flags / cooldowns.
+    // Every other config handler reads after `await readBody`; this one now does too.
     if (req.method === 'POST') {
       const body = await readBody(req);
+      const routing = loadRouting();
       if (Array.isArray(body.chains)) routing.chains = body.chains.filter((c) => Array.isArray(c) && c.every((x) => typeof x === 'string' && x.includes('/'))); // a malformed chain would only explode at failover time
       if (body.providers && typeof body.providers === 'object') {
         for (const [name, meta] of Object.entries(body.providers)) {
@@ -1274,6 +1335,9 @@ async function hRouting(req, res, u) {
       }
       saveRouting(routing);
     }
+    // the GET response reads the file fresh: after a POST it sees the state that was just
+    // saved (and any concurrent change), never a stale pre-body snapshot (review M13)
+    const routing = loadRouting();
     const models = readJson(PI_MODELS) || { providers: {} };
     const names = [...new Set([...Object.keys(models.providers || {}), ...Object.keys(routing.providers)])];
     const providers = names.map((name) => {
@@ -1650,7 +1714,11 @@ async function hEnv(req, res, u) {
 // event loop and blow out memory, while the neighbouring export path has had a cap all
 // along. Refuse before reading, and cap the returned entry count so even a file under the
 // byte limit cannot produce an unbounded reply.
-const MAX_IMPORT_BYTES = 100 * 1000 * 1000;
+// v1.4.2 review M12: 100 MB of JSON in memory is a 200-400 MB heap spike on a request that
+// also stalls HTTP and the WS stream; and the entry cap truncates anything past 20k rows
+// anyway, so a file that big was never usable in the panel. 25 MB keeps every real session
+// and bounds the worst-case read.
+const MAX_IMPORT_BYTES = 25 * 1000 * 1000;
 const MAX_IMPORT_ENTRIES = 20000;
 async function hImport(req, res, u, m) {
     const imp = IMPORT_SOURCES[m[1]];
@@ -1659,6 +1727,17 @@ async function hImport(req, res, u, m) {
       const roots = [imp.root, ...(imp.roots ? imp.roots() : [])].filter(Boolean);
       if (!f0 || (roots.length && !roots.some((r) => realContains(r, f0)))) return json(res, 400, { error: 'bad path' });
       if (!roots.length && !(f0 || '').startsWith('opencode://')) return json(res, 400, { error: 'bad path' });
+      // v1.4.2 review M12: "root = HOME" made every file under the user's home readable
+      // through the aider importer, while its list() only ever returns the two aider history
+      // files per directory. Hold the aider importer to the exact file names its own list
+      // produces — the import surface is the two histories, not the home directory. The gate
+      // keys on the importer NAME, not on how many roots happen to be registered: with one
+      // registered project the roots array grew and the old condition silently disabled the
+      // check (caught by this wave's own lock run in the full suite).
+      if (m[1] === 'aider') {
+        const base = path.basename(path.resolve(String(f0)));
+        if (!['.aider.chat.history.md', '.aider.history.md'].includes(base)) return json(res, 400, { error: 'aider 导入只接受 .aider.chat.history.md / .aider.history.md' });
+      }
       // P3-12: read the RESOLVED target (a swapped link cannot redirect the import)
       const f = String(f0).startsWith('opencode://') ? f0 : (roots.map((r) => resolveInside(r, f0)).find(Boolean) || f0);
       if (!String(f).startsWith('opencode://')) {
@@ -1831,12 +1910,26 @@ async function hMcpInstall(req, res, u) {
     const bridge = path.join(srcDir, 'mcp-bridge.js');
     if (!fs.existsSync(bridge)) return json(res, 404, { error: 'bridge file missing' });
     const destDir = path.join(HOME, '.pi', 'agent', 'extensions', 'mcp-bridge');
-    fs.mkdirSync(destDir, { recursive: true });
+    const parent = path.dirname(destDir);
+    // v1.4.2 review M10: the install used to overwrite the LIVE extension in place — entry,
+    // package.json, then deps — so a copy/npm failure mid-way left a previously-working
+    // extension half-installed. It is now a directory-level transaction: everything is built
+    // in a sibling staging dir and swapped in with renames, the same shape the cron lock and
+    // the Tauri runtime swap use. A symlink/junction at the destination is refused outright —
+    // the swap would otherwise write through it to wherever it points.
+    try {
+      const destStat = fs.lstatSync(destDir);
+      if (destStat.isSymbolicLink()) return json(res, 400, { error: `安装目标 ${destDir} 是符号链接/junction，拒绝写入（先手动移除它）` });
+    } catch { /* does not exist yet — the normal clean-machine path */ }
+    fs.mkdirSync(parent, { recursive: true });
+    const stage = path.join(parent, `.mcp-bridge-stage-${process.pid}-${Date.now()}`);
+    fs.rmSync(stage, { recursive: true, force: true });
+    fs.mkdirSync(stage, { recursive: true });
     // pi discovers a subdirectory extension only via its index entry (dist/core/extensions/loader.js
     // resolveExtensionEntries: index.ts | index.js) — installing it under any other name returns
     // ok:true while the engine finds nothing
-    fs.copyFileSync(bridge, path.join(destDir, 'index.js'));
-    fs.copyFileSync(path.join(srcDir, 'package.json'), path.join(destDir, 'package.json'));
+    fs.copyFileSync(bridge, path.join(stage, 'index.js'));
+    fs.copyFileSync(path.join(srcDir, 'package.json'), path.join(stage, 'package.json'));
     // v1.4.1 review #2 follow-up: the bridge imports a sibling module (the cmd quoting helper).
     // An extension is loaded from ITS OWN directory, so copying only the entry left
     // `import './mcp-cmdline.js'` unresolvable — pi's loader then threw ERR_MODULE_NOT_FOUND
@@ -1848,8 +1941,11 @@ async function hMcpInstall(req, res, u) {
     const relDeps = [...entrySrc.matchAll(/(?:import|export)[^'"`]*?from\s*['"](\.[^'"]+)['"]/g)].map((m) => m[1]);
     for (const dep of relDeps) {
       const from = path.join(srcDir, dep);
-      if (!fs.existsSync(from)) return json(res, 500, { ok: false, error: `bridge dependency missing: ${dep}` });
-      const to = path.join(destDir, dep);
+      if (!fs.existsSync(from)) {
+        fs.rmSync(stage, { recursive: true, force: true });
+        return json(res, 500, { ok: false, error: `bridge dependency missing: ${dep}` });
+      }
+      const to = path.join(stage, dep);
       fs.mkdirSync(path.dirname(to), { recursive: true });
       fs.copyFileSync(from, to);
     }
@@ -1857,14 +1953,20 @@ async function hMcpInstall(req, res, u) {
     // The packaged runtime bundles it — copy across and skip npm entirely on clean machines.
     const bundledTypebox = path.join(__dirname, 'node_modules', 'typebox');
     if (fs.existsSync(bundledTypebox)) {
-      // F37 (v1.3.5 audit): rm-then-cp left the bridge with NO typebox if the copy
-      // failed mid-install (and broke a live extension). Stage first, swap after.
-      const destBox = path.join(destDir, 'node_modules', 'typebox');
-      const tmpBox = destBox + '.new';
-      fs.rmSync(tmpBox, { recursive: true, force: true });
-      fs.cpSync(bundledTypebox, tmpBox, { recursive: true });
-      fs.rmSync(destBox, { recursive: true, force: true });
-      fs.renameSync(tmpBox, destBox);
+      fs.cpSync(bundledTypebox, path.join(stage, 'node_modules', 'typebox'), { recursive: true });
+    }
+    // swap: old → grave, staging → live. A rename failure restores the old tree, so a
+    // previously-working extension is never left half-installed (M10).
+    const grave = path.join(parent, `.mcp-bridge-old-${process.pid}-${Date.now()}`);
+    let hadOld = false;
+    try {
+      if (fs.existsSync(destDir)) { fs.renameSync(destDir, grave); hadOld = true; }
+      fs.renameSync(stage, destDir);
+      fs.rmSync(grave, { recursive: true, force: true });
+    } catch (e) {
+      fs.rmSync(stage, { recursive: true, force: true });
+      if (hadOld) { try { fs.renameSync(grave, destDir); } catch { /* the grave stays for manual recovery */ } }
+      return json(res, 500, { ok: false, dest: destDir, error: `安装交换失败（${(e && e.message) || e}）${hadOld ? '，原扩展已恢复' : ''}` });
     }
     const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
     if (!hasDep) {

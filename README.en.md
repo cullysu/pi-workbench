@@ -24,12 +24,12 @@ pi-workbench does not fork or modify pi. It drives `pi --mode rpc` (stdin/stdout
 - **Single-file server**: `server.mjs` (~1900 lines) = 42 named handlers + one declarative route table + a single dispatch loop; auth and 404 live in exactly one place
 - **All logic lives in nine `lib/` modules**: factories with explicit ctx injection, and **every factory verifies its wiring contract at boot** (a missing dependency crashes startup loudly instead of silently dying at 9am); IO collapses to four primitives in `lib/io.mjs`
 - **Secure defaults**: per-boot random token + CSP nonce (no `unsafe-inline` scripts), DOMPurify fail-closed sanitization, `path.relative` + realpath containment (symlinks/junctions cannot escape the project root), Origin checks, provider URLs forced to http(s) with capped responses, atomic config writes (tmp+rename, corrupt files preserved for forensics), CRC-checked backup zips with extraction limits, cron job ID allowlist
-- **Four verification layers** (all committed and re-runnable): repo-wide `eslint` 0/0, 23 API tests + a 47-route acceptance sweep (`scripts/route-sweep.py`), integration probes (`scripts/ws-probe.mjs`: a real pi child through the full WS chain), and a browser-level probe (`scripts/ui-probe.mjs`: headless Chromium asserts replay bubbles, all 17 panels, zero console errors)
+- **Four verification layers** (all committed and re-runnable): repo-wide `eslint` 0/0, **81 Node tests** (6 suites) + a 51-route acceptance sweep (`scripts/route-sweep.py`), integration probes (`scripts/ws-probe.mjs`: a real pi child through the full WS chain), and a browser-level probe (`scripts/ui-probe.mjs`: headless Chromium asserts replay bubbles, all 17 panels, zero console errors)
 - **Five-channel builds**: every push to main produces five installers — Windows Electron NSIS, Windows Tauri NSIS, Linux AppImage (boot-tested in xvfb: HTTP 200 plus a /api/kernel check that the bundled pi answers), macOS dmg arm64 + x64; assembly writes a sha256 manifest the shell verifies before spawning (a broken install fails loudly at boot), and a CycloneDX SBOM artifact rides along
 
 ## Install
 
-Download the installer for your platform from [Releases](../../releases) (1.3.2 shown):
+Download the installer for your platform from [Releases](../../releases) (1.4.2 shown):
 
 | Platform | File | Which one |
 |---|---|---|
@@ -80,9 +80,9 @@ npx tauri build --locked  # Tauri NSIS installer (Windows only; run from tauri/ 
 npm run dist              # Electron NSIS installer (artifact in dist_electron/)
 ```
 
-> **Browser dev mode works out of the box now.** When no desktop shell supplies `PIWB_TOKEN`, the server embeds a per-launch token in the served page and listens on `127.0.0.1` only; both desktop shells pass their own `PIWB_TOKEN` so the page never carries one. If another local account on this machine should not hold that admin credential, start with `PIWB_EMBED_TOKEN=0 npm start` — the token then lives only in the 0600 `~/.pi-workbench/token.json`.
+> **Browser dev mode (v1.4.3: the token is NO LONGER embedded by default).** When no desktop shell supplies `PIWB_TOKEN`, the server refuses to put the admin token inside the served page — any local process (any other user account on a shared machine) could GET "/" and read it, then call `/api/term/exec` (v1.4.2 review H2). Choose explicitly for development: `PIWB_EMBED_TOKEN=1 npm start` (single-user machine, token ships in the HTML), or `PIWB_EMBED_TOKEN=0 npm start` (token lives only in the 0600 `~/.pi-workbench/token.json`, headless/tooling). With neither set, the boot log tells you exactly what to set. The desktop shells are unaffected: their token travels out-of-band via `PIWB_TOKEN` and never touches the page.
 >
-> Before v1.3.9 this section told you to set `PIWB_EMBED_TOKEN=1` or the UI would 403. That was an unmet documented prerequisite, not a deliberate default.
+> Before v1.3.9 this section told you to set `PIWB_EMBED_TOKEN=1` or the UI would 403. v1.3.9 flipped the default to "embed"; v1.4.3 flips it back to "off unless you ask" on the security review's finding. Not flip-flopping for its own sake — reviewers flagged both directions.
 
 > A distributable installer also needs the bundled `pkg-runtime.zip` (`scripts/make-runtime.mjs`, packed from `pkg-build/`); the CI workflow is the single source of truth for the whole assembly. The Tauri bundle is a thin shell that downloads/uses the same Node runtime — it is **not** a ~10 MB self-contained binary, so compare the published asset sizes in the release notes instead of assuming a number.
 

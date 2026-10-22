@@ -80,6 +80,29 @@ const key = async (k) => {
 const KEYCODE = { Escape: 27, ArrowDown: 40, ArrowUp: 38, Home: 36, End: 35, Enter: 13, Space: 32 };
 
 const kids = [];
+// v1.4.2 review E5: shared scratch-dir cleanup — the watchdog's process.exit(2) skips
+// finally, so a hung run used to leave a scratch HOME/project/chrome-profile behind.
+const TMP_DIRS = [];
+let tmpCleaned = false;
+function cleanupTmpDirs() {
+  if (tmpCleaned) return;
+  tmpCleaned = true;
+  if (!TMP_DIRS.length) return;
+  const retryUntil = Date.now() + 3000;
+  const pending = TMP_DIRS.slice();
+  while (pending.length) {
+    for (let i = pending.length - 1; i >= 0; i--) {
+      try { fs.rmSync(pending[i], { recursive: true, force: true }); pending.splice(i, 1); } catch { /* windows may hold a handle — retry below */ }
+    }
+    if (!pending.length || Date.now() > retryUntil) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); // sync sleep (no timers inside exit)
+  }
+  for (const d of pending) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* give up */ } }
+}
+process.on('exit', cleanupTmpDirs);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { cleanupTmpDirs(); process.exit(1); });
+}
 setTimeout(() => { console.log('GLOBAL WATCHDOG: 240s cap hit'); process.exit(2); }, 240000).unref();
 
 try {
@@ -89,6 +112,7 @@ try {
 
   const home = fs.mkdtempSync(path.join(USERTMP, 'piwb-a11y-'));
   const proj = fs.mkdtempSync(path.join(USERTMP, 'piwb-a11yp-'));
+  TMP_DIRS.push(home, proj);
   const cfgDir = path.join(home, '.pi-workbench');
   fs.mkdirSync(cfgDir, { recursive: true });
   fs.mkdirSync(path.join(home, '.pi', 'agent'), { recursive: true });
@@ -105,6 +129,9 @@ try {
   if (!(await waitPort(PORT, 15000))) throw new Error('server never listened');
 
   const profile = fs.mkdtempSync(path.join(USERTMP, 'piwb-a11yc-'));
+  // v1.4.2 review E5: this probe was also missed by the v1.4.1 cleanup wave — the watchdog's
+  // process.exit(2) skips finally, so a hung run left a scratch HOME/project/chrome-profile.
+  TMP_DIRS.push(profile);
   const chromeLog = fs.openSync(path.join(USERTMP, 'ui-a11y-chrome.log'), 'w');
   const chrome = spawn(CHROME, [
     '--headless=new', '--remote-debugging-port=' + CDP_PORT,
@@ -276,4 +303,5 @@ try {
 } finally {
   for (const k of kids) { try { k.kill(); } catch { /* gone */ } }
   await sleep(300);
+  cleanupTmpDirs(); // same function as the exit hooks — one cleanup path (v1.4.2 review E5)
 }

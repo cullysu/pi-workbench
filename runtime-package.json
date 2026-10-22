@@ -1,6 +1,6 @@
 {
   "name": "pi-workbench-runtime",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "private": true,
   "description": "Pinned runtime dependency set shipped inside pi-workbench installers",
   "dependencies": {

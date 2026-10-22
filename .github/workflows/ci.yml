@@ -34,6 +34,18 @@ jobs:
         run: node scripts/assert-version.mjs
       - name: Dependency audit (root tree)
         run: npm audit --omit=dev --audit-level=high
+      # v1.4.2 review H4: the audits above never looked at the dev tree, yet Electron,
+      # Playwright and the MCP SDK execute on every CI run and during every local build.
+      # The full audit currently reports 19 advisories (5 high) — undici via
+      # @earendil-works/pi-coding-agent among them — with NO clean fix available: the
+      # suggested `audit fix --force` would downgrade pi to a version that does not exist.
+      # So this is surfaced as a gate that reports and fails openly (continue-on-error,
+      # so the release pipeline is not blocked by an advisory we cannot fix from here)
+      # instead of being silently absent. Tighten it to a hard gate once pi ships an
+      # undici that clears the highs.
+      - name: Dependency audit (dev tree — report-only until pi clears its undici advisories)
+        run: npm audit --audit-level=high
+        continue-on-error: true
       - name: Dependency audit (shipped runtime tree)
         run: |
           rt="$RUNNER_TEMP/piwb-audit"
@@ -49,6 +61,12 @@ jobs:
           tool: cargo-audit
       - name: Run cargo audit
         run: cargo audit --file tauri/Cargo.lock # the committed lock IS the audited AND built tree — no build-time updates
+      # v1.4.2 review (E2): 13 Rust unit tests existed and CI never ran them. tauri_build
+      # only needs the manifest, so the tests compile without pkg-runtime.zip on a clean
+      # checkout (verified locally with --locked --offline).
+      - name: Rust unit tests (tauri shell)
+        run: cargo test --locked --offline
+        working-directory: tauri
 
   test:
     timeout-minutes: 25
@@ -63,7 +81,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci --omit=dev
+      # v1.4.2 review (E1): --omit=dev skipped @earendil-works/pi-coding-agent, so the one
+      # test that runs a REAL pi child (ws adopt) skipped on every matrix runner; the whole
+      # suite's deepest coverage only existed in the e2e job. Full install now.
+      - run: npm ci
       - name: Syntax check
         run: |
           node --check server.mjs

@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -537,12 +538,13 @@ test('update/check reports the current version alongside the latest tag', async 
   if (!r.data.error) assert.ok('updateAvailable' in r.data, 'the online payload carries updateAvailable');
 });
 
-// P2-6 (v1.3.9 review): `npm start` — a plain `node server.mjs` with NEITHER PIWB_TOKEN
-// nor PIWB_EMBED_TOKEN — served a page with no credentials, so every /api call and the WS
-// upgrade answered 403 and the documented browser workflow was dead. The default is now
-// "embed"; PIWB_EMBED_TOKEN=0 is the explicit opt-out. Both ends are asserted here because
-// a default nobody tests is how this broke in the first place.
-test('plain `node server.mjs` serves a usable page, and PIWB_EMBED_TOKEN=0 opts out', async () => {
+// v1.4.2 review H2 (revisits P2-6 of v1.3.9): a plain `node server.mjs` with NO token
+// variable must NOT ship the admin token inside the served HTML — any local process (any
+// other user account on a shared machine) could GET "/" and read it, then call
+// /api/term/exec. Embedding is now an explicit PIWB_EMBED_TOKEN=1 opt-in; the bare boot
+// tells you so on stdout and serves a page that explains the same thing. Every branch is
+// asserted because a default nobody tests is how this inverted once already.
+test('bare `node server.mjs` keeps the token private; embedding is an explicit opt-in', async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-embed-'));
   const port = await new Promise((resolve) => {
     const srv = net.createServer();
@@ -570,21 +572,25 @@ test('plain `node server.mjs` serves a usable page, and PIWB_EMBED_TOKEN=0 opts 
   try {
     const page = await waitUp();
     const html = await page.text();
-    const m = html.match(/__API_TOKEN = "([0-9a-f]+)"/);
-    assert.ok(m, 'the default mode embeds a token in the served page');
-    const withToken = await fetch(base + '/api/config', { headers: { 'x-api-token': m[1] } });
-    assert.equal(withToken.status, 200, 'the embedded token is accepted by /api/*');
-    const withoutToken = await fetch(base + '/api/config');
-    assert.equal(withoutToken.status, 403, 'and it is still an auth boundary, not open access');
+    assert.equal(/__API_TOKEN = "/.test(html), false, 'the DEFAULT keeps the admin token out of the served HTML');
+    // the page still loads (the panel is served), and the auth boundary holds
+    assert.ok(html.includes('<script'), 'the panel itself is still served');
+    const noToken = await fetch(base + '/api/config');
+    assert.equal(noToken.status, 403, 'and it is still an auth boundary, not open access');
   } finally {
     await stop(child);
   }
 
-  child = boot({ PIWB_EMBED_TOKEN: '0' });
+  child = boot({ PIWB_EMBED_TOKEN: '1' });
   try {
     const page = await waitUp();
     const html = await page.text();
-    assert.equal(/__API_TOKEN = "/.test(html), false, 'PIWB_EMBED_TOKEN=0 keeps the token out of the page');
+    const m = html.match(/__API_TOKEN = "([0-9a-f]+)"/);
+    assert.ok(m, 'PIWB_EMBED_TOKEN=1 embeds a token in the served page');
+    const withToken = await fetch(base + '/api/config', { headers: { 'x-api-token': m[1] } });
+    assert.equal(withToken.status, 200, 'the embedded token is accepted by /api/*');
+    const withoutToken = await fetch(base + '/api/config');
+    assert.equal(withoutToken.status, 403, 'and it is still an auth boundary, not open access');
   } finally {
     await stop(child);
   }
@@ -675,4 +681,105 @@ test('MCP save refuses a non-string env value and an oversized args list', async
   assert.equal(long.status, 400, 'an 8KB+ argument must be refused');
   const ok = await req('/api/mcp/config', { mcpServers: { s: { command: 'node', args: ['-e', '1'], env: { A: 'b' } } } });
   assert.equal(ok.status, 200, 'a legitimate server must still save');
+});
+
+// v1.4.2 review M13: /api/routing used to load the on-disk snapshot BEFORE the request body
+// arrived, so of two concurrent saves the slower one clobbered the faster one with a stale
+// read. Here the first request's body is held half-sent while the second completes; the
+// final state must still contain the second save's chains.
+test('two overlapping routing saves do not lose the completed one behind a stale snapshot', async () => {
+  const r2 = req('/api/routing', { chains: [['okB/m2']] });
+  const body1 = JSON.stringify({ providers: { txprov: { priority: 7 } } });
+  await new Promise((resolve, reject) => {
+    const rq = http.request(
+      { host: '127.0.0.1', port: PORT, path: '/api/routing', method: 'POST', headers: { 'content-type': 'application/json', 'x-api-token': TOKEN, 'content-length': Buffer.byteLength(body1) } },
+      (res) => { res.resume(); res.on('end', resolve); res.on('error', reject); },
+    );
+    rq.on('error', reject);
+    rq.write(body1.slice(0, Math.floor(body1.length / 2))); // headers + half the body: readBody is now pending
+    setTimeout(() => { rq.end(body1.slice(Math.floor(body1.length / 2))); }, 150);
+  });
+  await r2;
+  const final = await req('/api/routing');
+  assert.deepEqual(final.data.chains, [['okB/m2']], 'the completed save must not be clobbered by the slow one');
+  assert.equal(final.data.providers.find((p) => p.name === 'txprov')?.priority, 7, 'and the slow save still applies its own edit');
+});
+
+// v1.4.2 review M7: Node's default fetch replays the caller's CUSTOM auth headers on a
+// cross-host 302 — undici itself strips `authorization`, but an `x-api-key` (anthropic) or
+// `x-goog-api-key` (google) went across VERBATIM (proven on this machine: the collector read
+// `x-api-key: sk-leak-123` behind a 302). The provider probe now follows redirects manually
+// and strips credential headers on every hop. Two parts, because a lock that can stay green
+// when the leak returns is not a lock: first a positive control proving the credential IS
+// sent when no redirect is involved, then the redirect case proving it never arrives.
+test('a provider probe does not leak its credential across a redirect', async () => {
+  let seenAuth = null;
+  let directSeenAuth = null;
+  const collector = http.createServer((req, res) => {
+    const auth = req.headers['x-api-key'] || req.headers.authorization || null;
+    if (req.url.startsWith('/direct')) directSeenAuth = auth; else seenAuth = auth;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: [{ id: 'm1' }], choices: [{ message: { role: 'assistant', content: 'ok' } }] }));
+  });
+  await new Promise((r) => collector.listen(0, '127.0.0.1', r));
+  const p2 = collector.address().port;
+  const redirector = http.createServer((req, res) => {
+    res.writeHead(302, { location: `http://127.0.0.1:${p2}${req.url}` });
+    res.end();
+  });
+  await new Promise((r) => redirector.listen(0, '127.0.0.1', r));
+  const p1 = redirector.address().port;
+  try {
+    // positive control — same credential, NO redirect: it must reach the endpoint
+    const direct = await req('/api/provider/save', {
+      name: 'directprov',
+      provider: { baseUrl: `http://127.0.0.1:${p2}/direct`, api: 'anthropic-messages', apiKey: 'sk-leak-123', models: [{ id: 'm1' }] },
+    });
+    assert.equal(direct.status, 200);
+    await req('/api/routing/probe', { model: 'directprov/m1' });
+    assert.equal(directSeenAuth, 'sk-leak-123', 'the probe DOES attach x-api-key when no redirect is involved');
+    // the leak case — same credential behind a 302: it must NOT arrive
+    const saved = await req('/api/provider/save', {
+      name: 'leakprov',
+      provider: { baseUrl: `http://127.0.0.1:${p1}`, api: 'anthropic-messages', apiKey: 'sk-leak-123', models: [{ id: 'm1' }] },
+    });
+    assert.equal(saved.status, 200, 'the redirecting provider must save cleanly');
+    await req('/api/routing/probe', { model: 'leakprov/m1' });
+    assert.equal(seenAuth, null, `the redirected hop must not carry the credential (got ${seenAuth})`);
+  } finally {
+    collector.close(); redirector.close();
+  }
+});
+
+// v1.4.2 review M10: a repeated install must be idempotent — no staging/grave siblings left
+// behind, and the installed extension still matches the shipped source file for file.
+test('a repeated MCP install is idempotent and leaves no swap debris', async () => {
+  await req('/api/mcp/install', {});
+  const r = await req('/api/mcp/install', {});
+  assert.equal(r.status, 200);
+  const extDir = path.join(tmpHome, '.pi', 'agent', 'extensions');
+  const debris = fs.readdirSync(extDir).filter((n) => n.startsWith('.mcp-bridge'));
+  assert.deepEqual(debris, [], `no staging/grave siblings may survive: ${debris.join(', ')}`);
+  const installed = path.join(extDir, 'mcp-bridge', 'index.js');
+  assert.equal(fs.readFileSync(installed, 'utf8'), fs.readFileSync(path.join(ROOT, '..', 'extensions', 'mcp-bridge.js'), 'utf8'));
+  assert.equal(fs.existsSync(path.join(extDir, 'mcp-bridge', 'mcp-cmdline.js')), true, 'the sibling module is still shipped');
+});
+
+// v1.4.2 review M12: the import byte cap is 25 MB now (a 100 MB JSONL read pinned the event
+// loop and blew the heap), and the aider importer accepts exactly its two history files —
+// "root = HOME" must not make every home file importable.
+test('aider import: oversized files answer 413 and non-history files are refused', async () => {
+  const notes = path.join(tmpHome, 'notes.txt');
+  fs.writeFileSync(notes, 'private text');
+  const wrongName = await req('/api/import/aider/read?path=' + encodeURIComponent(notes));
+  assert.equal(wrongName.status, 400, 'a non-history home file must be refused even though HOME is the root');
+  const big = path.join(tmpHome, '.aider.chat.history.md');
+  fs.writeFileSync(big, Buffer.alloc(25 * 1000 * 1000 + 1, 0x61));
+  const r = await req('/api/import/aider/read?path=' + encodeURIComponent(big));
+  assert.equal(r.status, 413, 'a file past the 25 MB cap must answer 413 before it is read');
+  const ok = path.join(tmpHome, '.aider.history.md');
+  fs.writeFileSync(ok, '#### user\nhello from aider\n');
+  const good = await req('/api/import/aider/read?path=' + encodeURIComponent(ok));
+  assert.equal(good.status, 200, 'a real history file still imports');
+  assert.ok(good.data.entries.length >= 1, 'and its turns come through');
 });

@@ -2,6 +2,135 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.4.3 — 2026-10-22
+
+### Fixed (from the v1.4.2 independent review — 21 findings: 4 high, 11 medium, 6 engineering; every one verified against `61d05ed` before it was touched)
+
+**A prompt could travel to a tab the user had already left (review H1):** `submitPrompt`
+awaits `openPiSession()` — which itself awaits a model prefetch — and then read the GLOBAL
+`state.tabId`, so a draft typed in project A could be sent to whatever tab project B had just
+opened and run its agent tools in B's working directory. The prompt's destination is now
+captured before the first await and re-verified after it; the prefetch bails if the project
+moved mid-flight. Refusals keep the draft and attachment exactly where they were.
+
+**`npm start` shipped the admin token inside the served HTML by default (review H2):** any
+local process — any other user account on a shared machine — could GET "/" and read it, then
+call `/api/term/exec`. This is the v1.3.9 "embed by default" decision inverted back: the
+default now keeps the token out of the page (the boot log and the README say exactly what to
+set), embedding is an explicit `PIWB_EMBED_TOKEN=1` for the single-user case, and the API test
+asserts BOTH directions. The desktop shells were never affected; their token travels
+out-of-band via `PIWB_TOKEN`.
+
+**A provider saved with `{"models":[null]}` poisoned every consumer (review H3):** the save
+path validated the array but not its elements; failover's `providerCooled` then threw
+`Cannot read properties of null (reading 'id')` — reproduced through the real save path before
+the fix, taking the routing page, cooldown checks and cron down with it. Every model row is now
+validated (object + non-empty string `id`) at the one write path all three writers share.
+
+**CI audited only the production dependency tree (review H4):** Electron, Playwright and the
+MCP SDK execute during every CI run and every local build, yet both audit steps used
+`--omit=dev`. The full audit reproduces the reviewer's count exactly: **19 advisories (5 high,
+12 moderate, 2 low)**, dominated by undici advisories reachable through
+`@earendil-works/pi-coding-agent`, with NO clean fix (`audit fix --force` would downgrade pi to
+a version that does not exist). The dev-tree audit now runs as a gate that reports and fails
+openly (`continue-on-error` only because the fix is not ours to make), instead of being absent.
+
+**Two lifecycle semantics for one user intent (review M5):** clicking "new session" on another
+project silently CLOSED the running tab, while an ordinary project switch detached it to the
+background tray. `openPiSession` now detaches in both paths — the running session survives in
+the tray with its orphan TTL, and the composer moves on.
+
+**Front-end races between an old async response and newer state (review M6):** image attach
+used a shared `FileReader.onload` with no ordering (a stale read could overwrite a newer
+pending image or resurrect one just removed — reads are now sequence-gated and removal bumps
+the sequence); model switching kept ONE `pendingSetModel` slot (two quick switches let the
+first ack revert the second's selection — pendings are now keyed per model, an out-of-order
+failure only reverts its own switch and never a newer selection).
+
+**Provider probes leaked credentials through redirects (review M7):** Node's default fetch
+replays custom auth headers on a cross-host 302. On this machine the reviewer's claim
+reproduced exactly: an `x-api-key` behind a 302 arrived at the redirect target
+(`authorization` is stripped by undici itself — the custom-header case is the real one).
+Provider probes now follow redirects manually (3-hop budget, http(s) only) and strip
+`authorization` / `x-api-key` / `x-goog-api-key` / cookies on every hop; the lock ships with a
+POSITIVE control proving the credential is still sent when no redirect is involved, so the
+gate cannot stay green while the leak returns. The loopback/link-local policy is also explicit
+now: local targets stay allowed by default (ollama/LM Studio are first-class), and a shared
+host can forbid them with `PIWB_DISALLOW_LOCAL_URLS=1`.
+
+**Session-path TOCTOU (review M8):** the `open` frame verified `realpathSync(sessionPath)`
+and then handed the RAW string to the spawned pi — a symlink swapped between check and spawn
+exits the sessions root. The verified path is what the child gets, in both `server.mjs` and
+`sessionTree` (which checked `real` but read the raw path).
+
+**Provider writes are fail-closed when the snapshot cannot be trusted (review M9):** the
+transaction snapshot treated every read error as "file absent", so a transient `EACCES` /
+`EISDIR` on routing.json would end in a rollback that UNLINKED a real file. ENOENT stays
+"absent"; anything else refuses the save before the first byte. (Crash-safe cross-file
+journaling stays queued — this closes the misread, not the power-loss window.)
+
+**MCP install is a directory-level transaction (review M10):** the install used to overwrite
+the live extension entry-by-entry, so a failure mid-way left a previously-working extension
+half-installed. It now builds a sibling staging tree and swaps by rename (old → grave, staging
+→ live, restore on failure), refuses a symlink/junction at the destination, and a repeated
+install is idempotent with no swap debris.
+
+**A failed import rename left a credentials-bearing `.imp-*` file behind (review M11):** the
+temp file carries the backup's plaintext keys; the failure path now deletes the current
+entry's temp file before rolling back.
+
+**Import surface tightened (review M12):** the byte cap drops from 100 MB to **25 MB** (a
+100 MB JSONL read is a 200–400 MB heap spike that stalls HTTP and WS; the 20k-entry cap made
+such files useless in the panel anyway), and the aider importer no longer accepts an arbitrary
+home-directory file — exactly its two history names per directory. The gate keys on the
+importer, not on how many roots happen to be registered (the first version of this fix
+silently disabled itself with one project registered — its own lock caught that in the full
+suite).
+
+**`/api/routing` concurrent-save clobber (review M13):** the handler loaded the on-disk
+snapshot BEFORE awaiting the body, so two overlapping saves let the slower one overwrite the
+faster one's chains/provider flags. The read now happens after the body; a lock drives two
+real overlapping requests (one held half-sent) and asserts the completed save survives.
+
+**Tauri runtime swap no longer deletes before it renames (review M14):** the "atomic swap"
+removed the live directory, so a rename refused by antivirus/locks/permissions left NO runtime
+on disk. The old tree now moves aside under a grave name, the staging tree renames in, and a
+failed swap restores the old runtime — asserted by two Rust tests (13 total, all passing).
+
+### Engineering and release gates (reviews E1–E6)
+- **E1** — the three-OS test matrix ran `npm ci --omit=dev`, which skips
+  `@earendil-works/pi-coding-agent`: the suite's deepest test (ws adopt, a real pi child)
+  silently SKIPPED on every runner. Full install now.
+- **E2** — CI never ran the 13 Rust unit tests; `cargo test --locked --offline` is now a lint-job
+  step (compiles clean on a fresh checkout — tauri_build needs only the manifest).
+- **E4** — `assert-version` read the lockfiles through a top-level line anchor, so the
+  `packages[""]` copy could drift while the gate said "all manifests agree". **That exact
+  drift shipped in 1.4.2** (inner 1.4.0 beside top 1.4.2 — caught here, fixed, and the fixture
+  self-test now covers the inner copy).
+- **E5** — probe hygiene: `ui-probe` CDP calls get a 20s deadline and a screenshot path that
+  survives a non-ASCII repo location (`fileURLToPath` — the repo lives under `D:\下载\…`, and
+  the old undecoded `pathname` wrote shots to a mojibake sibling); `chat-e2e` and
+  `ui-a11y-probe` — the two probes the v1.4.1 cleanup wave missed — got the shared
+  exit/SIGINT/SIGTERM scratch-dir cleanup with a stretched retry for the killed-Chrome profile.
+- **E6** — README (zh+en), CONTRIBUTING: line counts, handler/route numbers, test counts and
+  the install sample no longer describe v1.3.2-era numbers (1300 lines / 23 tests / 47 routes →
+  measured current values), and the browser-dev-mode note tells the new default story.
+- **M9/E3 partial** — `EISDIR`-style snapshot misreads fail closed (above); full crash-safe
+  cross-file journaling (M9 core), the async scan split (M15) and the state-domain refactor
+  stay QUEUED with their reviewer caveats intact.
+
+### Verification (2026-10-22/23, Windows, every lock run red-first where noted)
+`npm test` **87/87** (was 81; +6: provider element validation ×2, routing race, redirect leak,
+MCP idempotence, aider cap) — the routing-race, redirect-leak, M9 and M11-adjacent locks were
+**observed failing against the pre-fix code** via single-file stash runs; the redirect lock's
+red run caught exactly the reviewer's leak (`got sk-leak-123`). `verify-audit-fixes.mjs`
+**126 PASS / 0 FAIL** (fixture updated for the hardened gate). `eslint .` clean.
+`route-sweep.py` **51 routes, 0 failures**. `cargo test --locked --offline` **13/13**.
+`assert-version` **all manifests agree on 1.4.3**. Probes: ws / failover / chat / ui /
+ui-contract / ui-a11y all ALL PASS; chat-e2e and ui-a11y verified to leave **zero** scratch
+directories. **Not run:** three-OS packaging, post-install launch smoke (#5/F50 — unchanged),
+and no dynamic exploitation of any reviewed item, matching the reviewer's own scope.
+
 ## 1.4.2 — 2026-10-22
 
 ### Fixed (from the v1.4.1 independent review — 11 items: 3 defects confirmed and fixed, 5 engineering gaps fixed, 3 accepted with reasons)

@@ -48,8 +48,23 @@ const checkAnchored = (file, anchor) => {
 checkJson('package.json');
 checkJson('runtime-package.json');
 checkJson('tauri/tauri.conf.json');
-checkAnchored('package-lock.json', /"name":\s*"pi-workbench",\r?\n\s*"version":\s*"([^"]+)"/);
-checkAnchored('runtime-package-lock.json', /"name":\s*"pi-workbench-runtime",\r?\n\s*"version":\s*"([^"]+)"/);
+// v1.4.2 review (E4): the lockfiles were checked with a line anchor on the TOP-LEVEL
+// name/version pair only. npm also keeps the same version in `packages[""]`, and that inner
+// copy drifted (1.4.0 next to a 1.4.2 top) while this gate still said "all manifests agree".
+// Locks are JSON: read BOTH copies.
+const checkLock = (file) => {
+  let doc;
+  try { doc = JSON.parse(read(file)); } catch (e) {
+    failures.push(`${file}: not valid JSON (${e.message})`);
+    return;
+  }
+  const top = doc.version;
+  if (top !== want) failures.push(`${file}: top-level ${top ?? '(none)'} != ${want}`);
+  const inner = doc.packages?.['']?.version;
+  if (inner !== want) failures.push(`${file}: packages[""] ${inner ?? '(none)'} != ${want}`);
+};
+checkLock('package-lock.json');
+checkLock('runtime-package-lock.json');
 checkAnchored('tauri/Cargo.toml', /^version\s*=\s*"([^"]+)"/m);
 checkAnchored('tauri/Cargo.lock', /name\s*=\s*"pi-workbench"\r?\nversion\s*=\s*"([^"]+)"/);
 

@@ -5,6 +5,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import http from 'node:http';
 import { createRequire } from 'node:module';
@@ -122,7 +123,7 @@ let chromeErr = '';
 chrome.stderr.on('data', (c) => { chromeErr = (chromeErr + c).slice(-4000); });
 chrome.on('exit', (code) => { if (!ws) console.error('chrome exited early (code ' + code + '):', chromeErr.slice(-600)); });
 
-const shots = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'ui-shots');
+const shots = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui-shots');
 fs.mkdirSync(shots, { recursive: true });
 
 let ws; // CDP websocket
@@ -130,8 +131,15 @@ let msgId = 0;
 const pending = new Map();
 const cdp = (method, params = {}, sessionId) => new Promise((resolve, reject) => {
   const id = ++msgId;
-  pending.set(id, { resolve, reject });
-  ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+  // v1.4.2 review E5: a per-request deadline — a CDP call that never answers used to hang
+  // the probe with nothing in the output (the unattributed one-off ui-probe failure)
+  const t = setTimeout(() => { pending.delete(id); reject(new Error(`cdp ${method} timed out`)); }, 20000);
+  pending.set(id, {
+    resolve: (v) => { clearTimeout(t); resolve(v); },
+    reject: (e) => { clearTimeout(t); reject(e); },
+  });
+  try { ws.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })); }
+  catch (e) { clearTimeout(t); pending.delete(id); reject(e); }
 });
 
 const evaluate = async (expr, sid) => {

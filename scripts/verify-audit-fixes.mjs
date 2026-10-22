@@ -732,8 +732,10 @@ const check = (name, ok, detail = '') => {
     put('package.json', { name: 'pi-workbench', version: '9.9.9' });
     put('runtime-package.json', { version: '9.9.9' });
     put('tauri/tauri.conf.json', { version: '9.9.9' });
-    put('package-lock.json', { name: 'pi-workbench', version: '9.9.9', lockfileVersion: 3 });
-    put('runtime-package-lock.json', { name: 'pi-workbench-runtime', version: '9.9.9', lockfileVersion: 3 });
+    // v1.4.2 review E4: the gate now reads BOTH lockfile copies (top + packages[""]), so the
+    // fixture must carry a consistent inner copy or the "consistent" case itself would fail
+    put('package-lock.json', { name: 'pi-workbench', version: '9.9.9', lockfileVersion: 3, packages: { '': { name: 'pi-workbench', version: '9.9.9' } } });
+    put('runtime-package-lock.json', { name: 'pi-workbench-runtime', version: '9.9.9', lockfileVersion: 3, packages: { '': { name: 'pi-workbench-runtime', version: '9.9.9' } } });
     put('tauri/Cargo.toml', '[package]\nname = "pi-workbench"\nversion = "9.9.9"\n');
     put('tauri/Cargo.lock', '[[package]]\nname = "pi-workbench"\nversion = "9.9.9"\n');
     const runGate = () => {
@@ -845,14 +847,17 @@ process.exit(0);
     rs.includes('spawn_node_server(&node, &runtime_dir, &token)'),
     'the supervisor can restart the server with a different token');
 
-  // --- P2-6: plain `node server.mjs` is usable, and the opt-out still exists
-  check('P2-6 the browser workflow is the DEFAULT, with an explicit opt-out',
-    /const TOKEN_EMBED = process\.env\.PIWB_EMBED_TOKEN === '0'\s*\n?\s*\? false/.test(srv) &&
-    srv.includes("process.env.PIWB_EMBED_TOKEN === '1' || !TOKEN_FROM_ENV"),
-    'embed is still opt-in only');
+  // --- P2-6: plain `node server.mjs` no longer ships the token by default (v1.4.2 review
+  // H2 inverted the v1.3.9 default — read the NEW contract, which the api test asserts both
+  // ways of)
+  check('P2-6 the default keeps the token OUT of the page; embedding is an explicit opt-in',
+    /const TOKEN_EMBED = process\.env\.PIWB_EMBED_TOKEN === '1'/.test(srv) &&
+    srv.includes('the page will 403 until you either'),
+    'embed crept back to default-on');
   check('P2-6 and it is locked by a test that boots the server with no token env at all',
-    apiTest.includes('plain `node server.mjs` serves a usable page') &&
-    apiTest.includes("for (const k of ['PIWB_TOKEN', 'PIWB_EMBED_TOKEN']) delete env[k]"),
+    apiTest.includes('keeps the token private') &&
+    apiTest.includes("for (const k of ['PIWB_TOKEN', 'PIWB_EMBED_TOKEN']) delete env[k]") &&
+    apiTest.includes("boot({ PIWB_EMBED_TOKEN: '1' })"),
     'no test for the default credential mode');
 
   // --- P2-7: MCP command/args/env are validated as data, not truthiness
@@ -1023,11 +1028,17 @@ process.exit(0);
       rs2.includes('fn member_path_is_safe') && rs2.includes('fn assert_members_are_safe') && rs2.includes('tar -tf'),
       'no pre-extraction member check');
     check('#4 Tauri verifies the staging tree before publishing it',
-      /verify_runtime_manifest\(&staging\)/.test(rs2) && /std::fs::rename\(&staging, dir\)/.test(rs2),
+      /verify_runtime_manifest\(&staging\)/.test(rs2) && rs2.includes('fn swap_runtime_dir'),
       'extraction still lands in the live tree before verification');
+    // the swap must never delete-then-rename (M14): the old tree moves to a grave first and a
+    // failed swap restores it — asserted by the Rust tests
+    check('#4 Tauri swaps via a restore-on-failure rename, never delete-then-rename',
+      rs2.includes('fn swap_runtime_dir') && rs2.includes('the existing runtime was restored') &&
+      rs2.includes('a_failed_runtime_swap_restores_the_old_tree'),
+      'the swap still deletes the live tree before renaming');
     // the stamp must come AFTER the swap: stamping first is what made a failed verify permanent
     const stampIdx = rs2.lastIndexOf('std::fs::write(&stamp, sig)');
-    const swapIdx = rs2.lastIndexOf('std::fs::rename(&staging, dir)');
+    const swapIdx = rs2.lastIndexOf('swap_runtime_dir(&staging, dir)');
     check('#4 Tauri writes the version stamp only after the swap',
       stampIdx > swapIdx && swapIdx !== -1, `stamp@${stampIdx} swap@${swapIdx}`);
     check('#4 the Rust member-path predicate is covered by tests',

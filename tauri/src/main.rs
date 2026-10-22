@@ -430,15 +430,46 @@ fn ensure_runtime(zip: &Path, dir: &Path, version: &str) -> Result<(), String> {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(format!("candidate runtime rejected, keeping the existing tree: {e}"));
     }
-    if dir.exists() {
-        std::fs::remove_dir_all(dir).map_err(|e| format!("clear runtime failed: {e}"))?;
-    }
-    std::fs::rename(&staging, dir).map_err(|e| {
+    // v1.4.2 review M14: the "atomic swap" comment above was a lie on the second half — the
+    // live dir was DELETED before the rename, so a rename refused by antivirus / file locks /
+    // permissions left NO runtime on disk at all (the next launch had nothing to fall back to).
+    // The old dir now moves aside under a per-process grave name first (a rename, not a delete),
+    // the staging tree takes its place, and a failed swap puts the old tree back — the same
+    // shape the cron lock takeover uses.
+    if let Err(e) = swap_runtime_dir(&staging, dir) {
         let _ = std::fs::remove_dir_all(&staging);
-        format!("runtime swap failed: {e}")
-    })?;
+        return Err(e);
+    }
     std::fs::write(&stamp, sig).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Replace `dir` with `staging` without ever leaving the machine without a runtime:
+/// the existing tree is renamed to a grave first, the staging tree is renamed in, and a
+/// failed rename restores the old tree. (v1.4.2 review M14)
+fn swap_runtime_dir(staging: &Path, dir: &Path) -> Result<(), String> {
+    let grave = dir.with_file_name(format!(
+        "{}.old-{}",
+        dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "runtime".into()),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&grave);
+    let had_old = dir.exists();
+    if had_old {
+        std::fs::rename(dir, &grave).map_err(|e| format!("could not move the existing runtime aside: {e}"))?;
+    }
+    match std::fs::rename(staging, dir) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(&grave);
+            Ok(())
+        }
+        Err(e) => {
+            if had_old {
+                let _ = std::fs::rename(&grave, dir); // put the old runtime back
+            }
+            Err(format!("runtime swap failed: {e}{}", if had_old { " — the existing runtime was restored" } else { "" }))
+        }
+    }
 }
 
 /// Spawn the bundled server. NODE_OPTIONS/NODE_PATH are removed: a planted value would
@@ -922,5 +953,54 @@ mod tests {
             "the refusal must name the offending member"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // v1.4.2 review M14: the old swap DELETED the live dir before renaming the staging tree
+    // in, so a refused rename left the machine with NO runtime. The swap must now put the
+    // old tree back when the rename fails — asserted here with a staging path that cannot
+    // exist, which is exactly "the rename was refused".
+    #[test]
+    fn a_failed_runtime_swap_restores_the_old_tree() {
+        // target/ like the zip test above — %TEMP% is not writable from every test context
+        let base = std::path::Path::new("target").join(format!("swap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.join("runtime");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("server.mjs"), b"old runtime").unwrap();
+        // a staging path that does not exist makes the rename fail, like antivirus/locks do
+        let staging = base.join("staging-missing");
+        let res = swap_runtime_dir(&staging, &dir);
+        assert!(res.is_err(), "a missing staging tree must fail the swap, got {res:?}");
+        assert!(
+            res.unwrap_err().contains("restored"),
+            "the failure must say the old runtime was put back"
+        );
+        assert!(dir.join("server.mjs").exists(), "the OLD runtime must be back on disk");
+        assert_eq!(std::fs::read_to_string(dir.join("server.mjs")).unwrap(), "old runtime");
+        // and no stray grave directory is left behind
+        let graves: Vec<_> = std::fs::read_dir(&base).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".old-")).collect();
+        assert!(graves.is_empty(), "a successful restore must not leave a grave dir: {graves:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_successful_runtime_swap_replaces_the_tree_and_cleans_the_grave() {
+        let base = std::path::Path::new("target").join(format!("swap2-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = base.join("runtime");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("server.mjs"), b"old").unwrap();
+        let staging = base.join("runtime.staging-x");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("server.mjs"), b"new").unwrap();
+        let res = swap_runtime_dir(&staging, &dir);
+        assert!(res.is_ok(), "the swap must succeed, got {res:?}");
+        assert_eq!(std::fs::read_to_string(dir.join("server.mjs")).unwrap(), "new");
+        assert!(!staging.exists(), "the staging tree is consumed by the rename");
+        let graves: Vec<_> = std::fs::read_dir(&base).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".old-")).collect();
+        assert!(graves.is_empty(), "the grave must be removed after a successful swap: {graves:?}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

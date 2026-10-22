@@ -9,6 +9,8 @@ git clone https://github.com/cullysu/pi-workbench.git
 cd pi-workbench
 npm ci            # 完整依赖（含 pi-coding-agent）
 npm start         # http://127.0.0.1:32123
+                  # 注意：v1.4.3 起裸启动不再内嵌 token（页面会 403）——
+                  # 开发请用 PIWB_EMBED_TOKEN=1 npm start，见 README「浏览器开发模式」
 ```
 
 ## 改动后必须跑的门禁（全绿才算完）
@@ -16,7 +18,7 @@ npm start         # http://127.0.0.1:32123
 ```bash
 npm run lint                                   # eslint 0/0
 npm test                                       # node --test tests/（隔离 HOME，不碰真实数据）
-python scripts/route-sweep.py                  # 47 条路由全量验收
+python scripts/route-sweep.py                  # 51 条路由全量验收
 node scripts/ws-probe.mjs                      # 真实 pi 子进程走完整 WS 链（含 adopt 语义）
 node scripts/failover-e2e.mjs                  # 真 pi + 3 mock 供应商验证回退链
 node scripts/chat-e2e.mjs                      # 浏览器级核心链路（需本机 Chromium，CHROME_EXE 可指定）

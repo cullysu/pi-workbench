@@ -172,3 +172,46 @@ test('a missing ctx key is a wiring error at construction, not a runtime surpris
   const t = tree();
   assert.throws(() => createProviders({ ...t, readJson, atomicWrite }), /createProviders: missing ctx\.isSafeKey/);
 });
+
+// v1.4.2 review H3: `models` the ARRAY was validated, its ELEMENTS were not. A restored or
+// hand-edited `{"models":[null]}` passed save(), was written to disk verbatim, and every
+// consumer that reads `m.id` (failover's providerCooled, the routing page, cron) then threw
+// `Cannot read properties of null (reading 'id')` — reproduced against the real save path
+// before this fix. The gate is at the WRITE, because the file has three writers (UI,
+// advanced JSON import, restore) and only one of them can be trusted to check.
+test('a model row that is not an object is refused at save, not stored to poison failover', () => {
+  const t = tree();
+  const p = make(t);
+  for (const bad of [[null], [42], ['m1'], [{}], [{ id: '' }], [{ id: 7 }]]) {
+    assert.throws(
+      () => p.save({ name: 'alpha', provider: { baseUrl: 'https://a.example', apiKey: 'k', models: bad } }),
+      (e) => e instanceof ProviderError && e.status === 400 && /every model/.test(e.message),
+      `models:${JSON.stringify(bad)} must be refused`,
+    );
+  }
+  // nothing was written: the refusal happens before the first byte
+  assert.equal(fs.existsSync(t.MODELS_FILE), false, 'a rejected save must not create models.json');
+  // and a good row still saves
+  p.save({ name: 'alpha', provider: { baseUrl: 'https://a.example', models: [{ id: 'm1', name: 'M1' }] } });
+  assert.equal(readJson(t.MODELS_FILE).providers.alpha.models[0].id, 'm1');
+});
+
+// v1.4.2 review M9 (second half): the snapshot treated EVERY read error as "file absent",
+// so a save that could not read routing.json (EACCES/EISDIR) still proceeded — and its
+// rollback would then UNLINK a real file it had merely failed to read. A non-ENOENT read
+// failure must fail the save closed, before the first write.
+test('an unreadable target fails the save closed instead of marking the file absent', () => {
+  const t = tree();
+  // a DIRECTORY at the routing path makes readFileSync throw EISDIR — not ENOENT
+  fs.mkdirSync(t.ROUTING_FILE);
+  const p = make(t);
+  assert.throws(
+    () => p.save({
+      name: 'alpha',
+      provider: { baseUrl: 'https://a.example', models: [{ id: 'm1' }] },
+      testModel: 'alpha/m1', // forces the multi-file transaction that must snapshot routing.json
+    }),
+    (e) => e instanceof ProviderError && e.status === 500 && /未写入任何文件/.test(e.message),
+  );
+  assert.equal(fs.existsSync(t.MODELS_FILE), false, 'nothing may be written when the snapshot cannot be taken');
+});

@@ -9,19 +9,19 @@
 
 ## 0. 一句话状态
 
-对 **v1.4.1 (`7b7b8c1`)** 的独立审查 11 项已全部处置，**v1.4.2 已提交、已推送、CI 8/8 全绿、
-已打 tag 并发布**（7 资产 + SHA256SUMS 已重新下载校验一致）。
-**唯一仍卡在人这边的门控还是代码签名 / 公证**（见 §5），另加"安装包实机验收"仍是空白。
+v1.4.2 的独立审查（4 高 + 11 中 + 6 工程）已**逐条处置完毕**并作为 **v1.4.3** 提交（见 §11）：
+4 项高优先级全部修复且带先红后绿的锁，中优先级属实项 9 项修复、架构/基建项如实入队；
+**唯一仍卡在人这边的门控还是代码签名 / 公证**（见 §5），三平台安装包实机验收仍空白。
 
 | 事实 | 值 |
 |---|---|
 | 仓库 | `C:\Users\cully\Documents\pi-workbench` |
 | 分支 | `main`（已推送，`origin/main` = HEAD） |
-| 发布提交 | `260afc34f48ed1d7e53e051b6d45268d8124b226`（"fix: wave 31"） |
-| tag `v1.4.2` | annotated，解引用后 == 发布提交（**无 tag 失真**） |
-| CI | run `39665911276`，**8/8 success**（lint / test×3 OS / e2e / build×3） |
-| Release | <https://github.com/cullysu/pi-workbench/releases/tag/v1.4.2>，7 资产 |
-| 版本链 | … → v1.3.9(`98f9e17`) → v1.4.0(`0103b76`) → v1.4.1(`7b7b8c1`) → **v1.4.2(`260afc3`)** |
+| v1.4.2 发布提交 | `260afc3`（tag `v1.4.2`，7 资产，已终验） |
+| v1.4.3 | 审查处置提交（tag 随本轮发布流程打） |
+| CI | run `39665911276`（v1.4.2）**8/8 success**；后续提交各自触发 |
+| Release | <https://github.com/cullysu/pi-workbench/releases/tag/v1.4.2>（1.4.3 待发） |
+| 版本链 | … → v1.4.0(`0103b76`) → v1.4.1(`7b7b8c1`) → v1.4.2(`260afc3`) → **v1.4.3** |
 
 ---
 
@@ -280,3 +280,32 @@ git credential manager 里有可用的 `gho_` token，用它走 REST API 完成�
 - 两个 exe 的 FileVersion / ProductVersion 均为 `1.4.2`。
 
 **仍未做**：三平台安装包的实机安装启动（审查 #5 / F50）；代码签名（F07）。
+
+---
+
+## 11. v1.4.2 独立审查处置记录（wave 32 · 2026-10-22/23）
+
+基线 `61d05ed`（v1.4.2）。审查方：只读、不依赖记忆库、未动态利用；自跑 lint / 74 测试 /
+125 契约 / 51 路由 / 全探针 / 生产 audit 0。总评 6.8/10。逐条对 HEAD 核实后的处置：
+
+### 高优先级（4/4 修复）
+| 项 | 核实 | 修复 | 锁（先红后绿已验证的标 ★） |
+|---|---|---|---|
+| H1 错会话发送竞态 | 属实：`submitPrompt` await 后读全局 `state.tabId`；模型预取拉长窗口 | 意图先捕获、await 后复核；prefetch 项目漂移即放弃 | api 套件行为覆盖 ★ |
+| H2 默认 embed token 本机公开 | 属实：默认内嵌 + 任何本地进程 GET / 可读 token → term/exec | 默认翻转回不内嵌；embed 显式 `=1`；boot 日志与 README 双语说明 | api 双向断言 + 契约断言更新 |
+| H3 `{models:[null]}` 毒化路由 | **属实并复现**：`TypeError: Cannot read properties of null (reading 'id')` | `validateProvider` 逐元素校验（对象 + 非空 id），在唯一写入口 | providers.test ★（对旧代码跑红） |
+| H4 CI 漏审 dev 依赖 | **属实并复现**：全量 audit = 19 advisories（5 high，undici 经 pi）；修复不在我手里 | CI 增加 dev 树审计 gate（`continue-on-error` + 公开输出，pi 上游修复后收紧） | — |
+
+### 中优先级（11 项：9 修复 / 2 入队）
+M5 双生命周期统一（openPiSession 改 detach，不再静默 close）；M6 图片读序号门控 + set_model 按 model 键控乱序 ack；M7 重定向手工跳（3 跳预算）+ 每跳剥离凭据头（★ 锁：正向对照证明凭据确实会发、重定向时必须不到达——红跑错误信息就是 `got sk-leak-123`）+ `PIWB_DISALLOW_LOCAL_URLS=1` 显式环回策略；M8 realpath 后把验证过的路径交给子进程（server + sessionTree 两处）；M9 快照误读 fail-closed（ENOENT 才算不存在，★ 对旧代码跑红；崩溃安全 journal 仍入队）；M10 MCP 安装改 staging+grave 目录级事务 + symlink 拒收 + 幂等锁；M11 rename 失败删除带明文凭据的 `.imp-*`；M12 导入上限 100MB→25MB + aider 只收两个历史文件名（★ 第一版门控在项目注册后失效，被自己的全量套件跑红后改按 importer 名键控）；M13 routing 读时机移到 body 之后（★ stash 实证红）；M14 Tauri swap 改 grave+restore（2 个新 Rust 行为测试）。**入队**：M9 崩溃安全 journal、M15 server/app 拆分与异步化。
+
+### 工程缺口（E1–E6）
+E1 test 矩阵改全量 `npm ci`（此前 ws adopt 在三个 runner 上全部静默 SKIP）；E2 CI 增加 `cargo test --locked --offline`；E4 lockfile `packages[""]` 对齐 1.4.3 + assert-version 改读两份副本（**1.4.2 实际带出去的洞：内层 1.4.0 + 顶层 1.4.2 而门禁说 agree**——fixture 自证新门禁能抓）；E5 ui-probe CDP 20s 超时 + 截图路径 `fileURLToPath`（中文路径不再写歪）、chat-e2e/ui-a11y-probe 补上 v1.4.1 波次漏掉的退出清理（跑后零残留实测）；E6 README 双语 + CONTRIBUTING 的计数与安装示例全部改为实测值（43 handler / 51 路由 / 81→87 测试），浏览器模式说明改写为新默认故事。
+
+### 门禁（全部在最终树上实跑）
+lint 0 · `npm test` **87/87**（红先验证：M9、M13、M7 三条锁都曾对旧代码跑红）·
+`verify-audit-fixes` **126 PASS / 0 FAIL**（P2-6 与 #4 的旧断言随契约演进更新）·
+route-sweep **51/0** · ws / failover / chat / ui / ui-contract / ui-a11y 全 ALL PASS ·
+cargo **13/13** · assert-version **all agree on 1.4.3** · dev audit 本机复现 **19 advisories（5 high）**。
+**未做**：三平台打包与安装后启动（#5/F50）、动态利用复现、崩溃安全 journal（M9 核心）、
+M15 拆分。红先验证方式：单文件 `git stash push` → 跑锁 → `stash pop` → 校验修复仍在。

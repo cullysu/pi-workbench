@@ -13,6 +13,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import http from 'node:http';
 import { createRequire } from 'node:module';
@@ -96,6 +97,44 @@ const check = (name, ok, detail = '') => {
 };
 
 const kids = [];
+// v1.4.2 review E5: chat-e2e was the probe the v1.4.1 cleanup wave MISSED — the watchdog's
+// process.exit(2) skips finally, so a hung run left a scratch HOME/project/chrome-profile
+// behind every time. Same shared-cleanup shape the other probes got; dirs register as they
+// are created (progressively, since everything below lives inside the try).
+const TMP_DIRS = [];
+let tmpCleaned = false;
+function cleanupTmpDirs() {
+  if (tmpCleaned) return;
+  tmpCleaned = true;
+  if (!TMP_DIRS.length) return;
+  const retryUntil = Date.now() + 3000;
+  const pending = TMP_DIRS.slice();
+  while (pending.length) {
+    for (let i = pending.length - 1; i >= 0; i--) {
+      try { fs.rmSync(pending[i], { recursive: true, force: true }); pending.splice(i, 1); } catch { /* windows may hold a handle — retry below */ }
+    }
+    if (!pending.length || Date.now() > retryUntil) break;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); // sync sleep (no timers inside exit)
+  }
+  for (const d of pending) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* give up */ } }
+  // E5 field note: the chrome PROFILE is the one dir that still lost the 3s race once (the
+  // killed chrome keeps the last handle a bit longer). The finally path can wait longer;
+  // the exit path cannot (sync only). Stretch the retry window instead of pretending.
+  if (pending.length && typeof TMP_DIRS.map === 'function') {
+    const deadline2 = Date.now() + 5000;
+    const rest = pending.slice();
+    while (rest.length && Date.now() < deadline2) {
+      for (let i = rest.length - 1; i >= 0; i--) {
+        try { fs.rmSync(rest[i], { recursive: true, force: true }); rest.splice(i, 1); } catch { /* still held */ }
+      }
+      if (rest.length) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+    }
+  }
+}
+process.on('exit', cleanupTmpDirs);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => { cleanupTmpDirs(); process.exit(1); });
+}
 setTimeout(() => { console.log('GLOBAL WATCHDOG: 240s cap hit'); process.exit(2); }, 240000).unref();
 
 try {
@@ -105,6 +144,7 @@ try {
 
   const home = fs.mkdtempSync(path.join(USERTMP, 'piwb-chat-'));
   const proj = fs.mkdtempSync(path.join(USERTMP, 'piwb-chatp-'));
+  TMP_DIRS.push(home, proj);
   const cfgDir = path.join(home, '.pi-workbench');
   fs.mkdirSync(cfgDir, { recursive: true });
   fs.mkdirSync(path.join(home, '.pi', 'agent'), { recursive: true });
@@ -139,8 +179,9 @@ try {
     '--window-size=1480,940', 'about:blank',
   ], { stdio: ['ignore', chromeLog, chromeLog] });
   kids.push(chrome);
+  TMP_DIRS.push(profile);
 
-  const shots = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'ui-shots');
+  const shots = path.join(path.dirname(fileURLToPath(import.meta.url)), 'ui-shots');
   fs.mkdirSync(shots, { recursive: true });
 
   // P1-2 (v1.3.9 review): the old self-heal block killed leftovers by port using
@@ -244,4 +285,5 @@ try {
     } catch { /* gone */ }
   }
   await new Promise((r) => setTimeout(r, 800));
+  cleanupTmpDirs(); // same function as the exit hooks — one cleanup path (v1.4.2 review E5)
 }

@@ -65,7 +65,7 @@ const state = {
   importSrc: 'codex',
   thinkLevel: 'medium',
   turnHadTools: false,      // F22: a tool ran during the current prompt turn
-  pendingSetModel: null,    // F41: {model} awaiting the set_model ack — failure reverts the chip
+  pendingSetModels: null,   // v1.4.2 review M6: per-MODEL set_model switches awaiting their ack — a failed ack reverts only its own switch
 };
 
 // ---------- utils ----------
@@ -659,7 +659,12 @@ function openPiSession({ sessionPath = null, isNew = false }) {
   if (!state.project) { askAddProject(); return Promise.resolve(); }
   state.importView = false; // opening a real session leaves the read-only import view
   const doOpen = () => {
-    if (state.tabId) { wsSend({ type: 'close', tabId: state.tabId }); }
+    // v1.4.2 review M5: ONE lifecycle for "open a session elsewhere". This used to silently
+    // CLOSE the running tab, while the ordinary project switch detached it — the same user
+    // intent (switch away) had two contradictory outcomes depending on which button was
+    // clicked. Detach here too: the old tab goes to the "running in background" tray with
+    // its orphan TTL, and the composer moves to the new session.
+    if (state.tabId) { detachLiveTab({ close: false }); }
     state.tabId = 'tab-' + Math.random().toString(36).slice(2, 9);
     state.tabCwd = state.project.path; // the cwd this tab was opened under — submitPrompt refuses to send prompts across a mismatch
     // a NEW session follows the configured default (either entry that sets it);
@@ -696,7 +701,12 @@ function openPiSession({ sessionPath = null, isNew = false }) {
     return p;
   };
   if (!state.selModel) {
+    // H1: the prefetch below is an await inside openPiSession — while it runs the user can
+    // switch projects. Snapshot the project BEFORE the fetch and bail if it moved, so the
+    // prefetch can never open a tab for a project the user has already left.
+    const prefetchProject = state.project ? state.project.path : null;
     return api.get('/api/models/available').then((r) => {
+      if (prefetchProject !== (state.project ? state.project.path : null)) return null; // project moved mid-prefetch: open nothing
       const models = r.models || [];
       const want = state.cfg && state.cfg.defaultModel ? state.cfg.defaultModel.split('/') : null;
       const pref = (want && models.find((m) => m.provider === want[0] && m.id === want[1]))
@@ -706,7 +716,7 @@ function openPiSession({ sessionPath = null, isNew = false }) {
         updateModelChip();
       }
       return doOpen();
-    }).catch(() => doOpen());
+    }).catch(() => prefetchProject !== (state.project ? state.project.path : null) ? null : doOpen());
   }
   return doOpen();
 }
@@ -917,21 +927,33 @@ piEventHandlers.push(function (ev) {
     if (ev.data.model && typeof ev.data.model === 'string') {
       state.lastAckedModel = ev.data.model;
       if (state.selModel !== ev.data.model) { state.selModel = ev.data.model; updateModelChip(); }
-      state.pendingSetModel = null;
+      // the truth arrived: every pending switch is settled (per-model map, review M6)
+      if (state.pendingSetModels) state.pendingSetModels.clear();
     }
     // the reconnect replay restores CONTENT — this restores the RUNNING state,
     // or the UI keeps a busy spinner over an agent that already finished
     if (typeof ev.data.isStreaming === 'boolean') { state.streaming = ev.data.isStreaming; setBusy(state.streaming); }
     return;
   }
-  // F41: a FAILED set_model ack reverts the optimistic chip — the model did not change
-  if (ev.type === 'response' && ev.command === 'set_model' && state.pendingSetModel) {
-    if (ev.success === false) {
-      state.selModel = state.pendingSetModel.prev || state.selModel;
-      updateModelChip();
-      $('#statusline').textContent = '模型切换失败：' + String(ev.error || 'pi 拒绝了该模型') + '——已恢复原选择';
+  // F41: a FAILED set_model ack reverts the optimistic chip — the model did not change.
+  // v1.4.2 review M6: pendings are keyed by the MODEL that was requested, so an out-of-order
+  // ack settles exactly its own switch and can never roll a newer selection back.
+  if (ev.type === 'response' && ev.command === 'set_model' && state.pendingSetModels && state.pendingSetModels.size) {
+    const ackedModel = typeof ev.model === 'string' ? ev.model : null;
+    const keys = ackedModel && state.pendingSetModels.has(ackedModel) ? [ackedModel] : [...state.pendingSetModels.keys()];
+    for (const key of keys) {
+      const pend = state.pendingSetModels.get(key);
+      state.pendingSetModels.delete(key);
+      if (ev.success === false && pend && pend.prev) {
+        // only revert if nothing NEWER has since been selected: a failed old switch must
+        // not clobber a successful newer one (the out-of-order case M6 described)
+        if (state.selModel === key) {
+          state.selModel = pend.prev;
+          updateModelChip();
+          $('#statusline').textContent = '模型切换失败：' + String(ev.error || 'pi 拒绝了该模型') + '——已恢复原选择';
+        }
+      }
     }
-    state.pendingSetModel = null;
     return;
   }
 });
@@ -1249,6 +1271,7 @@ function renderAttachChip() {
   $('#attach-name').textContent = `${pi.name || '图片'} · ${fmtK(pi.size || 0)}`;
   chip.classList.remove('hidden');
 }
+let imageReadSeq = 0; // v1.4.2 review M6: FileReader has no ordering — a stale onload used to overwrite a NEWER pending image (or resurrect one the user had just removed)
 function queueImageFile(f) {
   if (!f || !String(f.type || '').startsWith('image/')) return;
   if (f.size > MAX_IMAGE_BYTES) {
@@ -1256,14 +1279,16 @@ function queueImageFile(f) {
     $('#statusline').textContent = `图片过大（${fmtK(f.size)}）——上限 ${fmtK(MAX_IMAGE_BYTES)}；草稿与附件均未变动`;
     return;
   }
+  const seq = ++imageReadSeq;
   const rd = new FileReader();
   rd.onload = () => {
+    if (seq !== imageReadSeq) return; // a newer image was queued (or the chip was cleared) while this one was still reading
     state.pendingImage = { data: String(rd.result).split(',')[1], mimeType: f.type, name: f.name || '图片', size: f.size || 0 };
     renderAttachChip();
     // F30: an unknown/missing MIME must not be presented as fact
     $('#statusline').textContent = `${f.type || '未知类型'} 图片已附加（${fmtK(f.size || 0)}）——可点 × 移除`;
   };
-  rd.onerror = () => { $('#statusline').textContent = '图片读取失败——未附加任何内容'; };
+  rd.onerror = () => { if (seq === imageReadSeq) $('#statusline').textContent = '图片读取失败——未附加任何内容'; };
   rd.readAsDataURL(f);
 }
 inputEl.addEventListener('paste', (e) => {
@@ -1296,6 +1321,7 @@ $('#btn-attach').onclick = () => {
   inp.click();
 };
 $('#attach-remove').onclick = () => {
+  imageReadSeq++; // v1.4.2 review M6: an in-flight FileReader must not resurrect the removed attachment
   state.pendingImage = null;
   renderAttachChip();
   $('#statusline').textContent = '已移除待发送图片';
@@ -1327,6 +1353,12 @@ async function sendPrompt() {
 async function submitPrompt(text, { resend = false, fromComposer = false } = {}) {
   if (state.importView) { $('#statusline').textContent = '正在浏览导入历史（只读）——打开一个会话后再发送'; return; }
   if (!text && !state.pendingImage) return; // F45: image-only turns are allowed through
+  // v1.4.2 review H1: the prompt's DESTINATION must be decided before any await and verified
+  // after each one. submitPrompt awaits openPiSession() (and openPiSession awaits a model
+  // prefetch), and every await is a window in which the user can switch projects or open another
+  // session — the code below used to read the GLOBAL state.tabId, so a draft typed in project A
+  // could be sent to the tab that project B just opened, and its agent tools would run in B's cwd.
+  const intendedProject = state.project ? state.project.path : null;
   // execution-identity backstop: whatever UI path switched state.project without
   // detaching the tab, a prompt must never travel to a tab running another cwd
   // (v1.3.3 audit #11 — this closes the whole class, not just the known entries)
@@ -1346,6 +1378,17 @@ async function submitPrompt(text, { resend = false, fromComposer = false } = {})
     }
   }
   if (!state.tabId) return;
+  // the await above may have let the user switch projects: refuse instead of aiming the
+  // prompt at whatever tab is current now. The draft and attachment stay in place.
+  if (intendedProject !== (state.project ? state.project.path : null)) {
+    $('#statusline').textContent = '等待会话打开期间切换了项目——这条草稿没有发送；切回原项目后重新发送即可';
+    return;
+  }
+  // and the tab that will carry it must still be the one opened for THIS project
+  if (state.tabCwd && state.tabCwd !== intendedProject) {
+    $('#statusline').textContent = '当前会话的工作目录已变化——这条草稿没有发送；请重新打开会话后发送';
+    return;
+  }
   // goal context injection: first prompt of a session carries the pinned objective
   const g = currentGoal();
   if (g && g.text && !state.goalInjected) {
@@ -1903,9 +1946,18 @@ function renderCurrentCfg() {
       // the chip/cfg updated even when the server refused the save (500 at saveConfig)
       const cf = await api.post('/api/config', { defaultModel: key });
       if (cf.error) { $('#models-status').textContent = '默认模型保存失败：' + cf.error; return; }
+      // v1.4.2 review M6: snapshot the model this switch REPLACES *before* overwriting it,
+      // so a failed ack can restore exactly what was running when THIS switch was made —
+      // even if another switch is already in flight.
+      const prevModelForSetModel = state.selModel;
       state.cfg.defaultModel = key;
       state.selModel = key;
       updateModelChip();
+      // set_model acks are matched by MODEL, not by one shared slot: the old single
+      // `pendingSetModel` let the FIRST ack of two quick switches revert the chip to a
+      // model the second request had already replaced.
+      state.pendingSetModels = state.pendingSetModels || new Map();
+      state.pendingSetModels.set(key, { prev: prevModelForSetModel });
       try { rpcTo({ type: 'set_model', provider: name, modelId: mid }); } catch { /* socket may be closed mid-edit */ }
       renderCurrentCfg();
       if (state.editProv === name) renderProvModels(state.modelsDoc.providers[name] || {});

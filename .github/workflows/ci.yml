@@ -63,9 +63,9 @@ jobs:
         run: cargo audit --file tauri/Cargo.lock # the committed lock IS the audited AND built tree — no build-time updates
       # v1.4.2 review (E2): 13 Rust unit tests existed and CI never ran them. tauri_build
       # only needs the manifest, so the tests compile without pkg-runtime.zip on a clean
-      # checkout (verified locally with --locked --offline).
+      # checkout (verified locally). No --offline on CI: a clean runner has no crates cache.
       - name: Rust unit tests (tauri shell)
-        run: cargo test --locked --offline
+        run: cargo test --locked
         working-directory: tauri
 
   test:

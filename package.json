@@ -9,7 +9,7 @@
     "start": "node server.mjs",
     "electron": "electron .",
     "dist": "electron-builder --win nsis --x64",
-    "test": "node --test tests/api.test.mjs tests/failover.test.mjs tests/io.test.mjs tests/ledger.test.mjs tests/backup.test.mjs tests/providers.test.mjs tests/v141-fixes.test.mjs",
+    "test": "node --test tests/api.test.mjs tests/failover.test.mjs tests/io.test.mjs tests/ledger.test.mjs tests/backup.test.mjs tests/providers.test.mjs tests/v141-fixes.test.mjs tests/kb-skills.test.mjs",
     "prepare-runtime": "node scripts/prepare-runtime.mjs"
   },
   "keywords": [

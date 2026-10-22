@@ -64,7 +64,10 @@ jobs:
       # v1.4.2 review (E2): 13 Rust unit tests existed and CI never ran them. tauri_build
       # only needs the manifest, so the tests compile without pkg-runtime.zip on a clean
       # checkout (verified locally). No --offline on CI: a clean runner has no crates cache.
+      # the Tauri shell is Windows-only (compile_error elsewhere) and its linux dep tree
+      # needs GTK system libs a bare ubuntu runner does not carry — test where it builds
       - name: Rust unit tests (tauri shell)
+        if: runner.os == 'Windows'
         run: cargo test --locked
         working-directory: tauri
 

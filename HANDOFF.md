@@ -440,3 +440,44 @@ Windows runner——ubuntu 没有 GTK 依赖树，而 Tauri 壳本来就 Windows
 3. **浏览器探针本机未跑**：`ui-probe` / `chat-e2e` / `ui-contract` / `ui-a11y` 只在本轮改动后
    由 CI 验证（新增的跨 OS job 也是首次运行）。
 4. **架构项 1-2**：`server.mjs` / `public/app.js` / `lib/sources.mjs` 仍是单文件大块，拆分入队。
+
+---
+
+## 14. v1.4.4 发布终验记录（2026-10-24 01:1x Asia/Taipei）
+
+| 项 | 值 |
+|---|---|
+| 处置提交 | `f84c184`（wave 33，41 文件 +2015/−302） |
+| CI 修复提交 | `fbf30d4`（SBOM 覆盖门禁的平台可选包规则） |
+| tag `v1.4.4` | `fbf30d4ea283319f782b8e437f164e88c2db7346` |
+| HEAD | 同 tag（`git rev-parse v1.4.4^{commit}` == `git rev-parse HEAD`） |
+| CI run | **39983490058 — 11/11 job success** |
+| Release | <https://github.com/cullysu/pi-workbench/releases/tag/v1.4.4>（id 422102716，非 draft / 非 prerelease） |
+| 资产 | 7 件，全部 `state=uploaded` |
+
+### CI 11 个 job（全部 success，含三个首次运行的）
+
+`lint` · `tauri-test`（**首次**）· `test (ubuntu/windows/macos)` · `e2e` ·
+`e2e-cross-os (windows/macos)`（**首次**）· `build`（Windows，含 tar 修复）·
+`build-linux`（修复 SBOM 门禁后）· `build-mac`
+
+三个新门禁首次运行即暴露并修掉了一个真实问题：SBOM 覆盖规则把锁文件里**所有平台**的
+esbuild/rollup 变体都算作"必须存在"，而 npm 只装当前平台适用的那些 —— linux 构建因此报
+「169 expected, 136 described」。改为「必需包（非 optional 且平台适用）必须全覆盖；平台可选包
+存在则校验版本」，并打印拆分。本机 Windows 树 132+37，模拟 linux 树 132+4（139 组件，与 CI
+产出的形状一致）。
+
+### 发布后回验（不是只看上传成功）
+
+- `git rev-parse v1.4.4^{commit}` == `HEAD` == release `target_commitish` == CI `head_sha`。
+- 重新从 `releases/download/v1.4.4/` 下载 `PiWorkbench-1.4.4-Tauri-x64-setup.exe`（67.8 MB）
+  与 `sbom-pi-workbench.cdx.json`，对照线上 `SHA256SUMS.txt` **逐字节 MATCH**。
+- SBOM `metadata.component` = `pi-workbench-runtime 1.4.4`，139 组件。
+- 两个 exe 的 `VersionInfo.FileVersion` = `1.4.4`。
+
+### 本轮仍未闭合（与 §13 一致，不新增粉饰）
+
+1. 三平台安装包**实机验收**仍空白（CI 只对 AppImage 有启动探测）。
+2. 代码签名 / 公证（#39）需证书账号。
+3. 浏览器探针未在本机跑（无 Chromium），CI 覆盖；`e2e-cross-os` 已首跑通过。
+4. 架构项 1-2（拆 `server.mjs` / `app.js` / `sources.mjs`）入队。

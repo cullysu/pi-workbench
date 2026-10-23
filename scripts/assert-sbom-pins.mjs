@@ -39,12 +39,31 @@ if (failed) process.exit(1);
 const lockFile = process.argv[3] || 'runtime-package-lock.json';
 if (lockFile && fs.existsSync(lockFile)) {
   const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
-  const want = new Map();
+  // Which optional entries can exist on THIS machine. The runtime lock records the
+  // platform variants of esbuild/rollup for every OS (aix, android, darwin, freebsd, linux,
+  // win32 …); npm installs only the one that matches, so requiring all of them would fail
+  // on every platform. The first cut of this gate did exactly that and went red on the
+  // linux build with "169 expected, 136 described".
+  const currentOs = process.platform;
+  const currentCpu = process.arch;
+  const applies = (list, value) => {
+    if (!Array.isArray(list) || !list.length) return true; // no constraint = any platform
+    const names = list.map(String);
+    const positives = names.filter((n) => !n.startsWith('!'));
+    const negatives = names.filter((n) => n.startsWith('!')).map((n) => n.slice(1));
+    if (negatives.includes(value)) return false;
+    return positives.length === 0 || positives.includes(value);
+  };
+  const want = new Map(); // REQUIRED: must be described
+  const optional = []; // may legitimately be absent on this platform
   for (const [key, entry] of Object.entries(lock.packages || {})) {
     if (!key || !key.startsWith('node_modules/')) continue; // the "" row is the root project
     if (!entry || entry.link || entry.dev) continue;
     const name = entry.name || key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length);
-    want.set(key, { name, version: entry.version });
+    const row = { name, version: entry.version };
+    if (entry.optional) { optional.push([key, row, entry]); continue; }
+    if (!applies(entry.os, currentOs) || !applies(entry.cpu, currentCpu)) { optional.push([key, row, entry]); continue; }
+    want.set(key, row);
   }
   const have = new Map();
   for (const c of components) {
@@ -58,14 +77,21 @@ if (lockFile && fs.existsSync(lockFile)) {
     if (!got) missing.push(`${w.name}@${w.version} (${p})`);
     else if (got.version !== w.version) mismatched.push(`${p}: lock ${w.version} vs sbom ${got.version}`);
   }
+  // an optional package that IS installed must still be described at the locked version
+  let optPresent = 0;
+  for (const [p, w] of optional) {
+    const got = have.get(p);
+    if (got) { optPresent++; if (got.version !== w.version) mismatched.push(`${p}: lock ${w.version} vs sbom ${got.version} (optional)`); }
+  }
   if (missing.length || mismatched.length) {
     failed = true;
-    console.error(`SBOM coverage FAILED: ${want.size} locked packages expected, ${have.size} described`);
+    console.error(`SBOM coverage FAILED: ${want.size} required locked packages expected, ${have.size} described`);
     for (const m of missing.slice(0, 20)) console.error('  missing: ' + m);
     if (missing.length > 20) console.error(`  … and ${missing.length - 20} more missing`);
     for (const m of mismatched.slice(0, 20)) console.error('  version drift: ' + m);
     process.exit(1);
   }
-  console.log(`sbom coverage: ${want.size} locked packages all described at their locked version/path`);
+  console.log(`sbom coverage: ${want.size} required locked packages all described at their locked version/path ` +
+    `(+ ${optPresent} of ${optional.length} platform-optional packages present on ${currentOs}/${currentCpu}, all at their locked version)`);
 }
 console.log(`sbom components: ${components.length} | pin assertion ok (${Object.entries(WANT).map(([n, w]) => `${n} ${w}`).join(' / ')})`);

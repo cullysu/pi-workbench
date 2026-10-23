@@ -18,6 +18,13 @@ import { killTree, spawnTreeOpts } from './lib/proctree.mjs';
 import {createKbSkills} from './lib/kb-skills.mjs';
 import {createBackupTerminal} from './lib/backup-terminal.mjs';
 import { restrictWindowsAcl } from './lib/win-acl.mjs';
+import * as outboundFetch from './lib/outbound-fetch.mjs';
+import {
+  isSafeKey as isSafeKeyFn,
+  providerRowProblem,
+  routingMetaProblem,
+  normalizeRoutingDoc,
+} from './lib/schema.mjs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -40,7 +47,10 @@ const PI_SESSIONS = path.join(HOME, '.pi', 'agent', 'sessions');
 const PI_MODELS = path.join(HOME, '.pi', 'agent', 'models.json');
 const CODEX_SESSIONS = path.join(HOME, '.codex', 'sessions');
 const CLAUDE_PROJECTS = path.join(HOME, '.claude', 'projects');
-const PI_CLI = path.join(__dirname, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js');
+// v1.4.3 review #10: PIWB_PI_CLI lets a test (and a user with pi installed elsewhere)
+// point at a different entry. The probe's stdin-EPIPE crash path is only reachable with a
+// child that dies before reading stdin, and a hard-coded path made that path untestable.
+const PI_CLI = process.env.PIWB_PI_CLI || path.join(__dirname, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'bundle', 'cli.js');
 const PORT = Number(process.env.PIWB_PORT || 32123);
 // HTTP token auth: any local process could hit the port — random per boot, embedded
 // in the served HTML and required as x-api-token on /api/* routes
@@ -223,35 +233,21 @@ const readJson = (p) => {
 // v1.3.8 review P2-8: object keys taken from requests/disk must never be able to traverse
 // the prototype chain. `providers['__proto__']` reads Object.prototype (truthy), so a plain
 // `x = x || {}` would then write onto the global prototype.
-const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const isSafeKey = (k) => typeof k === 'string' && k.length > 0 && k.length <= 200 && !UNSAFE_KEYS.has(k);
+// v1.4.3 review #25: the predicate and the deep validators now live in lib/schema.mjs so
+// the HTTP door, the restore door and the on-disk loader cannot drift apart again.
+const isSafeKey = isSafeKeyFn;
 
 // ---------- routing: fallback chains + per-key cooldowns/rotation ----------
 const ROUTING_FILE = path.join(CFG_DIR, 'routing.json');
 function loadRouting() {
-  const d = readJson(ROUTING_FILE);
-  const r = d && typeof d === 'object' ? d : {};
-  // migrate legacy PySide-era schema: routes{name:{enabled,priority,...}} -> providers
-  if ((!r.providers || !Object.keys(r.providers).length) && r.routes && typeof r.routes === 'object') {
-    r.providers = {};
-    for (const [name, meta] of Object.entries(r.routes)) {
-      r.providers[name] = { enabled: meta.enabled !== false, priority: meta.priority || 1, keyEnvs: [] };
-    }
-    delete r.routes;
-  }
-  r.providers = r.providers && typeof r.providers === 'object' && !Array.isArray(r.providers) ? r.providers : {};
-  // v1.3.8 review P2-8: a hand-edited/restored routing.json could already carry a
-  // prototype key; every consumer does `routing.providers[name]` lookups, so drop them
-  // on load as well as rejecting them on write.
-  for (const k of Object.keys(r.providers)) {
-    if (!isSafeKey(k) || !r.providers[k] || typeof r.providers[k] !== 'object' || Array.isArray(r.providers[k])) delete r.providers[k];
-  }
-  r.chains = Array.isArray(r.chains) ? r.chains.filter((c) => Array.isArray(c)) : []; // [null] chains used to TypeError nextInChain mid-fallback
-  // `state: 1` (scalar) survives `||` — and assigning .cooldowns on a primitive THROWS
-  // in strict mode, taking every routing API down with it (audit #07)
-  if (!r.state || typeof r.state !== 'object' || Array.isArray(r.state)) r.state = {};
-  if (!r.state.cooldowns || typeof r.state.cooldowns !== 'object' || Array.isArray(r.state.cooldowns)) r.state.cooldowns = {};
-  return r;
+  // v1.4.3 review #4: this used to be an ad-hoc sanitiser that only checked CONTAINERS —
+  // providers is an object, chains is an array, state is an object. A restored or
+  // hand-edited `{"providers":{"p":{"keyEnvs":1}}}` passed all three and then threw in
+  // failover's `for (const e of routing.providers[p].keyEnvs)` — which runs on every
+  // failure decision, so one bad field took the routing page, the cron provider gate and
+  // the failover chain down together. The deep rules now live in lib/schema.mjs, the same
+  // module the HTTP write and the backup restore validate against.
+  return normalizeRoutingDoc(readJson(ROUTING_FILE));
 }
 // F08 (v1.3.5 audit): Windows ignores POSIX modes, so the 0600 above is a no-op there
 // and every credential-bearing file kept the inherited (often broad) profile ACL — the
@@ -337,77 +333,12 @@ const { splitModel, keyEnvsFor, keyEnvAt, hasLiteralKey, coolModel, coolKey, cle
 // (v1.4.2 review M7): a multi-user host can forbid loopback/link-local targets entirely by
 // starting the server with PIWB_DISALLOW_LOCAL_URLS=1 — the UI's own probe then reports the
 // refusal in its status line instead of silently reaching an internal service.
-const LOCAL_URL_HOSTNAMES = new Set(['localhost']);
-const isLocalUrlHostname = (hostname) => {
-  const h = String(hostname || '').toLowerCase();
-  if (LOCAL_URL_HOSTNAMES.has(h) || h.endsWith('.localhost') || h.endsWith('.local')) return true;
-  if (h === '::1' || h === '[::1]' || h === '::' || h.endsWith('.ipv6-literal.net')) return true;
-  // IPv4 literals: loopback / link-local / private ranges that must never be probed on a shared host
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) {
-    const o = h.split('.').map(Number);
-    if (o[0] === 127 || o[0] === 10 || o[0] === 0 || (o[0] === 169 && o[1] === 254) || (o[0] === 192 && o[1] === 168) || (o[0] === 172 && o[1] >= 16 && o[1] <= 31)) return true;
-  }
-  return false;
-};
-const assertHttpUrl = (raw) => {
-  let parsed;
-  try { parsed = new URL(String(raw || '')); } catch { return null; }
-  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname) return null;
-  if (process.env.PIWB_DISALLOW_LOCAL_URLS === '1' && isLocalUrlHostname(parsed.hostname)) return null;
-  return parsed;
-};
-// fetch + streaming size cap: a misbehaving endpoint must not balloon server memory
-// (content-length alone is not enough — chunked responses omit it)
-// v1.4.2 review M7: `redirect: 'manual'` + a hop budget. Node's default fetch FOLLOWS a
-// cross-host 302 and re-attaches the caller's headers — including the `x-api-key` /
-// `authorization` this module puts on — so a provider (or an attacker who can answer its
-// baseUrl) could bounce a probe to any other host and collect the credential. Following
-// manually means each hop is re-checked by the same loop, and credentials are only ever
-// attached to the URL the caller actually named.
-const MAX_REDIRECT_HOPS = 3;
-// credentials belong to the endpoint the caller named. On a redirect the same headers must
-// NOT be replayed to the new host (that is the leak M7 proved: Node's default follow sent
-// x-api-key across a 302 verbatim). The response body/keepalive bits survive; auth does not.
-const STRIP_ON_REDIRECT = /^(authorization|x-api-key|x-goog-api-key|cookie|anthropic-version)$/i;
-async function fetchJsonCapped(url, opts = {}, maxBytes = 2e6) {
-  let current = String(url);
-  let hopOpts = opts;
-  for (let hop = 0; ; hop++) {
-    const r = await fetch(current, { ...hopOpts, redirect: 'manual' });
-    if (r.status >= 300 && r.status < 400) {
-      const loc = r.headers.get('location');
-      if (!loc) return { r, j: {} };
-      if (hop >= MAX_REDIRECT_HOPS) throw new Error(`too many redirects (> ${MAX_REDIRECT_HOPS})`);
-      const next = new URL(loc, current); // relative Locations resolve against the current hop
-      if (next.protocol !== 'http:' && next.protocol !== 'https:') throw new Error(`redirect to a non-http(s) URL refused: ${next.protocol}`);
-      current = String(next);
-      const headers = {};
-      for (const [k, v] of Object.entries(hopOpts.headers || {})) { if (!STRIP_ON_REDIRECT.test(k)) headers[k] = v; }
-      hopOpts = { ...hopOpts, headers };
-      continue;
-    }
-    let buf;
-    if (r.body && typeof r.body.getReader === 'function') {
-      const reader = r.body.getReader();
-      const chunks = [];
-      let total = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.length;
-        if (total > maxBytes) { try { await reader.cancel(); } catch { /* already cancelled */ } throw new Error(`response too large (> ${maxBytes} bytes)`); }
-        chunks.push(value);
-      }
-      buf = Buffer.concat(chunks);
-    } else {
-      buf = Buffer.from(await r.arrayBuffer());
-      if (buf.length > maxBytes) throw new Error(`response too large (> ${maxBytes} bytes)`);
-    }
-    let j = {};
-    try { j = JSON.parse(buf.toString('utf8')); } catch { j = {}; }
-    return { r, j };
-  }
-}
+// v1.4.3 review #1/#11/#25: the URL policy, the redirect hop budget and the credential
+// allow-list now live in lib/outbound-fetch.mjs — one implementation, unit-testable, used by
+// every caller. The header rule is an ALLOW-list, not a list of known credential names: a
+// provider's `headers` map is arbitrary user JSON, so an open set can only be closed by
+// enumerating what SURVIVES (content negotiation) rather than what is dropped.
+const { assertHttpUrl, fetchJsonCapped } = outboundFetch;
 
 // per-protocol auth: anthropic wants x-api-key (+ version header), google wants
 // x-goog-api-key, everything OpenAI-shaped speaks Bearer. api type comes from the
@@ -573,6 +504,10 @@ function attachPiReader(tabId, proc) {
       }
       if (ev.type === 'response' && ev.success && ev.data?.sessionFile && ev.data.sessionFile !== tab.sessionFile) {
         tab.sessionFile = ev.data.sessionFile;
+        // v1.4.3 review #6: keep BOTH fields in step. Everything that relaunches or
+        // re-attaches this tab reads `sessionPath`; leaving it null after pi reported a
+        // real file meant the conversation was on disk but unreachable.
+        if (!tab.sessionPath) tab.sessionPath = tab.sessionFile;
         broadcast({ type: 'pi-session-file', tabId, sessionFile: tab.sessionFile });
       }
       broadcast({ type: 'pi-event', tabId, data: ev });
@@ -606,7 +541,12 @@ function restartPiForTab(tabId, model) {
   if (!tab) return;
   const owner = tab.owner ?? null;
   const cwd = tab.cwd;
-  const sessionPath = tab.sessionPath;
+  // v1.4.3 review #6: a tab is opened with sessionPath = null (a brand-new conversation);
+  // pi later reports the file it created via `sessionFile`. The restart carried only
+  // sessionPath, so a cross-provider switch — the ONE path that must preserve history —
+  // relaunched without `--session` and silently started a fresh context. Prefer the file
+  // pi actually wrote, and carry both fields onto the replacement tab.
+  const sessionPath = tab.sessionFile || tab.sessionPath || null;
   const thinking = tab.thinking;
   const name = tab.name;
   closeTab(tabId, true);
@@ -618,7 +558,10 @@ function restartPiForTab(tabId, model) {
   const ov = prov ? envOverrideFor(prov) : null;
   const { __keyIdx, ...envExtra } = ov || {};
   const proc = spawnPi({ cwd, sessionPath, model, thinking, name, envExtra });
-  tabs.set(tabId, { proc, cwd, sessionPath, model, thinking: thinking || null, name: name || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, routeKeyEnv: ov ? keyEnvAt(prov, __keyIdx) : null, owner, orphanSince: null });
+  // sessionFile starts as the path we passed in: if pi echoes the same file back, the
+  // reader's `sessionFile !== tab.sessionFile` guard would not fire and the UI would keep
+  // showing "no session yet" for a conversation that is already on disk.
+  tabs.set(tabId, { proc, cwd, sessionPath, sessionFile: tab.sessionFile || null, model, thinking: thinking || null, name: name || null, startedAt: Date.now(), routeProvider: prov, routeKeyIdx: ov ? __keyIdx : null, routeKeyEnv: ov ? keyEnvAt(prov, __keyIdx) : null, owner, orphanSince: null });
   if (owner) { try { owner.adopted.add(tabId); } catch { /* socket gone */ } }
   attachPiReader(tabId, proc);
   if (owner && owner.readyState === 1) { try { owner.send(JSON.stringify({ type: 'pi-restarted', tabId, model })); } catch { /* gone */ } }
@@ -908,7 +851,7 @@ const AGENTS_SKILLS = path.join(HOME, '.agents', 'skills');
 const kb = createKbSkills({ MODEL_KB, MODEL_META_FILE, CFG_DIR, PI_SKILLS, AGENTS_SKILLS, readJson, loadConfig, fs, path });
 const { kbLookup, kbPrice, loadModelMeta, saveModelMeta, listSkills, skillArgsFor } = kb;
 const sources = createSources({ PI_SESSIONS, CODEX_SESSIONS, CLAUDE_PROJECTS, OMP_SESSIONS, GROK_DIR, HOME, DatabaseSync, kbPrice, loadConfig });
-const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, listJsonFiles } = sources;
+const { IMPORT_SOURCES, usageSummary, sessionTree, piSessionInfo, listJsonFilesBounded } = sources;
 const bt = createBackupTerminal({ CFG_DIR, HOME, CFG_FILE, ROUTING_FILE, CRON_FILE, MODEL_META_FILE, PI_MODELS, PI_SETTINGS, PI_SKILLS, CODEX_SESSIONS, CLAUDE_PROJECTS, VERSION: readJson(path.join(__dirname, 'package.json'))?.version || '0.0.0', listSkills, createZip, readZip, spawn, fs, path });
 const { exportBackupZip, importBackupZip, migrateScan, openExternalTerm, execInCwd } = bt;
 
@@ -956,7 +899,8 @@ async function hProjectsRemove(req, res, u) {
 
 async function hSessionsPi(req, res, u) {
     const cwdQ = u.searchParams.get('cwd');
-    const files = listJsonFiles(PI_SESSIONS, 2);
+    // v1.4.3 review #15: bounded walk — the old one stat'ed the whole history to keep 300
+    const { files, capped } = listJsonFilesBounded(PI_SESSIONS, 2);
     // v1.4.0 review #3: piSessionInfo answers null for a file that vanished between the
     // listing and its stat (rotation, an agent cleaning up, the user deleting it). The
     // filter below only guarded the cwd comparison — with no `cwd` param the `||`
@@ -965,7 +909,8 @@ async function hSessionsPi(req, res, u) {
     // where it is produced; lib/sources.mjs already does this for its own omp listing.
     const items = files.map(piSessionInfo).filter((s) => s && (!cwdQ || (s.cwd && path.resolve(s.cwd) === path.resolve(cwdQ))));
     items.sort((a, b) => b.mtime - a.mtime);
-    return json(res, 200, { sessions: items.slice(0, 300) });
+    // `capped`/`truncated` let the panel say the list is partial instead of posing as all
+    return json(res, 200, { sessions: items.slice(0, 300), truncated: capped || items.length > 300 });
 }
 
 async function hSessionsDelete(req, res, u) {
@@ -1006,11 +951,10 @@ const scrubUrlCreds = (raw) => {
   } catch { /* not a parseable URL — leave as-is */ }
   return s2;
 };
-// MCP args can inline credentials too: --token xxx / --api-key=xxx / --password xxx
-const scrubArgSecrets = (args) => args.map((a) => {
-  if (typeof a !== 'string') return a;
-  return a.replace(/(--(?:api[-_]?key|token|password|secret|credential)(?:[= ]))(\S+)/gi, '$1***');
-});
+// v1.4.3 review #2: the argv scrubber lives in lib/mcp-scrub.mjs (array-shaped: the flag
+// consumes its successor, and --flag=value / -H / --auth-token are covered) so the GET
+// endpoint and the unit test share one implementation instead of drifting apart.
+import { scrubArgSecrets } from './lib/mcp-scrub.mjs';
 const maskApiKeys = (doc) => {
   for (const p of Object.values(doc.providers || {})) {
     if (p && typeof p.apiKey === 'string' && p.apiKey && !p.apiKey.startsWith('$')) p.apiKey = KEY_SENTINEL;
@@ -1035,18 +979,11 @@ async function hModels(req, res, u) {
         // v1.3.8 review P2-7/P2-8: a null provider row or a `__proto__` key used to survive
         // the write and then TypeError every reader (`kbfill` walks m.id). Validate the
         // SHAPE here, where a 400 costs nothing, instead of trusting the doc.
-        if (!isSafeKey(name)) return json(res, 400, { error: `provider name not allowed: ${name}` });
-        if (!p || typeof p !== 'object' || Array.isArray(p)) return json(res, 400, { error: `provider ${name} must be an object` });
-        if (p.models != null) {
-          if (!Array.isArray(p.models)) return json(res, 400, { error: `provider ${name}: models must be an array` });
-          for (const m of p.models) {
-            if (!m || typeof m !== 'object' || Array.isArray(m) || typeof m.id !== 'string' || !m.id) {
-              return json(res, 400, { error: `provider ${name}: every model needs a string id` });
-            }
-          }
-        } else {
-          p.models = [];
-        }
+        // v1.4.3 review #25: the rules now come from lib/schema.mjs — the same module the
+        // backup restore and loadRouting() validate against, so the doors cannot disagree.
+        const why = providerRowProblem(name, p);
+        if (why) return json(res, 400, { error: why });
+        if (p.models == null) p.models = [];
         // credential ownership follows the ENDPOINT — and an old provider with a key
         // but NO baseUrl is an UNKNOWN trust domain, not the same one (audit #02).
         // F04: GET answers with a scrubbed URL, so a plain UI save round-trips the
@@ -1198,6 +1135,13 @@ function probeModels() {
     proc.stderr.setEncoding('utf8');
     proc.stderr.on('data', () => { /* discarded — draining keeps the pipe from filling */ });
     proc.on('error', () => done({ models: [] }));
+    // v1.4.3 review #10: the ordinary tab spawn has listened for a stream-level EPIPE
+    // since the 1.3.x audit ("an async EPIPE must not become an uncaughtException — the
+    // sync try/catch around write() cannot see stream-level errors"); this probe never
+    // did. pi dying before it reads stdin turns the write below into an async 'error'
+    // event on proc.stdin, which reaches the global uncaughtException handler and that
+    // handler exits the whole service. Same guard, same shape.
+    proc.stdin.on('error', () => done({ models: [] }));
     try {
       proc.stdin.write(JSON.stringify({ id: 'm1', type: 'get_available_models' }) + '\n');
       proc.stdin.end();
@@ -1292,11 +1236,30 @@ async function hProvidersKbfill(req, res, u) {
         n++;
       }
     }
+    // v1.4.3 review #13: two files carry this answer — models.json (contextWindow /
+    // maxTokens) and model-meta.json (prices). They were written one after the other, so a
+    // failure on the second left the model parameters committed with no prices attached
+    // while the endpoint answered 500 — a half-applied fill that no retry could reconcile.
+    // Same shape as the provider transaction: snapshot both, write both, restore both.
     fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
-    atomicWrite(PI_MODELS, JSON.stringify(doc, null, 2));
-    const meta = loadModelMeta();
+    const metaPrev = loadModelMeta();
+    const meta = { ...metaPrev };
     for (const [id, price] of Object.entries(pricing)) meta[`${provider}|${id}`] = price;
-    saveModelMeta(meta);
+    let modelsPrev = null;
+    try { modelsPrev = fs.readFileSync(PI_MODELS, 'utf8'); } catch { modelsPrev = null; }
+    try {
+      atomicWrite(PI_MODELS, JSON.stringify(doc, null, 2));
+      saveModelMeta(meta);
+    } catch (e) {
+      const rollback = [];
+      try { if (modelsPrev === null) fs.rmSync(PI_MODELS, { force: true }); else atomicWrite(PI_MODELS, modelsPrev); }
+      catch (re) { rollback.push(`models.json: ${(re && re.message) || re}`); }
+      try { saveModelMeta(metaPrev); } catch (re) { rollback.push(`model-meta.json: ${(re && re.message) || re}`); }
+      return json(res, 500, {
+        error: `知识库填充写入失败：${(e && e.message) || e}`,
+        ...(rollback.length ? { rollbackFailed: rollback, detail: '两个文件未能同时回滚，磁盘可能处于部分更新状态' } : { detail: '已回滚到填充前的状态' }),
+      });
+    }
     return json(res, 200, { fills, pricing, priced: n });
 }
 
@@ -1319,12 +1282,14 @@ async function hRouting(req, res, u) {
         for (const [name, meta] of Object.entries(body.providers)) {
           // v1.3.8 review P2-7: `{"providers":{"x":null}}` used to throw at meta.enabled and
           // surface as a 500 on an endpoint that only ever receives hand-edited JSON.
-          if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return json(res, 400, { error: `provider ${name} must be an object` });
-          // v1.3.8 review P2-8: a provider named `__proto__` read Object.prototype back
-          // (truthy), then the assignments below wrote enabled/priority onto EVERY object in
-          // the process. Routing providers are a plain string-keyed map; these three keys are
-          // never legitimate names and must not be reachable through prototype lookup.
-          if (!isSafeKey(name)) return json(res, 400, { error: `provider name not allowed: ${name}` });
+          // v1.4.3 review #4: object-ness was all this checked, so `{"keyEnvs":1}` was
+          // written and then threw in failover's `for...of` on every failure decision. The
+          // deep rules now come from lib/schema.mjs — same module as the restore and loader.
+          // (it also carries the P2-8 rule: a provider named `__proto__` read
+          // Object.prototype back, truthy, and the assignments below then wrote
+          // enabled/priority onto EVERY object in the process.)
+          const why = routingMetaProblem(name, meta);
+          if (why) return json(res, 400, { error: why });
           if (!Object.hasOwn(routing.providers, name)) routing.providers[name] = {};
           const cur = routing.providers[name];
           if (typeof meta.enabled === 'boolean') cur.enabled = meta.enabled;
@@ -1955,6 +1920,41 @@ async function hMcpInstall(req, res, u) {
     if (fs.existsSync(bundledTypebox)) {
       fs.cpSync(bundledTypebox, path.join(stage, 'node_modules', 'typebox'), { recursive: true });
     }
+    // v1.4.3 review #5: the dependency install used to run on the LIVE directory, AFTER the
+    // old tree had already been renamed to a grave and DELETED. `npm ci` failing there (no
+    // network, a registry hiccup, a lock mismatch) returned 500 while the previously-working
+    // extension was already gone — the endpoint reported an error and destroyed a working
+    // install in the same breath. Everything now happens in the staging dir; the swap is the
+    // last step and only runs once the tree is complete and loadable.
+    const hasDepInStage = () => fs.existsSync(path.join(stage, 'node_modules', 'typebox'));
+    if (!hasDepInStage()) {
+      // the committed lock pins typebox by integrity hash; npm ci enforces it.
+      // lifecycle scripts are a supply-chain door; typebox needs none.
+      const lockSrc = path.join(srcDir, 'package-lock.json');
+      if (fs.existsSync(lockSrc)) fs.copyFileSync(lockSrc, path.join(stage, 'package-lock.json'));
+      const cmd = fs.existsSync(path.join(stage, 'package-lock.json'))
+        ? 'npm ci --omit=dev --no-fund --no-audit --ignore-scripts'
+        : 'npm install --omit=dev --no-fund --no-audit --ignore-scripts';
+      const r = await execInCwd(stage, cmd, { timeoutMs: 120000 });
+      if (r.code !== 0) {
+        fs.rmSync(stage, { recursive: true, force: true });
+        return json(res, 500, { ok: false, dest: destDir, error: ('typebox 安装失败: ' + (r.err || r.out || ('exit ' + r.code))).slice(0, 400), note: '原有扩展保持不变' });
+      }
+    }
+    // last gate before the swap: the entry must actually load from the staged tree. A tree
+    // that installs but cannot resolve its imports is the exact failure the 1.4.1 review
+    // found (a missing sibling module answered ok:true), so assert the resolution now —
+    // while the old extension is still untouched.
+    if (!fs.existsSync(path.join(stage, 'index.js'))) {
+      fs.rmSync(stage, { recursive: true, force: true });
+      return json(res, 500, { ok: false, dest: destDir, error: 'staged extension has no index.js', note: '原有扩展保持不变' });
+    }
+    try {
+      await import(pathToFileURL(path.join(stage, 'index.js')).href);
+    } catch (e) {
+      fs.rmSync(stage, { recursive: true, force: true });
+      return json(res, 500, { ok: false, dest: destDir, error: ('staged extension does not load: ' + ((e && e.message) || e)).slice(0, 400), note: '原有扩展保持不变' });
+    }
     // swap: old → grave, staging → live. A rename failure restores the old tree, so a
     // previously-working extension is never left half-installed (M10).
     const grave = path.join(parent, `.mcp-bridge-old-${process.pid}-${Date.now()}`);
@@ -1968,21 +1968,7 @@ async function hMcpInstall(req, res, u) {
       if (hadOld) { try { fs.renameSync(grave, destDir); } catch { /* the grave stays for manual recovery */ } }
       return json(res, 500, { ok: false, dest: destDir, error: `安装交换失败（${(e && e.message) || e}）${hadOld ? '，原扩展已恢复' : ''}` });
     }
-    const hasDep = fs.existsSync(path.join(destDir, 'node_modules', 'typebox'));
-    if (!hasDep) {
-      // the committed lock pins typebox by integrity hash; npm ci enforces it.
-      // lifecycle scripts are a supply-chain door; typebox needs none.
-      const lockSrc = path.join(srcDir, 'package-lock.json');
-      if (fs.existsSync(lockSrc)) fs.copyFileSync(lockSrc, path.join(destDir, 'package-lock.json'));
-      const cmd = fs.existsSync(path.join(destDir, 'package-lock.json'))
-        ? 'npm ci --omit=dev --no-fund --no-audit --ignore-scripts'
-        : 'npm install --omit=dev --no-fund --no-audit --ignore-scripts';
-      const r = await execInCwd(destDir, cmd, { timeoutMs: 120000 }); // awaited: the UI must never claim success before the dep exists
-      if (r.code !== 0) {
-        return json(res, 500, { ok: false, dest: destDir, error: ('typebox 安装失败: ' + (r.err || r.out || ('exit ' + r.code))).slice(0, 400) });
-      }
-    }
-    return json(res, 200, { ok: true, dest: destDir, note: hasDep ? 'already installed' : 'typebox installed' });
+    return json(res, 200, { ok: true, dest: destDir, note: hasDepInStage ? 'typebox installed in staging' : 'typebox was bundled' });
 }
 
 async function hBackupExport(req, res, u) {

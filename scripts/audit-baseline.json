@@ -1,0 +1,45 @@
+{
+  "_comment": "Dev-tree audit baseline (v1.4.3 review #27). Every high/critical advisory that reaches the FULL dev tree is named here with a reason; scripts/audit-gate.mjs fails the build on anything NEW. A stale entry should be deleted. The SHIPPED trees (root production deps, runtime lock) are audited separately with zero tolerance. None of these packages executes in the shipped runtime: they arrive through build-time and e2e devDependencies (@earendil-works/pi-coding-agent, playwright, electron-builder toolchain) and the official `npm audit fix --force` suggestion would downgrade pi to a version that does not exist.",
+  "entries": [
+    {
+      "package": "undici",
+      "id": "https://github.com/advisories/GHSA-rfgv-xxqx-mfg5",
+      "reason": "DoS via unrequested WebSocket subprotocol. Arrives through @earendil-works/pi-coding-agent (dev-only; the shipped runtime pins undici 8.11.2 with pip integrity \u2014 see pin-runtime-deps.mjs + assert-sbom-pins.mjs). Upstream fix awaits a pi release we cannot force from here."
+    },
+    {
+      "package": "undici",
+      "id": "https://github.com/advisories/GHSA-w293-vg96-wgc3",
+      "reason": "TLS certificate validation bypass via dropped connect options in BalancedPool. Same provenance as above: dev-tree copy of pi's dependency, not the shipped runtime copy (8.11.2 pinned)."
+    },
+    {
+      "package": "@modelcontextprotocol/sdk",
+      "id": "https://github.com/advisories/GHSA-22jm-h49p-29qw",
+      "reason": "Experimental tasks not tied to the creating session. Arrives via @earendil-works/pi-coding-agent devDependency; the MCP server the workbench ships talks stdio to local processes over a token-gated loopback API \u2014 the advisory's attack surface (multi-tenant HTTP MCP servers) does not exist here. Tracked for the pi upgrade."
+    },
+    {
+      "package": "@modelcontextprotocol/sdk",
+      "id": "https://github.com/advisories/GHSA-46jr-4wx8-v453",
+      "reason": "A single oversized HTTP request can exhaust server memory during validation. Arrives via the same pi devDependency; the workbench's own MCP install path caps args/env and the server enforces a 25 MB import cap. Pending pi's SDK bump."
+    },
+    {
+      "package": "brace-expansion",
+      "id": "https://github.com/advisories/GHSA-qhr7-859c-m2p7",
+      "reason": "DoS via uncontrolled recursion on nested brace groups. Dev-tree transitive (glob \u2192 minimatch \u2192 brace-expansion) at old versions; the shipped runtime pins brace-expansion 5.0.12 (assert-sbom-pins validates every physical copy)."
+    },
+    {
+      "package": "brace-expansion",
+      "id": "https://github.com/advisories/GHSA-6j4f-fj2g-mc7p",
+      "reason": "DoS via uncontrolled recursion in parseCommaParts. Same dependency chain and same mitigation as GHSA-qhr7-859c-m2p7."
+    },
+    {
+      "package": "http-cache-semantics",
+      "id": "https://github.com/advisories/GHSA-ch52-4w7c-c8xp",
+      "reason": "max-stale handling can disclose cross-user cached responses. Dev-tree transitive of the electron-builder/eslint toolchain; none of the excluded http-cache-semantics versions ship in the runtime tree."
+    },
+    {
+      "package": "playwright",
+      "id": "https://github.com/advisories/GHSA-7mvr-c777-76hp",
+      "reason": "Playwright downloads browsers without verifying the SSL certificate. The workbench pins playwright 1.49.1 as an exact devDependency used ONLY by the CI/probe scripts (ui-probe, chat-e2e, ui-a11y, ui-contract). The advisory is about Playwright's installer fetching a browser over an insecure channel; CI fetches from Playwright's CDN over https and the pinned version's advisory has no in-repo fix. Tracked for the pinned-version bump."
+    }
+  ]
+}

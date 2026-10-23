@@ -1,5 +1,15 @@
 /* Codex-style dropdown menus (model / thinking) — composer anchors open upward */
 
+// v1.4.3 review #20: this file binds its chip handlers at SCRIPT LOAD, but app.js only
+// sets `window.__wb` after `await loadProjects()` — so a click during a slow boot reached
+// `__wb.state` on undefined and threw out of the click handler. The composer's chips are
+// simply not usable before the bridge exists; say so and stay inert instead of throwing.
+function bridgeOrNull() {
+  const b = window.__wb;
+  if (!b) { const el = document.getElementById('statusline'); if (el) el.textContent = '界面仍在启动，请稍候…'; return null; }
+  return b;
+}
+
 function friendlyModel(id) {
   let m = (id || '').split('/').pop() || id;
   if (m.startsWith('gpt-')) m = m.slice(4);
@@ -95,7 +105,9 @@ function openDropdown(anchor, buildItems) {
 // model chip → only models from the provider currently in use.
 // switching provider config happens in 配置→模型（设为默认）; failover also lands here.
 document.querySelector('#model-chip').onclick = () => {
-  const st = __wb.state;
+  const br = bridgeOrNull();
+  if (!br) return;
+  const st = br.state;
   const curProv = (st.selModel || st.cfg?.defaultModel || '').split('/')[0]
     || (st.modelsAvailable[0] || {}).provider || '';
   const mine = st.modelsAvailable.filter((m) => m.provider === curProv).slice(0, 200);
@@ -109,13 +121,17 @@ document.querySelector('#model-chip').onclick = () => {
       label: friendlyModel(m.id),
       checked: key === st.selModel,
       cb: () => {
+        // v1.4.3 review #18: this wrote `st.pendingSetModel` (SINGULAR) while app.js only
+        // ever read `state.pendingSetModels` (the per-model Map added in v1.4.2 M6) — the
+        // two containers were never connected, so a failed set_model from THIS menu could
+        // not revert the chip and the UI kept showing a model pi was not running. Register
+        // through the same helper the config panel uses, so both paths share one contract.
+        const prev = st.selModel;
         st.selModel = key;
-        __wb.updateModelChip();
-        // F41 (v1.3.5 audit): the chip is optimistic — remember what we asked for and
-        // what was ACKED before, so a FAILED set_model reverts instead of leaving a lie
-        st.pendingSetModel = { model: key, prev: st.lastAckedModel || null };
-        __wb.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
-        __wb.rpcTo({ type: 'get_available_thinking_levels' }); // the new model may support different levels
+        br.updateModelChip();
+        br.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
+        br.trackModelSwitch(key, prev);
+        br.rpcTo({ type: 'get_available_thinking_levels' }); // the new model may support different levels
       },
     });
   }
@@ -124,20 +140,29 @@ document.querySelector('#model-chip').onclick = () => {
 
 // thinking chip → thinking levels only
 document.querySelector('#think-chip').onclick = () => {
+  const br = bridgeOrNull();
+  if (!br) return;
   const levels = { off: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '特高', max: '最大' };
   // a model that advertises its levels gets only those offered — xhigh/max exist on some models only
-  const avail = Array.isArray(__wb.state.availableLevels) ? __wb.state.availableLevels.map(String) : null;
-  if (__wb.state.tabId) __wb.rpcTo({ type: 'get_available_thinking_levels' }); // refresh for the next open
+  const avail = Array.isArray(br.state.availableLevels) ? br.state.availableLevels.map(String) : null;
+  if (br.state.tabId) br.rpcTo({ type: 'get_available_thinking_levels' }); // refresh for the next open
   openDropdown(document.querySelector('#think-chip'), () =>
     Object.entries(levels)
       .filter(([lv]) => !avail || avail.includes(lv))
       .map(([lv, zh]) => ({
         label: zh,
-        checked: lv === (__wb.state.thinkLevel || 'medium'),
+        checked: lv === (br.state.thinkLevel || 'medium'),
         cb: () => {
-          __wb.state.thinkLevel = lv;
+          // v1.4.3 review #24: the chip and state were updated optimistically and
+          // set_thinking_level had no confirmation path at all — a closed socket or a
+          // pi rejection left the UI claiming a level the engine never accepted, and
+          // every later session carried the wrong level. Track the switch until the
+          // server answers, and revert on failure (app.js piEventHandlers).
+          const prev = br.state.thinkLevel || 'medium';
+          br.state.thinkLevel = lv;
           document.querySelector('#think-chip').textContent = `思考 · ${zh}`;
-          __wb.rpcTo({ type: 'set_thinking_level', level: lv });
+          br.trackThinkingSwitch(lv, prev);
+          br.rpcTo({ type: 'set_thinking_level', level: lv });
         },
       }))
   );

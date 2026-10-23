@@ -32,4 +32,40 @@ for (const [name, want] of Object.entries(WANT)) {
   }
 }
 if (failed) process.exit(1);
+// v1.4.3 review #36: the pins above prove a FEW named packages are right; they say nothing
+// about coverage. Compare the SBOM's component set against the lockfile the runtime was
+// installed from — every package npm recorded must be described, at the same version, at
+// the same physical path. That turns "the SBOM parsed" into "the SBOM accounts for the tree".
+const lockFile = process.argv[3] || 'runtime-package-lock.json';
+if (lockFile && fs.existsSync(lockFile)) {
+  const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+  const want = new Map();
+  for (const [key, entry] of Object.entries(lock.packages || {})) {
+    if (!key || !key.startsWith('node_modules/')) continue; // the "" row is the root project
+    if (!entry || entry.link || entry.dev) continue;
+    const name = entry.name || key.slice(key.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    want.set(key, { name, version: entry.version });
+  }
+  const have = new Map();
+  for (const c of components) {
+    const p = (c.properties || []).find((x) => x && x.name === 'path')?.value;
+    if (p) have.set(p, { name: c.name, version: c.version });
+  }
+  const missing = [];
+  const mismatched = [];
+  for (const [p, w] of want) {
+    const got = have.get(p);
+    if (!got) missing.push(`${w.name}@${w.version} (${p})`);
+    else if (got.version !== w.version) mismatched.push(`${p}: lock ${w.version} vs sbom ${got.version}`);
+  }
+  if (missing.length || mismatched.length) {
+    failed = true;
+    console.error(`SBOM coverage FAILED: ${want.size} locked packages expected, ${have.size} described`);
+    for (const m of missing.slice(0, 20)) console.error('  missing: ' + m);
+    if (missing.length > 20) console.error(`  … and ${missing.length - 20} more missing`);
+    for (const m of mismatched.slice(0, 20)) console.error('  version drift: ' + m);
+    process.exit(1);
+  }
+  console.log(`sbom coverage: ${want.size} locked packages all described at their locked version/path`);
+}
 console.log(`sbom components: ${components.length} | pin assertion ok (${Object.entries(WANT).map(([n, w]) => `${n} ${w}`).join(' / ')})`);

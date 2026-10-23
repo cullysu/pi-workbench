@@ -474,13 +474,33 @@ const check = (name, ok, detail = '') => {
     mcp.includes('delete e.PIWB_TOKEN'), 'bridge env strip missing');
 
   // P2-8: prototype-pollution gate on every request-supplied provider key
+  // v1.4.3 review #25: the unsafe-key rule and the deep member rules moved into
+  // lib/schema.mjs so the HTTP door, the backup restore and the loader cannot drift apart.
+  // A string check on server.mjs would now pass on a comment — assert the BEHAVIOUR of the
+  // shared module instead, and that both doors still call it.
+  const schemaSrc = rd(path.join('lib', 'schema.mjs'));
   check('P2-8 routing/models reject __proto__ and guard own properties',
-    srv.includes('const isSafeKey') && srv.includes('isSafeKey(name)') && srv.includes('Object.hasOwn(routing.providers, name)'),
+    schemaSrc.includes('UNSAFE_KEYS') && schemaSrc.includes('isSafeKey') && srv.includes('Object.hasOwn(routing.providers, name)'),
     'unsafe-key gate missing');
+  {
+    const mod = await import(pathToFileURL(path.join(repoRoot, 'lib', 'schema.mjs')).href);
+    const protoRejected = ['__proto__', 'constructor', 'prototype'].every((k) => !mod.isSafeKey(k));
+    const rowRejected = !!mod.providerRowProblem('ok', { models: [null] });
+    // the exact review shapes: a restored models.json with a null model row, and a routing
+    // doc whose provider metadata has a non-string keyEnvs — both used to import cleanly and
+    // then explode failover. Behaviour assertions on the shared module, so a string left in
+    // a comment can never satisfy them.
+    const docModelsRejected = !!mod.modelsDocProblem({ providers: { p: { models: [null] } } });
+    const docRoutingRejected = !!mod.routingDocProblem({ providers: { p: { keyEnvs: 1 } } });
+    const legacyRoutesRejected = !!mod.routingDocProblem({ routes: { p: null } });
+    check('P2-8b the shared gate actually rejects prototype keys and bad rows',
+      protoRejected && rowRejected && docModelsRejected && docRoutingRejected && legacyRoutesRejected,
+      `proto=${protoRejected} row=${rowRejected} models=${docModelsRejected} routing=${docRoutingRejected} legacy=${legacyRoutesRejected}`);
+  }
 
   // P2-7: malformed members are 400s, not 500s
   check('P2-7 cron/routing/models validate every member, not just the container',
-    srv.includes('每个任务必须是对象') && srv.includes('must be an object') && srv.includes('every model needs a string id'),
+    srv.includes('每个任务必须是对象') && srv.includes('providerRowProblem(') && srv.includes('routingMetaProblem(') && schemaSrc.includes('every model must be an object'),
     'member validation missing');
 
   // P2-6: imports are capped before the whole file is read

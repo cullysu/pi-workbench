@@ -16,9 +16,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { createBackupTerminal } from '../lib/backup-terminal.mjs';
 import { createZip, readZip } from '../zip.mjs';
+import { trackTemp } from './_tmp.mjs'; // v1.4.3 review #33: scratch dirs are removed on exit
 
 function tree() {
-  const home = realFs.mkdtempSync(path.join(os.tmpdir(), 'piwb-bk-'));
+  const home = trackTemp(realFs.mkdtempSync(path.join(os.tmpdir(), 'piwb-bk-')));
   const cfgDir = path.join(home, '.pi-workbench');
   const piAgent = path.join(home, '.pi', 'agent');
   realFs.mkdirSync(cfgDir, { recursive: true });

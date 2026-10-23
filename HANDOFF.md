@@ -9,12 +9,20 @@
 
 ## 0. 一句话状态
 
-v1.4.2 的独立审查（4 高 + 11 中 + 6 工程）已**逐条处置完毕**并作为 **v1.4.3** 提交（见 §11）：
-4 项高优先级全部修复且带先红后绿的锁，中优先级属实项 9 项修复、架构/基建项如实入队；
-**唯一仍卡在人这边的门控还是代码签名 / 公证**（见 §5），三平台安装包实机验收仍空白。
+v1.4.3 的独立审查（39 项：4 高 + 9 中 + 4 导入/性能 + 7 前端 + 13 CI/测试/发布 + 2 架构）已
+**逐条处置完毕**并作为 **v1.4.4** 提交（见 §13）：4 项高优先级全部修复且带先红后绿的锁，
+中优先级 9 项全修，导入/性能 4 项全修，前端 7 项全修，CI/测试/发布 12 项修复 + 1 项如实声明
+仍在人手里（代码签名）。
 
 | 事实 | 值 |
 |---|---|
+| 仓库 | `C:\Users\cully\Documents\pi-workbench` |
+| 分支 | `main` |
+| 本轮基线 | `ab5bafb`（v1.4.3） |
+| v1.4.4 | 审查处置提交（tag 随本轮发布流程打） |
+| 版本链 | … → v1.4.1(`7b7b8c1`) → v1.4.2(`260afc3`) → v1.4.3(`c147b2e`) → **v1.4.4** |
+
+---|---|
 | 仓库 | `C:\Users\cully\Documents\pi-workbench` |
 | 分支 | `main`（已推送，`origin/main` = HEAD） |
 | v1.4.2 发布提交 | `260afc3`（tag `v1.4.2`，7 资产，已终验） |
@@ -322,3 +330,113 @@ Windows runner——ubuntu 没有 GTK 依赖树，而 Tauri 壳本来就 Windows
 终验：tag 解引用 = HEAD = CI sha = release target_commitish；线上 SHA256SUMS 与本地逐字节一致；
 重下 sbom + Tauri exe 哈希 MATCH；SBOM app=1.4.3、139 components；两个 exe FileVersion=1.4.3。
 **仍未做**：三平台安装包实机验收（#5/F50）、代码签名（F07）、崩溃安全 journal（M9）、M15 拆分。
+
+---
+
+## 13. v1.4.3 独立审查处置记录（wave 33 · 2026-10-23）
+
+基线 `ab5bafb`（v1.4.3），39 项。逐条对 HEAD 取证后的处置：
+
+### 高优先级 4 项 — 全部属实、全部修复、全部带红先行锁
+
+| 项 | 核实结论 | 修复 | 红先行证据 |
+|---|---|---|---|
+| #1 自定义凭据跨重定向 | 属实：清理规则是 5 个已知头的**拒绝表**，而 provider.headers 是任意用户 JSON | 改为跨源**白名单**（只留内容协商头），同源保留；策略移入 `lib/outbound-fetch.mjs` | 降级回拒绝表 → 测试报 `Ocp-Apim-Subscription-Key` 穿透（审查者的 canary 原样复现） |
+| #11 本地 URL 策略可被绕过 | 属实：只在首跳检查，后续只校验协议 | 同一 predicate 逐跳复用 | 删掉逐跳检查 → 测试报未被拒绝 |
+| #2 MCP 分拆参数泄露 | 属实：逐元素匹配，`["--token","secret"]` 两半都不命中 | 数组形状脱敏（flag 吞下一个值），覆盖 `--flag=value`/`-H`/`--header`/`--auth-token` | 降级回逐元素 → 测试输出 `actual: [ '--token', 'separate-secret-canary' ]` |
+| #3 备份恢复写入 `models:[null]` | 属实：只查容器不查元素，导入成功后 failover 抛 `Cannot read properties of null (reading 'id')` | 恢复路径复用 `lib/schema.mjs`（与 `POST /api/models` 同一实现） | 降级回容器检查 → verify 脚本崩溃在 `providerRowProblem`（精确复现审查者的 TypeError） |
+| #4 routing 深层坏类型 | 属实：`keyEnvs:1` 通过容器检查后在 failover `for...of` 抛；`routes:{p:null}` 在迁移处抛 | `loadRouting()` 改用共享 `normalizeRoutingDoc`（同一深层规则） | 降级回容器检查 → 测试报未被拒绝 |
+
+### 中优先级 9 项 — 属实、已修
+
+- **#5 MCP 安装顺序**：原顺序是 live→grave→stage→live→**删 grave**→才 `npm ci`。改为全部在
+  staging 完成 → 解析入口 → 才交换；失败时旧扩展原封不动。
+- **#6 跨 provider 切换丢上下文**：`restartPiForTab` 只用 `sessionPath`（新 tab 恒为 null），
+  改为 `sessionFile || sessionPath` 并同步两个字段。
+- **#7 回滚谎报成功**：`try{unlink}catch{}` 吞掉 EISDIR，接口答「已回滚到修改前的状态」而目录
+  还在。只静默 ENOENT；`fs` 改为可注入（否则该分支无法测试）。
+- **#8 快照/脱敏中间文件无界积累**：新增 retention（导出留 10、快照留 5）；`.redacted.json`
+  在 `finally` 删除；被拒导入自删快照，**但回滚失败的快照必须保留**（那是恢复路径，既有测试
+  也断言了这点）。
+- **#9 usage 原型污染**：`__proto__` 作为 model 会把 `ok/input/output` 写到 `Object.prototype`。
+  改 null-proto 桶 + 键名白名单 + 数值 finite 校验。
+- **#10 probe stdin EPIPE**：tab spawn 早有 stdin error 监听，probe 没有 → 异步 EPIPE 进
+  `uncaughtException` → 进程退出。补上；并给 `PIWB_PI_CLI` 加覆盖点使该路径可测。
+- **#12 删 provider 残留 routing 元数据**：同事务删除 `routing.providers[name]`。
+- **#13 kbfill 半事务**：两个文件快照/提交/回滚。
+- **#25 统一类型契约（根因）**：新建 `lib/schema.mjs`，HTTP 写入口、备份恢复、`loadRouting()`
+  三处共用同一套深层规则 —— 这正是审查者指出的「三套 validator」根因。
+
+### 导入/性能 4 项 — 属实、已修
+
+- **#14 嵌套 null block**：一个 `{"content":[null]}` 会让整个面板 500。统一走 `contentText()`
+  null-safe 读取。
+- **#15 扫描成本不受上限约束**：`walkFiles` 默认 `maxFiles: Infinity`。改为 walk 阶段设预算，
+  `capped`/`truncated` 上报 UI；Gemini lister 不再整文件 `readFileSync`。
+- **#16 OpenCode 无消息预算**：预算下推到 SQL `LIMIT`，达到即停并标 `truncated`。
+- **#17 Claude 账本截断不报**：补 `wantMeta`。
+
+### 前端 7 项 — 属实、已修
+
+#18（`pendingSetModel` 单数 / `pendingSetModels` Map 不通、`rpc-denied` 不回滚）、
+#19（MCP/cron 加载失败被空数据覆盖）、#20（启动期点 chip 访问未初始化 bridge）、
+#21（`loadProjects` 无 catch → 空白壳）、#22（403 自刷 `getItem` 未保护）、
+#23（`renderFiles` 无请求序号）、#24（思考等级无 ACK/回滚）。
+
+### CI/测试/发布 13 项 — 12 修 + 1 如实声明
+
+- **#26/#29 route-sweep**：端口改 OS 分配；写任何配置前必须证明监听者是**我们自己的子进程**
+  （`/api/identify` HMAC + `/api/kernel` 报告本次隔离 HOME）；汇总如实写「51 条自动验证 + 2 条
+  声明跳过」。
+- **#27 依赖审计**：删掉 `continue-on-error`，改用 `scripts/audit-gate.mjs` +
+  `scripts/audit-baseline.json`（8 条 high，各带来源与「为何无法在此修复」）。新增项立即失败，
+  过期项会被报告。**实测**：官方 registry 下 5 high / 0 critical / 8 条 advisory，与审查者数字一致。
+- **#28 Rust 单测**：原来在 ubuntu job 上挂 `if: runner.os == 'Windows'`（永远 false）。改为
+  独立 `tauri-test` job（windows-latest），并先创建 `tauri-build` 需要的 `pkg-runtime.zip` 占位
+  —— **本地实测**：空占位文件下 `cargo test --locked` 13/13 通过。
+- **#30 测试发现**：`scripts/run-tests.mjs` glob `tests/*.test.mjs`；空套件拒绝报绿；
+  CONTRIBUTING 的 `node --test tests/`（在当前 Node 上会失败）已改正。
+- **#31 UI 探针**：断言具名必需面板集合 + 最小数量（0 面板曾打印「全部通过（0 个）」）。
+- **#32 跨 OS e2e**：新增 `e2e-cross-os`（windows + macos 跑 ui-probe / ui-contract / ui-a11y）。
+- **#33 临时目录**：6 个测试文件改注册 `tests/_tmp.mjs`。**实测**：整轮跑完新增 0 个目录。
+- **#34 源码字符串断言**：两条已过时断言改为对 `lib/schema.mjs` 的**行为**断言（覆盖审查者的
+  精确形状），降级验证会真的变红。
+- **#35 runtime 组装残留**：`prepare-runtime.mjs` 先清空 `pkg-build`。**本地实测**：这一步当场
+  清掉了上一次会话遗留的旧 undici 8.9.0。
+- **#36 SBOM**：`sbom.mjs` 在不可读目录/不可解析 manifest/缺 vendor 表/零组件时**失败**而非跳过；
+  `assert-sbom-pins.mjs` 增加「锁文件里每个包都必须按锁定版本+路径被描述」→ **实测 169/169**。
+- **#37 AppImage 探针**：`--appimage-extract`、runtime.zip 解包、manifest 存在性都是硬门禁；
+  清理改为 kill 自己起的 PID，不再 `pkill -f`。
+- **#38 shell manifest 可复现**：`generatedAt` 跟随 `SOURCE_DATE_EPOCH`，未设则不写。
+- **#39 代码签名/公证**：**仍在人手里**（需要证书账号）。如实保留，不粉饰。
+
+### 真伪判定要点（给下一位接手者）
+
+1. **审查者的数字基本可信**：dev 树 5 high、route-sweep 51+2、SBOM 169 包 —— 本机实跑一致。
+2. **有一处需要澄清**：#28 说「clean checkout 下 cargo test 失败」属实，但原因不是测试本身，
+   而是 `tauri.conf.json` 把 `../pkg-runtime.zip` 声明为 bundle resource 且 build script 会校验。
+3. **审查者未提及但我顺手修掉的**：`pin-runtime-deps.mjs` 裸调 `tar` 导致 Windows 上 Git 的
+   GNU tar 把 `C:\...` 解析成远程主机（本地门禁与 CI 门禁因此不一致）；`PIWB_PI_CLI` 覆盖点。
+
+### 本机门禁（2026-10-23，v1.4.4 树上）
+
+| 门禁 | 结果 |
+|---|---|
+| `npm run lint` | 0 error / 0 warning |
+| `npm test` | **103 pass / 0 fail**（自动发现 9 个文件） |
+| `node scripts/verify-audit-fixes.mjs` | **127 PASS / 0 FAIL** |
+| `python3 scripts/route-sweep.py` | **51 verified + 2 skipped / 0 failures** |
+| `node scripts/audit-gate.mjs` | 8 条基线内 / 无基线外 high |
+| `node scripts/assert-version.mjs` | all manifests agree on 1.4.4 |
+| `node scripts/sbom.mjs` + `assert-sbom-pins` | 172 组件 / 169 锁文件包全覆盖 / pins ok |
+| `cd tauri && cargo test --locked` | **13 passed** |
+| UI/浏览器探针 | 本机无 Chromium，**未跑**（CI 覆盖） |
+
+### 仍未验证 / 仍空着的
+
+1. **三平台安装包实机验收**：CI 只对 Linux AppImage 做启动探测；Windows NSIS、Tauri NSIS、
+   macOS dmg 仍无「装完能启动」的证据。
+2. **代码签名 / 公证**（#39）：需证书账号。
+3. **浏览器探针本机未跑**：`ui-probe` / `chat-e2e` / `ui-contract` / `ui-a11y` 只在本轮改动后
+   由 CI 验证（新增的跨 OS job 也是首次运行）。
+4. **架构项 1-2**：`server.mjs` / `public/app.js` / `lib/sources.mjs` 仍是单文件大块，拆分入队。

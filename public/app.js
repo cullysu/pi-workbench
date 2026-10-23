@@ -64,6 +64,7 @@ const state = {
   modelsAvailable: [],
   importSrc: 'codex',
   thinkLevel: 'medium',
+  pendingThinkLevel: null,   // v1.4.3 review #24: the level awaiting its ack, and what to go back to
   turnHadTools: false,      // F22: a tool ran during the current prompt turn
   pendingSetModels: null,   // v1.4.2 review M6: per-MODEL set_model switches awaiting their ack — a failed ack reverts only its own switch
 };
@@ -121,14 +122,26 @@ async function apiParse(r) {
   if (!r.ok) return { ...(data && typeof data === 'object' ? data : null), error: (data && data.error) || `HTTP ${r.status}` };
   return data;
 }
-function apiToken() { return window.__API_TOKEN || window.__PIWB_TOKEN || ''; }
-function apiHeaders() { return Object.assign({ 'content-type': 'application/json' }, apiToken() ? { 'x-api-token': apiToken() } : {}); }
+function apiToken() { return window.__API_TOKEN || window.__PIWB_TOKEN || ''; }function apiHeaders() { return Object.assign({ 'content-type': 'application/json' }, apiToken() ? { 'x-api-token': apiToken() } : {}); }
 // stale page (token from a previous boot) → every call 403s; reload once to pick up the fresh token
+// v1.4.3 review #22: only setItem was guarded — a browser with storage disabled (private
+// mode under a policy, a cross-origin iframe, Safari's "block all cookies") throws SecurityError
+// on getItem too, and that throw aborted the promise chain before location.reload() ran, so
+// the page stayed on a token that could never work. An in-memory one-shot is the fallback.
+let pw403InMemory = false;
 function apiOn403(r) {
-  if (r.ok) { try { sessionStorage.removeItem('pw403'); } catch { /* private mode */ } } // a working request re-arms the one-shot reload
-  if (r.status === 403 && !sessionStorage.getItem('pw403')) {
-    try { sessionStorage.setItem('pw403', '1'); } catch { /* private mode may block storage */ }
-    location.reload();
+  if (r.ok) {
+    pw403InMemory = false;
+    try { sessionStorage.removeItem('pw403'); } catch { /* private mode may block storage */ }
+  }
+  if (r.status === 403) {
+    let seen = pw403InMemory;
+    try { seen = seen || !!sessionStorage.getItem('pw403'); } catch { /* storage blocked — memory carries it */ }
+    if (!seen) {
+      pw403InMemory = true;
+      try { sessionStorage.setItem('pw403', '1'); } catch { /* private mode may block storage */ }
+      try { location.reload(); } catch { /* some embedders refuse reload */ }
+    }
   }
   return r;
 }
@@ -181,6 +194,11 @@ function wsConnect() {
     }
     if (msg.type === 'opened') { resolveOpen(msg.tabId); return; }
     if (msg.type === 'rpc-denied') {
+      // v1.4.3 review #18: the server refuses set_model for a DISABLED provider (rpc-denied),
+      // and the old handler only printed a line — the chip stayed on a model pi never
+      // adopted, and every later error/failover report named the wrong model. A denial is
+      // a definitive "your request did not happen": settle the optimistic state here.
+      revertPendingComposerSwitch();
       $('#statusline').textContent = '请求被拒绝：' + (msg.reason || '会话不属于此连接或已关闭');
       return;
     }
@@ -938,6 +956,22 @@ piEventHandlers.push(function (ev) {
   // F41: a FAILED set_model ack reverts the optimistic chip — the model did not change.
   // v1.4.2 review M6: pendings are keyed by the MODEL that was requested, so an out-of-order
   // ack settles exactly its own switch and can never roll a newer selection back.
+  if (ev.type === 'response' && ev.command === 'get_available_thinking_levels' && Array.isArray(ev.data?.levels)) {
+    state.availableLevels = ev.data.levels.map(String);
+    return;
+  }
+  // v1.4.3 review #24: set_thinking_level had NO ack path — the chip was optimistic forever.
+  if (ev.type === 'response' && ev.command === 'set_thinking_level' && state.pendingThinkLevel) {
+    const pend = state.pendingThinkLevel;
+    state.pendingThinkLevel = null;
+    if (ev.success === false) {
+      state.thinkLevel = pend.prev;
+      const chip = document.querySelector('#think-chip');
+      if (chip) chip.textContent = '思考 · ' + (THINK_LABEL[pend.prev] || pend.prev);
+      $('#statusline').textContent = '思考等级切换失败：' + String(ev.error || 'pi 拒绝了该等级') + '——已恢复原等级';
+    }
+    return;
+  }
   if (ev.type === 'response' && ev.command === 'set_model' && state.pendingSetModels && state.pendingSetModels.size) {
     const ackedModel = typeof ev.model === 'string' ? ev.model : null;
     const keys = ackedModel && state.pendingSetModels.has(ackedModel) ? [ackedModel] : [...state.pendingSetModels.keys()];
@@ -1118,9 +1152,17 @@ $('#btn-files').onclick = () => {
   }
 };
 $('#btn-files-close').onclick = () => $('#files-panel').classList.add('hidden');
+// v1.4.3 review #23: this used to have no request sequence — walk into a directory, click
+// back to root quickly, and the SLOWER (deeper) response landed last and replaced the root
+// listing; the row handlers then read the mutated global `filesRel` and navigated to a path
+// the user never clicked. Each render owns a sequence number and the path it was issued
+// for; a response only paints if it is still the newest request for the CURRENT path.
+let filesRenderSeq = 0;
 async function renderFiles() {
+  const seq = ++filesRenderSeq;
+  const relAtRequest = filesRel;
   const crumbs = $('#files-crumbs');
-  const parts = filesRel ? filesRel.split('/') : [];
+  const parts = relAtRequest ? relAtRequest.split('/') : [];
   let html = `<button data-p="">${esc(filesRoot || '—')}</button>`;
   let acc = '';
   for (const part of parts) {
@@ -1131,7 +1173,8 @@ async function renderFiles() {
   crumbs.querySelectorAll('button').forEach((b) => { b.onclick = () => { filesRel = b.dataset.p; $('#file-view').classList.add('hidden'); renderFiles(); }; });
   const list = $('#files-list');
   list.innerHTML = `<div class="muted small" style="padding:10px">${t('loading')}</div>`;
-  const r = await api.get(`/api/files/list?root=${encodeURIComponent(filesRoot || '')}&path=${encodeURIComponent(filesRel)}`).catch(() => null);
+  const r = await api.get(`/api/files/list?root=${encodeURIComponent(filesRoot || '')}&path=${encodeURIComponent(relAtRequest)}`).catch(() => null);
+  if (seq !== filesRenderSeq || relAtRequest !== filesRel) return; // a newer navigation won — this response is stale
   list.innerHTML = '';
   if (!r || r.error) { list.innerHTML = `<div class="muted small" style="padding:10px">${esc((r && r.error) || '加载失败')}</div>`; return; }
   for (const it of r.items) {
@@ -1239,8 +1282,7 @@ function maybeGoalContinue() {
     submitPrompt(GOAL_CONTINUE_PROMPT, { resend: true });
   }, 700);
 }
-function updateModelChip() {
-  const chip = document.querySelector('#model-chip');
+function updateModelChip() {  const chip = document.querySelector('#model-chip');
   const mid = (state.selModel || '').split('/')[1] || state.selModel || '';
   if (!mid) { chip.textContent = '—'; return; }
   const short = mid.startsWith('gpt-') ? mid.slice(4) : mid;
@@ -1251,6 +1293,30 @@ function updateModelChip() {
 }
 
 // ---------- composer ----------
+// v1.4.3 review #18: `rpc-denied` means the server refused the whole request (a disabled
+// provider, a foreign tab). The optimistic chip/level must go back to what was last acked,
+// or the UI keeps naming a model/level the engine never adopted.
+const THINK_LABEL = { off: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '特高', max: '最大' };
+function revertPendingComposerSwitch() {
+  let reverted = false;
+  if (state.pendingSetModels && state.pendingSetModels.size) {
+    for (const [, pend] of state.pendingSetModels) {
+      if (pend && pend.prev && state.selModel !== pend.prev) { state.selModel = pend.prev; reverted = true; }
+    }
+    state.pendingSetModels.clear();
+  } else if (state.lastAckedModel && state.selModel !== state.lastAckedModel) {
+    state.selModel = state.lastAckedModel;
+    reverted = true;
+  }
+  if (reverted) updateModelChip();
+  if (state.pendingThinkLevel) {
+    const pend = state.pendingThinkLevel;
+    state.pendingThinkLevel = null;
+    state.thinkLevel = pend.prev;
+    const chip = document.querySelector('#think-chip');
+    if (chip) chip.textContent = '思考 · ' + (THINK_LABEL[pend.prev] || pend.prev);
+  }
+}
 const inputEl = $('#input');
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendPrompt(); }
@@ -2615,9 +2681,20 @@ function updateContextBar(pct) {
 }
 
 let cronJobs = [];
+let cronLoaded = false; // v1.4.3 review #19: saving over an unloaded list deletes every job
 async function loadCron() {
-  const r = await api.get('/api/cron').catch(() => ({ jobs: [] }));
-  cronJobs = r.jobs || [];
+  // v1.4.3 review #19: a failed GET resolved to `{jobs: []}` and the next save posted that
+  // empty list — one flaky load silently DELETED every scheduled job. A load failure now
+  // leaves the current list untouched and disables saving until a reload succeeds.
+  let loaded = false;
+  try {
+    const r = await api.get('/api/cron');
+    if (r && !r.error && Array.isArray(r.jobs)) { cronJobs = r.jobs; loaded = true; }
+  } catch { /* network died — keep what we have */ }
+  cronLoaded = loaded;
+  const saveBtn = $('#btn-cron-save');
+  if (saveBtn) saveBtn.disabled = !loaded;
+  if (!loaded) { $('#cron-status').textContent = '定时任务加载失败——为避免覆盖，保存已禁用；请点「刷新」重试'; }
   try {
     const av = (await api.get('/api/models/available')).models || [];
     const sel = $('#cron-model');
@@ -2714,6 +2791,9 @@ function renderCronJobs() {
   });
 }
 $('#btn-cron-save').onclick = async () => {
+  // v1.4.3 review #19: without a successful load, `cronJobs` is empty-or-stale and posting
+  // it replaces the real job list. Refuse until loadCron() has succeeded once.
+  if (!cronLoaded) { $('#cron-status').textContent = '定时任务未加载成功，已阻止保存（否则会覆盖现有任务）'; return; }
   const name = $('#cron-name').value.trim();
   const kind = $('#cron-kind').value;
   const prompt = $('#cron-prompt').value.trim();
@@ -2777,12 +2857,25 @@ async function loadTemplates() {
 async function loadBackup() {
   $('#backup-status').textContent = '';
 }
-async function loadMcp() {
-  const r = await api.get('/api/mcp/config').catch(() => ({ mcpServers: {} }));
-  $('#mcp-editor').value = JSON.stringify(r, null, 2);
-  $('#mcp-status').textContent = '';
+let mcpLoaded = false; // v1.4.3 review #19: saving over an unloaded doc replaces the real config
+async function loadMcp() {  // v1.4.3 review #19: same shape as cron — a failed load filled the editor with an empty
+  // document, and pressing 保存 then REPLACED the real MCP config with `{mcpServers:{}}`.
+  // On failure the editor keeps whatever it had and saving stays disabled.
+  let loaded = false;
+  try {
+    const r = await api.get('/api/mcp/config');
+    if (r && !r.error && r.mcpServers && typeof r.mcpServers === 'object') {
+      $('#mcp-editor').value = JSON.stringify(r, null, 2);
+      loaded = true;
+    }
+  } catch { /* network died — keep the editor as it is */ }
+  mcpLoaded = loaded;
+  const saveBtn = $('#btn-mcp-save');
+  if (saveBtn) saveBtn.disabled = !loaded;
+  $('#mcp-status').textContent = loaded ? '' : 'MCP 配置加载失败——为避免覆盖，保存已禁用；请重试';
 }
 $('#btn-mcp-save').onclick = async () => {
+  if (!mcpLoaded) { $('#mcp-status').textContent = '配置未加载成功，已阻止保存（否则会覆盖现有 MCP 配置）'; return; }
   let body;
   try { body = JSON.parse($('#mcp-editor').value); } catch { $('#mcp-status').textContent = 'JSON 解析失败'; return; }
   const r = await api.post('/api/mcp/config', body).catch((e) => ({ error: e.message }));
@@ -3091,9 +3184,31 @@ $('#btn-update-check').onclick = async () => {
 window.__bootErrors = [];
 window.addEventListener('error', (e) => { window.__bootErrors.push(String(e.message || e).slice(0, 200)); });
 window.addEventListener('unhandledrejection', (e) => { window.__bootErrors.push('rejection: ' + String(e.reason && e.reason.stack || e.reason).slice(0, 200)); });
+// v1.4.3 review #18/#24/#20: ONE registration point for optimistic composer state, exposed
+// on the bridge BEFORE the first await — the old code assigned window.__wb at the END of
+// boot, after `await loadProjects()`, so a click during a slow boot reached `__wb.state`
+// on undefined (review #20), and a FAILED loadProjects left the bridge undefined forever.
+function trackModelSwitch(key, prev) {
+  state.pendingSetModels = state.pendingSetModels || new Map();
+  state.pendingSetModels.set(key, { prev: prev || null });
+}
+function trackThinkingSwitch(level, prev) {
+  state.pendingThinkLevel = { level, prev: prev || 'medium' };
+}
+window.__wb = { get state() { return state; }, rpcTo, updateModelChip, uiRequest: handleUiRequest, trackModelSwitch, trackThinkingSwitch }; // uiRequest is exposed for contract probes (Escape must answer extensions)
 (async function boot() {
   marked.setOptions({ breaks: true, gfm: true });
-  await loadProjects();
+  // v1.4.3 review #21: loadProjects had no error handling — one failed /api/config (server
+  // briefly restarting, socket hiccup at boot) aborted the whole boot IIFE: no WS, no
+  // empty state, no retry affordance, just a static shell. The failure is now surfaced
+  // with a retry, and boot continues so the WS and the rest of the shell come up.
+  try {
+    await loadProjects();
+  } catch (e) {
+    $('#statusline').textContent = '启动加载失败：' + (e && e.message ? e.message : e) + '——点此重试';
+    $('#statusline').style.cursor = 'pointer';
+    $('#statusline').onclick = () => location.reload();
+  }
   wsConnect();
   api.get('/api/kernel').then((k) => { const el = $('#sb-gw'); if (el && k && k.port) el.textContent = '网关 ' + k.port; }).catch(() => {});
   clearTimeline(true);
@@ -3111,6 +3226,5 @@ window.addEventListener('unhandledrejection', (e) => { window.__bootErrors.push(
   api.get('/api/kernel').then((k) => {
     $('#sb-kernel').textContent = `内核 pi ${k.pi || '?'} · node ${k.node}`;
   }).catch(() => {});
-  window.__wb = { get state() { return state; }, rpcTo, updateModelChip, uiRequest: handleUiRequest }; // uiRequest is exposed for contract probes (Escape must answer extensions)
 })();
 })();

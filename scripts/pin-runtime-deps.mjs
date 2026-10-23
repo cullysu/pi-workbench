@@ -11,6 +11,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const pkgBuild = path.resolve(process.argv[2] || 'pkg-build');
+// v1.4.3 review follow-up: this used to call a bare `tar`, so which tar answered depended on
+// PATH. On a Windows box where Git's GNU tar comes first, the Windows path is parsed as the
+// remote spec `host:path` ("Cannot connect to C: resolve failed") and the pin step dies —
+// which is how the local gate silently differed from the CI gate. Prefer the OS tar, whose
+// bsdtar accepts Windows paths.
+const TAR = (() => {
+  if (process.platform === 'win32') {
+    const sys = path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe');
+    if (fs.existsSync(sys)) return sys;
+  }
+  return 'tar';
+})();
 const PINS = [['undici', '8.11.2'], ['brace-expansion', '5.0.12']];
 // integrity anchors come from the committed runtime lockfile — a version match alone
 // would accept re-authored content; the tarball hash must equal the lock's integrity
@@ -34,7 +46,7 @@ try {
     const dest = path.join(piNm, name);
     fs.rmSync(dest, { recursive: true, force: true });
     fs.mkdirSync(dest, { recursive: true });
-    execSync(`tar -xzf "${tgz}" -C "${dest}" --strip-components=1`, { stdio: 'inherit' });
+    execSync(`"${TAR}" -xzf "${tgz}" -C "${dest}" --strip-components=1`, { stdio: 'inherit' });
     const gotVer = JSON.parse(fs.readFileSync(path.join(dest, 'package.json'), 'utf8')).version;
     if (gotVer !== ver) throw new Error(`pin failed: ${name} resolved to ${gotVer}, want ${ver}`);
     console.log(`pinned ${name}@${ver}`);

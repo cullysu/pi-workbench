@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readJsonl } from '../lib/io.mjs';
+import { trackTemp } from './_tmp.mjs'; // v1.4.3 review #33: scratch dirs are removed on exit
 
 test('readJsonl keeps multibyte chars intact across the 1MB chunk boundary', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-io-'));
+  const dir = trackTemp(fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-io-')));
   const file = path.join(dir, 's.jsonl');
   // the 3-byte char starts at byte offset 1MB-1: it straddles the chunk edge
   const line1 = '{"n":"' + 'a'.repeat((1 << 20) - 16) + '"}';
@@ -17,7 +18,7 @@ test('readJsonl keeps multibyte chars intact across the 1MB chunk boundary', () 
 });
 
 test('readJsonl skips a giant corrupt line instead of parsing it', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-io-'));
+  const dir = trackTemp(fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-io-')));
   const file = path.join(dir, 's.jsonl');
   const giant = '{"t":"' + 'x'.repeat(33 * 1024 * 1024) + '"}';
   fs.writeFileSync(file, giant + '\n{"ok":true}\n');

@@ -8,16 +8,29 @@ import path from 'node:path';
 const root = path.resolve(process.argv[2] || '.');
 const comps = [];
 const seen = new Set();
+// v1.4.3 review #36: every failure path here used to be silent, so an SBOM produced from a
+// HALF-READ tree still looked like a complete one (a package with an unparseable
+// package.json simply vanished; an unreadable directory took its whole subtree with it).
+// A "successful" SBOM that quietly omits components is worse than no SBOM: the gate reads
+// it as proof of coverage. Problems are collected and the run FAILS at the end.
+const problems = [];
 const posixRel = (from, to) => path.relative(from, to).split(path.sep).join('/');
 const walk = (dir) => {
   let entries = [];
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) {
+    if (e && e.code !== 'ENOENT') problems.push(`unreadable directory ${posixRel(root, dir) || '.'}: ${e.code || e.message}`);
+    return;
+  }
   for (const e of entries) {
     if (!e.isDirectory() || e.name.startsWith('.')) continue;
     const p = path.join(dir, e.name);
     if (e.name.startsWith('@')) { walk(p); continue; }
     let pkg = null;
-    try { pkg = JSON.parse(fs.readFileSync(path.join(p, 'package.json'), 'utf8')); } catch { pkg = null; }
+    try { pkg = JSON.parse(fs.readFileSync(path.join(p, 'package.json'), 'utf8')); } catch (e) {
+      // a directory under node_modules with no readable manifest is a real omission
+      problems.push(`no readable package.json at ${posixRel(root, p)}: ${e.code || e.message}`);
+      pkg = null;
+    }
     if (pkg && pkg.name) {
       // (v1.4.1 review #7) key components by PHYSICAL PATH, not name@version:
       // two physical copies of the same name+version (e.g. a nested node_modules
@@ -56,9 +69,22 @@ try {
       properties: [{ name: 'scope', value: `vendored frontend asset (${m[1].trim()}) — NOT in node_modules; audit and SBOM gates must track it here` }],
     });
   }
-} catch { /* vendor README missing — skip */ }
+} catch (e) {
+  // the vendored frontend assets are security-relevant deps npm cannot see; an SBOM that
+  // silently omits them is exactly the blind spot this table exists to close
+  problems.push(`vendor metadata missing at public/vendor/README.md: ${e.code || e.message}`);
+}
 let appPkg = {};
-try { appPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')); } catch { /* dev tree without package.json */ }
+try { appPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')); } catch (e) {
+  problems.push(`root package.json unreadable: ${e.code || e.message}`);
+}
+if (!appPkg.name || !appPkg.version) problems.push('root package.json has no name/version — the SBOM would mislabel the application component');
+if (!comps.length) problems.push('zero components collected — an empty SBOM is not a coverage proof');
+if (problems.length) {
+  console.error('SBOM FAILED — the runtime tree could not be described completely:');
+  for (const p of problems) console.error('  - ' + p);
+  process.exit(1);
+}
 console.log(JSON.stringify({
   bomFormat: 'CycloneDX',
   specVersion: '1.5',

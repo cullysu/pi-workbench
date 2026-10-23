@@ -19,7 +19,14 @@ exports.default = async function afterPack(context) {
   }
   if (!appDir) throw new Error(`afterPack: no app layout found under ${context.appOutDir} (looked for resources/app and *.app/Contents/Resources/app)`);
   const files = ['electron-main.cjs', 'electron-preload.cjs', 'package.json'];
-  const manifest = { generatedAt: new Date().toISOString(), files: {} };
+  // v1.4.3 review #38: `new Date()` made every build of identical sources produce a
+  // different shell-manifest.json, so the artifact was not reproducible and a manifest-vs-
+  // artifact comparison could never be a build-integrity check. SOURCE_DATE_EPOCH is the
+  // standard knob (the runtime manifest already honours it); without it we emit no
+  // timestamp at all rather than an unstable one.
+  const epoch = Number(process.env.SOURCE_DATE_EPOCH);
+  const generatedAt = Number.isFinite(epoch) && epoch > 0 ? new Date(epoch * 1000).toISOString() : null;
+  const manifest = { ...(generatedAt ? { generatedAt } : {}), files: {} };
   for (const f of files) {
     const p = path.join(appDir, f);
     if (!fs.existsSync(p)) throw new Error(`afterPack: expected shell file missing from the packaged app: ${f}`);

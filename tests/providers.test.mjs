@@ -13,12 +13,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createProviders, ProviderError } from '../lib/providers.mjs';
+import { trackTemp } from './_tmp.mjs'; // v1.4.3 review #33: scratch dirs are removed on exit
 
 const UNSAFE = new Set(['__proto__', 'constructor', 'prototype']);
 const isSafeKey = (k) => typeof k === 'string' && k.length > 0 && k.length <= 200 && !UNSAFE.has(k);
 
 function tree() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-prov-'));
+  const dir = trackTemp(fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-prov-')));
   return {
     dir,
     MODELS_FILE: path.join(dir, 'models.json'),

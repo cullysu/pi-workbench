@@ -212,7 +212,17 @@ try {
   check('回放含助手回复', hasAssistant === true);
 
   // 4. every rail panel switches on click and renders without exceptions
+  // v1.4.3 review #31: the check was "panelFails.length === 0" over a DOM-discovered list —
+  // if the selectors broke and returned NOTHING, that condition held vacuously and the probe
+  // printed "全部面板通过（0 个）". A green result over an empty set is not a pass. The
+  // required panels are named here, and both the count and membership are asserted.
+  const REQUIRED_PANELS = ['models', 'routing', 'skills', 'templates', 'cron', 'mcp', 'console',
+    'backup', 'migration', 'import', 'health', 'usage', 'cledger', 'logs', 'kernel', 'env', 'settings'];
   const panels = await evaluate("[...document.querySelectorAll('.rail-item[data-panel]')].map((b) => b.dataset.panel)", sid);
+  const missing = REQUIRED_PANELS.filter((p) => !panels.includes(p));
+  check(`面板清单完整（${panels.length} 个，要求 ${REQUIRED_PANELS.length}）`,
+    panels.length >= REQUIRED_PANELS.length && missing.length === 0,
+    missing.length ? 'missing: ' + missing.join(',') : `found ${panels.length}`);
   let panelFails = [];
   for (const p of panels) {
     await evaluate(`(() => { const b = document.querySelector('.rail-item[data-panel="' + ${JSON.stringify(p)} + '"]'); if (b) b.click(); })()`, sid);
@@ -220,7 +230,7 @@ try {
     const vis = await evaluate(`(() => { const el = document.querySelector('#panel-${p}'); return el ? !el.classList.contains('hidden') : 'no-panel'; })()`, sid);
     if (vis !== true) panelFails.push(p + ':' + vis);
   }
-  check('全部面板可切换（' + panels.length + ' 个）', panelFails.length === 0, panelFails.join(',') || 'all visible');
+  check('全部面板可切换（' + panels.length + ' 个）', panels.length > 0 && panelFails.length === 0, panelFails.join(',') || 'all visible');
   check('面板切换无 console error', consoleErrors.length === 0, consoleErrors.join(' | ').slice(0, 300));
 
   // 5. cron panel shows the seeded job row

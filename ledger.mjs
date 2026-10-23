@@ -156,7 +156,14 @@ function scanClaude(days, home) {
     // final counts land, and first-wins kept the incomplete one.
     const byMsg = new Map(); // preserves insertion order; values overwrite
     const noId = [];
-    for (const l of readJsonl(f, { hot: '"usage"' })) {
+    // v1.4.3 review #17: readJsonl caps at 200k lines and reports that through wantMeta.
+    // The Codex and ZCode paths above ask for the meta and bump truncatedFlag; this one
+    // did not, so a Claude transcript past the cap produced a quietly partial ledger that
+    // the UI still presented as a complete total.
+    const { items: claudeLines, truncated: claudeCapped } = readJsonl(f, { hot: '"usage"', wantMeta: true });
+    if (claudeCapped) truncatedFlag.count++;
+    for (const l of claudeLines) {
+      if (!l || typeof l !== 'object') continue; // v1.4.3 review #14: a null JSONL row
       const u = deepFindUsage(l.message ?? l);
       if (!u) continue;
       const ts = l.timestamp ? Date.parse(l.timestamp) : st.mtimeMs;

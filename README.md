@@ -33,12 +33,12 @@
 - **单文件服务端**：`server.mjs`（≈2200 行）= 43 个具名 handler + 一张声明式路由表 + 单派发循环；每个端点可按名检索，鉴权与 404 各归一处
 - **逻辑全部在 `lib/` 九个模块**：工厂 + ctx 显式注入，**每个工厂启动即校验接线契约**（缺一个依赖直接崩在启动，而不是某天早上静默哑火）；IO 只有四条原语（`lib/io.mjs`：有界遍历 / 头字节预览 / 分块 JSONL / 子进程收集）
 - **安全默认**：每启动随机 token + CSP nonce（无 `unsafe-inline` 脚本）、DOMPurify fail-closed 消毒、`path.relative` + realpath 双层路径包含校验（symlink/junction 也逃不出项目根）、Origin 校验、供应商 URL 强制 http(s) 且响应限流、配置原子写入（tmp+rename，损坏自动留证）、备份 zip CRC + 解压上限、定时任务 ID 白名单
-- **四层验证体系**（全部入库可复跑）：`eslint` 全仓 0/0 → **81 项 Node 测试**（6 套件）+ 51 路由全量扫描（`scripts/route-sweep.py`）→ 集成探针（`scripts/ws-probe.mjs`：spawn 真 pi 子进程走完 WS 全链）→ 浏览器级探针（`scripts/ui-probe.mjs`：headless Chromium 加载真实面板，断言回放气泡/17 面板/零 console error 并出截图）
+- **四层验证体系**（全部入库可复跑）：`eslint` 全仓 0/0 → **102 项 Node 测试**（自动发现 `tests/*.test.mjs`，9 个文件）+ 51 条路由自动验证（`scripts/route-sweep.py`；另有 2 条如实声明跳过：`/api/cron/run-now` 会留下存活子进程、`/api/term/open` 会弹出桌面窗口）→ 集成探针（`scripts/ws-probe.mjs`：spawn 真 pi 子进程走完 WS 全链）→ 浏览器级探针（`scripts/ui-probe.mjs`：headless Chromium 加载真实面板，断言回放气泡/17 面板/零 console error 并出截图）
 - **五通道构建**：CI 在 main 分支每次 push 产出 Windows Electron NSIS + Windows Tauri NSIS + Linux AppImage + macOS dmg（arm64/x64）五件安装包，AppImage 出包前在 xvfb 里真实启动并轮询 HTTP 200、并校验 /api/kernel 报告内置 pi 才算过；组装时生成 sha256 manifest，壳启动前先验运行时完整性（安装损坏会在启动时明确报错而不是半死不活）；出包同时产出 CycloneDX SBOM artifact
 
 ## 安装
 
-从 [GitHub Releases](../../releases) 下载对应平台的安装包（以 1.4.2 为例）：
+从 [GitHub Releases](../../releases) 下载对应平台的安装包（以 1.4.3 为例）：
 
 | 平台 | 文件 | 怎么选 |
 |---|---|---|
@@ -91,7 +91,7 @@ npm run electron          # 或: node_modules\.bin\electron .
 
 打包：`npx electron-builder --win nsis --x64`（产物在 `dist_electron/`，不随 git 提交）。可分发的安装包还需要捆绑 Node 的 `pkg-runtime.zip`（`scripts/make-runtime.mjs` 从 pkg-build/ 打包）——完整组装流程以 CI workflow 为准，它是组装逻辑的唯一事实源。
 
-测试：`npm test`（node:test，在隔离 HOME 里起真实服务端打全量 API）；CI：push 到 main 自动跑双平台测试并出 Windows 安装包 artifact。
+测试：`npm test`（node:test，自动发现 `tests/*.test.mjs`，在隔离 HOME 里起真实服务端打全量 API，当前 102 项）；CI：push 到 main 自动跑三系统测试矩阵（ubuntu 腿含 route-sweep 51 条自动验证 + 2 条如实声明跳过）、Windows 上的 Tauri 壳 Rust 单测（`cargo test --locked`，tauri-test job）、ubuntu 全量 e2e + Windows/macOS 浏览器级 UI 探针（e2e-cross-os），外加 AppImage xvfb 启动验证，随后三平台构建（每平台 1-2 件安装包）。开发依赖审计是硬门禁（`scripts/audit-gate.mjs` + `scripts/audit-baseline.json`），任何不在基线里的 high/critical advisory 都会让构建失败。
 
 ## 已知限制（诚实披露）
 

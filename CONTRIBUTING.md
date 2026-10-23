@@ -17,8 +17,8 @@ npm start         # http://127.0.0.1:32123
 
 ```bash
 npm run lint                                   # eslint 0/0
-npm test                                       # node --test tests/（隔离 HOME，不碰真实数据）
-python scripts/route-sweep.py                  # 51 条路由全量验收
+npm test                                       # scripts/run-tests.mjs 自动发现 tests/*.test.mjs（隔离 HOME，不碰真实数据）
+python scripts/route-sweep.py                  # 51 条路由自动验证 + 2 条如实声明跳过（run-now/term-open）
 node scripts/ws-probe.mjs                      # 真实 pi 子进程走完整 WS 链（含 adopt 语义）
 node scripts/failover-e2e.mjs                  # 真 pi + 3 mock 供应商验证回退链
 node scripts/chat-e2e.mjs                      # 浏览器级核心链路（需本机 Chromium，CHROME_EXE 可指定）

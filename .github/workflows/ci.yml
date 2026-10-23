@@ -34,18 +34,13 @@ jobs:
         run: node scripts/assert-version.mjs
       - name: Dependency audit (root tree)
         run: npm audit --omit=dev --audit-level=high
-      # v1.4.2 review H4: the audits above never looked at the dev tree, yet Electron,
-      # Playwright and the MCP SDK execute on every CI run and during every local build.
-      # The full audit currently reports 19 advisories (5 high) — undici via
-      # @earendil-works/pi-coding-agent among them — with NO clean fix available: the
-      # suggested `audit fix --force` would downgrade pi to a version that does not exist.
-      # So this is surfaced as a gate that reports and fails openly (continue-on-error,
-      # so the release pipeline is not blocked by an advisory we cannot fix from here)
-      # instead of being silently absent. Tighten it to a hard gate once pi ships an
-      # undici that clears the highs.
-      - name: Dependency audit (dev tree — report-only until pi clears its undici advisories)
-        run: npm audit --audit-level=high
-        continue-on-error: true
+      # v1.4.3 review #27: this used to be `npm audit --audit-level=high` with
+      # continue-on-error, i.e. a step that printed 5 highs and let the pipeline build and
+      # upload installers anyway. A gate nobody can fail is a green light, not a check.
+      # scripts/audit-gate.mjs fails on any high/critical advisory that is NOT named in
+      # scripts/audit-baseline.json, and reports baseline entries that no longer apply.
+      - name: Dependency audit (dev tree — hard gate against the reviewed baseline)
+        run: node scripts/audit-gate.mjs
       - name: Dependency audit (shipped runtime tree)
         run: |
           rt="$RUNNER_TEMP/piwb-audit"
@@ -61,13 +56,37 @@ jobs:
           tool: cargo-audit
       - name: Run cargo audit
         run: cargo audit --file tauri/Cargo.lock # the committed lock IS the audited AND built tree — no build-time updates
-      # v1.4.2 review (E2): 13 Rust unit tests existed and CI never ran them. tauri_build
-      # only needs the manifest, so the tests compile without pkg-runtime.zip on a clean
-      # checkout (verified locally). No --offline on CI: a clean runner has no crates cache.
-      # the Tauri shell is Windows-only (compile_error elsewhere) and its linux dep tree
-      # needs GTK system libs a bare ubuntu runner does not carry — test where it builds
+      # v1.4.3 review #28: the Rust step used to live HERE (an ubuntu job) behind
+      # `if: runner.os == 'Windows'` — a condition that is false on every run of this job,
+      # so the 13 tests never executed anywhere. The Tauri shell is Windows-only and its
+      # linux dep tree needs GTK, so the tests moved to the `tauri-test` job below, which
+      # runs on windows-latest and supplies the one generated input they need.
+
+  # v1.4.3 review #28: tauri.conf.json declares ../pkg-runtime.zip as a bundle RESOURCE, and
+  # tauri-build resolves it while generating the context — so `cargo test --locked` on a clean
+  # checkout died with "resource path ..\pkg-runtime.zip doesn't exist" before a single test
+  # ran. The reviewer was right that the 13/13 record was not a reproducible gate. This job
+  # creates a placeholder zip (the tests never open it), then runs the suite on the OS the
+  # shell actually targets.
+  tauri-test:
+    timeout-minutes: 30
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: Provide the bundle resource tauri-build resolves
+        shell: pwsh
+        run: |
+          # the real zip is produced by the build job; the unit tests never read it, but
+          # tauri-build fails the whole compilation when the declared resource is absent
+          if (-not (Test-Path pkg-runtime.zip)) {
+            $fs = [System.IO.File]::Create((Join-Path (Get-Location) 'pkg-runtime.zip'))
+            $fs.Close()
+          }
+          Get-Item pkg-runtime.zip | Select-Object Name, Length
       - name: Rust unit tests (tauri shell)
-        if: runner.os == 'Windows'
         run: cargo test --locked
         working-directory: tauri
 
@@ -101,6 +120,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: python3 scripts/route-sweep.py
 
+  # v1.4.3 review #32: every browser probe ran on ubuntu-latest only, so the Windows
+  # Electron/Tauri WebView and the macOS WebView — the shells users actually install — had no
+  # rendered-behaviour coverage at all. The FULL probe set still runs here (it needs the
+  # linux-only extras), and `e2e-cross-os` below runs the probes that exercise real
+  # rendering and real API contracts on the two other operating systems.
   e2e:
     timeout-minutes: 25
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
@@ -137,11 +161,55 @@ jobs:
           # survival in a real browser (all three are rendered behaviour, not source text)
           CHROME_EXE="$CHROME_EXE" node scripts/ui-a11y-probe.mjs
 
+  e2e-cross-os:
+    timeout-minutes: 30
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    needs: test
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium for the probes
+        run: npx playwright install chromium
+      # the probes default to a hard-coded Windows build path; on macOS that path cannot
+      # exist, so the browser location is resolved from the pinned playwright and exported
+      - name: Locate the Chromium binary
+        shell: bash
+        run: |
+          exe=$(node -e "console.log(require('playwright').chromium.executablePath())")
+          echo "chromium: $exe"
+          if [ ! -f "$exe" ]; then echo "::error::playwright chromium not found at $exe"; exit 1; fi
+          echo "CHROME_EXE=$exe" >> "$GITHUB_ENV"
+      - name: UI probe (rendered panels, real Chromium)
+        run: node scripts/ui-probe.mjs
+      - name: UI contract probe (extension UI round-trip)
+        run: node scripts/ui-contract-probe.mjs
+      - name: UI a11y probe (keyboard menu, responsive rail)
+        run: node scripts/ui-a11y-probe.mjs
+      - name: Upload probe artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-probe-${{ matrix.os }}
+          path: |
+            scripts/__shots__/**
+            **/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   build:
     timeout-minutes: 60
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
-    needs: [lint, test, e2e]
+    needs: [lint, tauri-test, test, e2e]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -280,15 +348,31 @@ jobs:
           for t in unzip bsdtar python3; do command -v "$t" >/dev/null 2>&1 && echo "$t: yes" || echo "$t: NO"; done
           f=(dist_electron/*.AppImage)
           chmod +x "${f[0]}"
-          "${f[0]}" --appimage-extract > /dev/null 2>&1 || true
+          # v1.4.3 review #37: `|| true` here (and the printed-but-ignored unzip status)
+          # meant a failed extraction still produced a "BOOT VERIFIED" line as long as some
+          # process answered 200 on the port. Both steps are gates now.
+          if ! "${f[0]}" --appimage-extract > /tmp/appimage-extract.log 2>&1; then
+            echo '::error::appimage-extract failed'
+            tail -20 /tmp/appimage-extract.log
+            exit 1
+          fi
           RZ=squashfs-root/resources/runtime.zip
-          ls -la "$RZ" || true
-          if [ -f "$RZ" ]; then rm -rf /tmp/rzprobe; unzip -o "$RZ" -d /tmp/rzprobe > /tmp/unzip-probe.log 2>&1; echo "unzip exit: $?"; tail -5 /tmp/unzip-probe.log; fi
+          ls -la "$RZ"
+          test -f "$RZ" || { echo '::error::the AppImage carries no resources/runtime.zip'; exit 1; }
+          rm -rf /tmp/rzprobe
+          if ! unzip -o "$RZ" -d /tmp/rzprobe > /tmp/unzip-probe.log 2>&1; then
+            echo '::error::the bundled runtime.zip did not extract'
+            tail -20 /tmp/unzip-probe.log
+            exit 1
+          fi
+          test -f /tmp/rzprobe/manifest.json || { echo '::error::extracted runtime has no manifest.json'; exit 1; }
+          echo "runtime.zip extracted: $(find /tmp/rzprobe -type f | wc -l) files"
           export PIWB_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           # the runtime zip now carries node_modules (~430MB / 14k files): AppImage
           # extraction + runtime extraction + manifest verify need minutes — 180s killed
           # the shell mid-extract (the old window never saw a live process to poll)
           timeout 900 xvfb-run -a "${f[0]}" --appimage-extract-and-run > /tmp/app.log 2>&1 &
+          APP_PID=$!   # v1.4.3 review #37: kill OUR pid, never `pkill -f` a command line
           ok=0
           for i in $(seq 1 700); do # the runtime zip now carries node_modules — extraction+verify of ~2700 files needs minutes, not the old 150s
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:32123/ || true)
@@ -308,7 +392,10 @@ jobs:
             echo "bundled node mode: $nm"
             case "$ep" in *runtime/node*) echo 'BUNDLED NODE SERVING CONFIRMED' ;; *) echo 'KERNEL CHECK FAILED: the bundled node is not the one serving'; ok=0 ;; esac
           fi
-          pkill -f appimage-extract-and-run 2>/dev/null || true
+          # kill the process group we started (xvfb-run wraps the app), falling back to bare kill
+          kill "$APP_PID" 2>/dev/null || true
+          wait "$APP_PID" 2>/dev/null || true
+          pkill -P "$APP_PID" 2>/dev/null || true
           if [ "$ok" != "1" ]; then
             echo 'BOOT FAILED - panel never answered 200'
             echo '--- node/electron processes still alive:'

@@ -2,6 +2,186 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.4.4 — 2026-10-23
+
+### Fixed (from the v1.4.3 independent review — 39 findings: 4 high, 9 medium, 4 import/performance, 7 frontend, 13 CI/test/release, 2 architecture; every one verified against `ab5bafb` before it was touched)
+
+**Provider credentials crossed an origin boundary on redirect (review #1):** the redirect
+guard was a DENY-list of five known header names, but a provider's `headers` map is arbitrary
+user JSON — `Ocp-Apim-Subscription-Key`, `X-Auth-Token`, `X-Client-Secret` and every future
+vendor spelling sailed through to whatever host the `Location` named. The reviewer reproduced
+it with two canaries arriving verbatim on the second host. Deny-lists cannot close an open
+set; redirects now carry an ALLOW-list (content negotiation only) across an origin change,
+while a same-origin hop keeps the full set. The whole outbound policy moved to
+`lib/outbound-fetch.mjs` so the redirect loop is unit-testable — it had no regression lock
+because there was nowhere to put one.
+
+**`PIWB_DISALLOW_LOCAL_URLS` was advisory (review #11):** the policy was checked once on the
+caller's URL, then every hop only got a protocol check — a public provider answering 302 to
+`127.0.0.1` or `169.254.169.254` was followed regardless. The same predicate now runs on
+every hop.
+
+**MCP argv secrets split across two array elements were returned verbatim (review #2):** the
+scrubber tested each argv element in isolation, so `["--token", "secret"]` matched nothing —
+the flag carries no value and the value carries no flag. Masking is array-shaped now (a
+credential flag consumes its successor), covers `--flag=value`, `-H`/`--header` and the
+`--auth-token` family, and lives in `lib/mcp-scrub.mjs` so the endpoint and the test share it.
+
+**A restored `models:[null]` took down failover (review #3):** the restore door checked that
+`models` was an array but not its elements, so a backup carrying a null row imported cleanly
+and then threw `Cannot read properties of null (reading 'id')` out of `providerCooled` — the
+routing page, the cron provider gate and every failover decision with it. `POST /api/models`
+had the element rule; the restore bypassed it. Both doors now call `lib/schema.mjs`.
+
+**Deep bad types in a restored routing.json poisoned the whole router (review #4):**
+`{"providers":{"p":{"keyEnvs":1}}}` passed the container checks and then threw in failover's
+`for...of`; `{"routes":{"p":null}}` threw in the legacy migration at `meta.enabled`.
+`loadRouting()` now normalises with the same deep rules the HTTP door and the restore validate
+against — one module, three call sites, so they cannot drift apart again (the review's own
+#25 root cause).
+
+**A failed MCP install destroyed the working extension (review #5):** the order was live →
+grave → stage → live → delete grave → *then* `npm ci`. A dependency failure returned 500 while
+the previously-working extension was already gone. The install now happens entirely in the
+staging directory, the staged entry is resolved before anything is swapped, and the old tree
+is only renamed away once the new one is complete.
+
+**A cross-provider switch silently started a fresh conversation (review #6):** a new tab opens
+with `sessionPath: null`; pi later reports the file it created as `sessionFile`, which the
+restart path never read. The restart now uses `sessionFile || sessionPath` and keeps both
+fields in step, so the one path that must preserve history actually does.
+
+**A rollback reported success it had not achieved (review #7):** the restore deleted "files
+that did not exist before" inside `try { unlinkSync } catch {}`, swallowing EISDIR and
+everything else — the API answered `已回滚到修改前的状态` with `rollback: []` while a directory
+still sat at the path. Only ENOENT is silent now; anything else lands in `rollbackFailed` and
+the message stops claiming a clean rollback. (`fs` became injectable so this branch is
+testable at all.)
+
+**Backup snapshots and redaction intermediates accumulated forever (review #8):** every export
+wrote a new zip, every keys-free export left four `*.redacted.json` copies next to the live
+config, and every import wrote a `pre-import-*` snapshot *before* validating the archive. There
+is now a retention policy (newest 10 exports, newest 5 snapshots), the redaction intermediates
+are removed in a `finally`, and a refused import deletes its own snapshot — while a rollback
+that FAILED keeps it, because that snapshot is the recovery path.
+
+**Usage aggregation polluted `Object.prototype` (review #9):** a session whose model is
+`__proto__` wrote `ok`/`input`/`output` onto the global prototype through
+`store[mk] = store[mk] || {...}`. Aggregation buckets are null-prototype objects, keys pass a
+charset/length bound, and token values are finite/non-negative checked.
+
+**The models probe could kill the server (review #10):** the tab spawn has listened for
+stream-level stdin errors since the 1.3.x audit; the probe never did, so a pi that died before
+reading stdin turned the write into an async EPIPE that reached the global `uncaughtException`
+handler — which exits the process.
+
+**Deleting a provider left its routing metadata behind (review #12):** the delete swept
+models.json, `defaultModel` and chains but not `routing.providers[name]`, so the routing page
+kept listing a provider that no longer existed and re-creating it under the same name
+inherited the dead `enabled`/`keyEnvs`/`testModel`. Same commit now.
+
+**`kbfill` was a half transaction across two files (review #13):** `models.json` was written
+before `model-meta.json`, so a failure on the second left the parameters committed without
+their prices while the endpoint answered 500. Both files are now snapshotted, written and
+rolled back together.
+
+**One null block inside `content` answered 500 for a whole panel (review #14):** every reader
+guarded a top-level `null` but not `{"content":[null]}`, and each sits behind a whole-directory
+list handler — so one broken session file took out the pi list, the Codex/Claude/Gemini
+imports and the transcript reader. Content parts are read through one null-safe helper.
+
+**List endpoints scanned everything before slicing (review #15):** `walkFiles` defaults to
+`maxFiles: Infinity`, so "list the 400 newest sessions" stat'ed the entire history on the
+single-threaded HTTP thread and threw all but 400 away. The budget now applies during the walk
+and `capped`/`truncated` reach the UI, which no longer presents a truncated list as a total.
+The Gemini lister no longer `readFileSync`s every session whole for a 120-char preview.
+
+**OpenCode import had no message-level budget (review #16):** it selected every message, then
+ran one part query per message. The budget is in the SQL now (`LIMIT`) and the loop stops as
+soon as it is reached, reporting `truncated` instead of posing as the whole session.
+
+**The Claude ledger reported a truncated scan as complete (review #17):** `readJsonl` was called
+without `wantMeta`, so the 200k-line cap was hit silently while `truncatedFiles` stayed at zero
+— the Codex/ZCode paths already handled this.
+
+**The model chip could show a model pi never adopted (review #18):** the dropdown wrote
+`state.pendingSetModel` (singular) while the ack handler only read `state.pendingSetModels`
+(the per-model Map). The two containers were never connected, and `rpc-denied` (the server's
+refusal for a disabled provider) only printed a line without reverting. Both chips now register
+through one helper, and a denial reverts to the last acked state.
+
+**A failed MCP/cron load could overwrite the real config (review #19):**
+`.catch(() => ({jobs: []}))` and `.catch(() => ({mcpServers: {}}))` filled the editors with
+empty documents, and the next save posted them back — one flaky load silently deleted every
+scheduled job or the whole MCP config. A failed load now keeps the previous content, disables
+the save button and says so.
+
+**Clicks during boot threw (review #20):** `dropdowns.js` binds its handlers at script load,
+`window.__wb` was assigned at the END of boot after `await loadProjects()`. The bridge is now
+assigned before the first await (and a chip click without it says "still starting" instead of
+throwing).
+
+**One failed API call left a blank shell (review #21):** `loadProjects()` had no error handling,
+so a hiccup at boot aborted the entire boot IIFE — no WS, no empty state, no retry. The failure
+is surfaced with a click-to-retry and boot continues.
+
+**403 auto-reload threw under a storage-blocking browser (review #22):** only `setItem` was
+guarded; `getItem` threw `SecurityError` and aborted the promise chain before the reload. An
+in-memory one-shot backs it up.
+
+**File browsing raced itself (review #23):** a slower deeper response could land after a faster
+root response and repaint the list, while the row handlers read the mutated global `filesRel`.
+Each render now owns a sequence number and the path it was issued for.
+
+**Thinking level had no ACK path (review #24):** the chip updated optimistically and
+`set_thinking_level` was never confirmed, so a closed socket or a pi refusal left the UI
+claiming a level the engine never accepted. The switch is tracked and reverted on failure.
+
+### Test, CI and release gates (review #26–#38)
+
+- **route-sweep (#26/#29):** the port is OS-assigned and the listener must prove it is OUR
+  child (`/api/identify` HMAC against the scraped token + `/api/kernel` reporting this run's
+  isolated HOME) before any config write; the summary states 51 verified **and** the 2
+  deliberately skipped routes instead of implying 51 total.
+- **Dependency audit (#27):** `continue-on-error` is gone. `scripts/audit-gate.mjs` fails on any
+  high/critical advisory not named in `scripts/audit-baseline.json` (8 entries, each with the
+  provenance and why it cannot be fixed from here — undici/MCP SDK via pi, playwright,
+  brace-expansion, http-cache-semantics), and reports baseline entries that no longer apply.
+- **Rust tests actually run (#28):** the step lived in the ubuntu lint job behind
+  `if: runner.os == 'Windows'` — false on every run. It is now its own `tauri-test` job on
+  windows-latest, which creates the `pkg-runtime.zip` placeholder `tauri-build` requires
+  (verified locally: 13/13 pass with an empty file present).
+- **Test discovery (#30):** `scripts/run-tests.mjs` globs `tests/*.test.mjs` instead of an
+  explicit list, and refuses to report green over an empty suite. CONTRIBUTING's
+  `node --test tests/` (which fails on current Node) is corrected.
+- **UI probe (#31):** the panel check asserts a named required set and a minimum count — a
+  zero-panel DOM used to print "全部面板通过（0 个）".
+- **Cross-OS e2e (#32):** `e2e-cross-os` runs ui-probe / ui-contract-probe / ui-a11y-probe on
+  windows-latest and macos-latest; the linux-only probes stay in `e2e`.
+- **Temp dirs (#33):** six test files created mkdtemp trees and never removed them; all now
+  register with `tests/_tmp.mjs`. Measured: a full run adds zero directories.
+- **SBOM coverage (#36):** `sbom.mjs` fails instead of skipping on unreadable directories,
+  unparseable manifests, a missing vendor table or an empty component set;
+  `assert-sbom-pins.mjs` additionally requires every package in the runtime lock to be
+  described at its locked version and path (169/169 on a real tree).
+- **Runtime assembly (#35):** `prepare-runtime.mjs` wipes `pkg-build` first — a stale tree here
+  already shipped an old undici once.
+- **AppImage probe (#37):** `--appimage-extract`, the runtime.zip extraction and the manifest
+  check are gates now, and the cleanup kills the PID it started instead of `pkill -f`.
+- **Reproducible shell manifest (#38):** `generatedAt` follows `SOURCE_DATE_EPOCH` and is
+  omitted when unset, matching the runtime manifest.
+- **`verify-audit-fixes` (#34):** the two assertions that had gone stale now check the shared
+  schema module's BEHAVIOUR (the exact review shapes) instead of strings in `server.mjs`.
+
+### Honest scope
+
+`#39` (Windows Authenticode / macOS Developer ID + notarization) is unchanged: it needs a
+certificate account this project does not have. `#32` covers browser-level probes on all three
+OSes, not an installer-launch test — the Windows/macOS installers still have no "installed and
+started" evidence; only the Linux AppImage has a boot probe. `sources.mjs` / `server.mjs` /
+`app.js` remain large single files (architecture items 1-2); splitting them is queued, not
+done here.
+
 ## 1.4.3 — 2026-10-22
 
 ### Fixed (from the v1.4.2 independent review — 21 findings: 4 high, 11 medium, 6 engineering; every one verified against `61d05ed` before it was touched)

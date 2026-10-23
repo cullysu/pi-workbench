@@ -6,9 +6,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createFailover } from '../lib/failover.mjs';
+import { trackTemp } from './_tmp.mjs'; // v1.4.3 review #33: scratch dirs are removed on exit
 
 function makeCtx({ models = { providers: {} }, routing = {}, secretEnv = {} } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-failover-'));
+  const dir = trackTemp(fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-failover-')));
   const PI_MODELS = path.join(dir, 'models.json');
   const ROUTING = path.join(dir, 'routing.json');
   fs.writeFileSync(PI_MODELS, JSON.stringify(models));

@@ -16,12 +16,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { ledger } from '../ledger.mjs';
+import { trackTemp } from './_tmp.mjs'; // v1.4.3 review #33: scratch dirs are removed on exit
 
 // (the scanners take a day count; these fixtures are all "now", so `days: 1` covers them)
 
 // A throwaway $HOME with all three engines' trees.
 function fixtureHome() {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-ledger-'));
+  const home = trackTemp(fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-ledger-')));
   const now = new Date();
   const iso = now.toISOString();
 
@@ -136,7 +137,7 @@ test('ledger skips a file that vanishes between walk and stat', () => {
 });
 
 test('ledger tolerates an absent engine tree instead of throwing', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-ledger-empty-'));
+  const home = trackTemp(fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-ledger-empty-')));
   const out = ledger({ days: 30, home });
   assert.deepEqual(out.byEngine, {});
   assert.deepEqual(out.recent, []);

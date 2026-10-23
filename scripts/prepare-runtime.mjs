@@ -28,9 +28,14 @@ try {
   console.log('installing the pinned runtime set…');
   execFileSync(npm, ['ci', '--omit=dev', '--no-fund', '--no-audit'], { cwd: stage, stdio: 'inherit', shell: process.platform === 'win32' });
 
+  // v1.4.3 review #35: this only REPLACED the listed entries, so a stray file left in
+  // pkg-build by an earlier build (a downloaded `node`, a stale `manifest.json`, an old
+  // asset) survived and was then packed by make-runtime.mjs — the shipped runtime.zip could
+  // carry files no commit produced. Wipe the tree first: pkg-build is a build artifact
+  // directory this script owns, and it is rebuilt from scratch below.
+  fs.rmSync(pkgBuild, { recursive: true, force: true });
   fs.mkdirSync(pkgBuild, { recursive: true });
   fs.copyFileSync(path.join(stage, 'package.json'), path.join(pkgBuild, 'package.json'));
-  fs.rmSync(path.join(pkgBuild, 'node_modules'), { recursive: true, force: true });
   fs.cpSync(path.join(stage, 'node_modules'), path.join(pkgBuild, 'node_modules'), { recursive: true });
 
   // the app code itself (dev mode runs the server straight from pkg-build/)

@@ -4,11 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createKbSkills } from '../lib/kb-skills.mjs';
+import { trackTemp } from './_tmp.mjs'; // v1.4.3 review #33: scratch dirs are removed on exit
 
 // Build a two-directory fixture where the SAME skill name lives in both, so the
 // shadowing rules in listSkills are exercised end to end.
 function fixture() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-skills-'));
+  const root = trackTemp(fs.mkdtempSync(path.join(os.tmpdir(), 'piwb-skills-')));
   const first = path.join(root, 'first', 'dup');
   const second = path.join(root, 'second', 'dup');
   for (const [dir, body] of [[first, 'A'], [second, 'B']]) {

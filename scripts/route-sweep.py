@@ -1,11 +1,19 @@
 # Final acceptance sweep: hit every API route with a sane payload, record status.
 # PASS = expected status. Any 500 / unexpected 404 / auth fail = FAIL.
-# Deliberately skipped (with reasons): /api/cron/run-now (spawns a real pi child that
-# would outlive the probe), /api/term/open (opens a visible cmd window on the desktop).
+# Deliberately skipped — listed here AND printed in the summary, so the number reported is
+# the number actually exercised (v1.4.3 review #29):
+#   /api/cron/run-now  spawns a real pi child that would outlive the probe
+#   /api/term/open     opens a visible terminal window on the desktop
+SKIPPED = [('/api/cron/run-now', 'spawns a pi child that outlives the probe'), ('/api/term/open', 'opens a desktop terminal window')]
+SKIPPED_ROUTES = len(SKIPPED)
 import json
 import os
 import re
 import shutil
+import hmac
+import hashlib
+import secrets
+import socket
 import subprocess
 import tempfile
 import time
@@ -13,7 +21,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-PORT = 39999
+# v1.4.3 review #26: a FIXED port (39999) meant this script could scrape a token from a
+# DIFFERENT pi-workbench (or an impostor page) that happened to own the port, and then
+# proceed to write config, save/delete providers, write cron jobs, import a backup and run
+# shell commands against a service it did not start. Two fixes:
+#   1. ask the OS for a free port instead of naming one;
+#   2. prove the listener is OUR child before touching anything — the scraped token must
+#      answer /api/identify's HMAC challenge AND /api/kernel must report the isolated HOME
+#      this script created (a stranger's server reports its own paths, not ours).
+def _free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+PORT = _free_port()
 BASE = f'http://127.0.0.1:{PORT}'
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -43,6 +64,26 @@ env = dict(os.environ, PIWB_EMBED_TOKEN='1', PIWB_PORT=str(PORT), HOME=home, USE
 NODE = os.environ.get('NODE_BIN') or shutil.which('node') or r'C:\Program Files\nodejs\node.exe'
 server = subprocess.Popen([NODE, 'server.mjs'], env=env,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def assert_our_server():
+    # the child must still be alive, and the listener must answer with OUR isolated HOME —
+    # a leftover/foreign service on the same port would pass a plain HTTP check
+    if server.poll() is not None:
+        raise SystemExit(f'sweep: the server exited during startup (code {server.returncode}) — refusing to test a port we do not own')
+    nonce = secrets.token_hex(16)
+    req = urllib.request.Request(BASE + '/api/identify?n=' + nonce)
+    with opener.open(req, timeout=5) as r:
+        proof = r.headers.get('x-piwb-proof') or ''
+    want = hmac.new(TOKEN.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(proof, want):
+        raise SystemExit('sweep: /api/identify proof mismatch — the listener is not the server we started')
+    req = urllib.request.Request(BASE + '/api/kernel', headers={'x-api-token': TOKEN})
+    with opener.open(req, timeout=5) as r:
+        kernel = json.loads(r.read())
+    cfg_path = str((kernel.get('paths') or {}).get('config') or '')
+    if os.path.basename(home) not in cfg_path:
+        raise SystemExit(f"sweep: /api/kernel reports {cfg_path!r}, which is not this run's isolated HOME - refusing to write to a foreign service")
 
 results = []
 def call(name, method, path, body=None, want=None, timeout=35):
@@ -76,6 +117,7 @@ try:
         except Exception:
             pass
     assert TOKEN, 'server did not start'
+    assert_our_server()
 
     call('账本', 'GET', '/api/ledger?days=30', want=200)
     call('配置读', 'GET', '/api/config', want=200)
@@ -137,7 +179,10 @@ try:
 
     fails = [r for r in results if not r[6]]
     print('=' * 30)
-    print(f'SWEEP: {len(results)} routes, {len(fails)} failures')
+    # v1.4.3 review #29: the header used to say "51 routes" while two were deliberately
+    # skipped, so the honest denominator was never printed. Name both numbers.
+    print(f'SWEEP: {len(results)} routes verified, {SKIPPED_ROUTES} purposefully not exercised '
+          f'({", ".join(s[0] for s in SKIPPED)}), {len(fails)} failures')
     slow = sorted(results, key=lambda r: -r[5])[:3]
     for name, method, path, code, want, ms, ok, _ in results:
         mark = 'PASS' if ok else 'FAIL'

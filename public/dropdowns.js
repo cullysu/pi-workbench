@@ -126,12 +126,21 @@ document.querySelector('#model-chip').onclick = () => {
         // two containers were never connected, so a failed set_model from THIS menu could
         // not revert the chip and the UI kept showing a model pi was not running. Register
         // through the same helper the config panel uses, so both paths share one contract.
+        // v1.4.4 review P2: this registered the switch AFTER sending, with no try/catch.
+        // A throw from rpcTo (socket closing) escaped the handler and left the optimistic
+        // chip with no pending to revert it; and an ack arriving before the registration
+        // would find an empty Map. Register first, then send, inside a guard.
         const prev = st.selModel;
         st.selModel = key;
         br.updateModelChip();
-        br.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
         br.trackModelSwitch(key, prev);
-        br.rpcTo({ type: 'get_available_thinking_levels' }); // the new model may support different levels
+        try {
+          br.rpcTo({ type: 'set_model', provider: m.provider, modelId: m.id });
+          br.rpcTo({ type: 'get_available_thinking_levels' }); // the new model may support different levels
+        } catch (e) {
+          br.revertComposerSwitch && br.revertComposerSwitch();
+          document.querySelector('#statusline').textContent = '模型切换未能发送：' + String((e && e.message) || e);
+        }
       },
     });
   }
@@ -158,11 +167,17 @@ document.querySelector('#think-chip').onclick = () => {
           // pi rejection left the UI claiming a level the engine never accepted, and
           // every later session carried the wrong level. Track the switch until the
           // server answers, and revert on failure (app.js piEventHandlers).
+          // v1.4.4 review P3: same ordering rule as the model chip — register, then send,
+          // and never let a throw leave the optimistic value with nothing to revert.
           const prev = br.state.thinkLevel || 'medium';
           br.state.thinkLevel = lv;
           document.querySelector('#think-chip').textContent = `思考 · ${zh}`;
           br.trackThinkingSwitch(lv, prev);
-          br.rpcTo({ type: 'set_thinking_level', level: lv });
+          try { br.rpcTo({ type: 'set_thinking_level', level: lv }); }
+          catch (e) {
+            br.revertComposerSwitch && br.revertComposerSwitch();
+            document.querySelector('#statusline').textContent = '思考等级未能发送：' + String((e && e.message) || e);
+          }
         },
       }))
   );

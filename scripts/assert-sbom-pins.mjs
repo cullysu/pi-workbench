@@ -5,12 +5,16 @@
 import fs from 'node:fs';
 
 const file = process.argv[2] || 'sbom-pi-workbench.cdx.json';
+if (!fs.existsSync(file)) {
+  console.error(`SBOM pin assertion FAILED: SBOM file not found at "${file}"`);
+  process.exit(1);
+}
 const d = JSON.parse(fs.readFileSync(file, 'utf8'));
 const components = d.components || [];
 // (v1.4.1 review #7) check EVERY physical copy, not one entry per name: a
 // name -> version map let a newer duplicate shadow a stale nested copy, so the
 // gate went green while an old version was still shipped.
-const WANT = { undici: '8.11.2', 'brace-expansion': '5.0.12' };
+const WANT = { undici: '8.12.2', 'brace-expansion': '5.0.12' };
 const pathOf = (c) => (c.properties || []).find((p) => p && p.name === 'path')?.value;
 let failed = false;
 for (const [name, want] of Object.entries(WANT)) {
@@ -37,7 +41,14 @@ if (failed) process.exit(1);
 // installed from — every package npm recorded must be described, at the same version, at
 // the same physical path. That turns "the SBOM parsed" into "the SBOM accounts for the tree".
 const lockFile = process.argv[3] || 'runtime-package-lock.json';
-if (lockFile && fs.existsSync(lockFile)) {
+// v1.4.4 review: a missing/misnamed lock path used to skip the ENTIRE coverage check
+// silently — an SBOM gate that fails open when its second input is absent. CI always passes
+// the path, so a missing file here is a wiring mistake and must be loud.
+if (!fs.existsSync(lockFile)) {
+  console.error(`SBOM coverage FAILED: lock file not found at "${lockFile}" — refusing to pass without the coverage check (pass the correct path as argv[3])`);
+  process.exit(1);
+}
+{
   const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
   // Which optional entries can exist on THIS machine. The runtime lock records the
   // platform variants of esbuild/rollup for every OS (aix, android, darwin, freebsd, linux,

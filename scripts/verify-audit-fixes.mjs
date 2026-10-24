@@ -517,6 +517,81 @@ const check = (name, ok, detail = '') => {
   check('P2-3 wsSend reports whether the frame was accepted',
     /function wsSend\(obj\)[\s\S]{0,1600}?return true;/.test(app) && app.includes('if (!rpcTo(cmd))'),
     'wsSend receipt or composer restore missing');
+  // v1.4.4 review P2/P3: the composer-state contract, asserted by RUNNING the extracted
+  // functions rather than by finding their names in the file. These four used to be
+  // "does the source contain the string" checks, which pass on a comment.
+  {
+    const fnBody = (name) => {
+      const i = app.indexOf(`function ${name}(`);
+      if (i === -1) return null;
+      // brace-match to the end of the function
+      let depth = 0, started = false;
+      for (let j = i; j < app.length; j++) {
+        const c = app[j];
+        if (c === '{') { depth++; started = true; }
+        else if (c === '}') { depth--; if (started && depth === 0) return app.slice(i, j + 1); }
+      }
+      return null;
+    };
+    const revertSrc = fnBody('revertPendingComposerSwitch');
+    const stateSrc = app.slice(app.indexOf('const state = {'), app.indexOf('};', app.indexOf('const state = {')) + 2);
+    const hasHelpers = !!revertSrc && app.includes('const THINK_LABEL =');
+
+    if (hasHelpers && stateSrc) {
+      // build a sandbox with just what the function touches
+      const factory = new Function(`
+        const state = { selModel: null, lastAckedModel: null, pendingSetModels: null, pendingThinkLevels: null, thinkLevel: 'medium' };
+        const document = { querySelector: () => null };
+        const THINK_LABEL = { medium: '中', high: '高', low: '低' };
+        const updateModelChip = () => {};
+        ${revertSrc}
+        return { state, revertPendingComposerSwitch };
+      `);
+      const box = factory();
+
+      // (a) two pendings: revert must land on the FIRST switch's prev, not the last one's
+      box.state.selModel = 'c/m3';
+      box.state.pendingSetModels = new Map([['a/m1', { prev: 'a/m1' }], ['b/m2', { prev: 'a/m1' }]]);
+      box.state.pendingSetModels = new Map([['b/m2', { prev: 'a/m1' }], ['c/m3', { prev: 'b/m2' }]]);
+      box.revertPendingComposerSwitch();
+      const landedOnFirst = box.state.selModel === 'a/m1';
+
+      // (b) a null prev ("this was the first model ever chosen") must still revert
+      box.state.selModel = 'z/m9';
+      box.state.pendingSetModels = new Map([['z/m9', { prev: null }]]);
+      box.revertPendingComposerSwitch();
+      const nullPrevReverts = box.state.selModel === null;
+
+      check('v34 the composer revert takes the FIRST switch prev and honours a null prev',
+        landedOnFirst && nullPrevReverts,
+        `landedOnFirst=${landedOnFirst} nullPrevReverts=${nullPrevReverts}`);
+    } else {
+      check('v34 the composer revert takes the FIRST switch prev and honours a null prev', false, 'revertPendingComposerSwitch not found or not parseable');
+    }
+
+    // the rpc-denied handler must only settle on a composer command
+    // slice from the handler to the NEXT message-type dispatch (the tabId filter comes
+    // BEFORE this handler in the file, so using it as the end bound produced an empty slice)
+    const deniedStart = app.indexOf("if (msg.type === 'rpc-denied')");
+    const deniedEnd = app.indexOf("if (msg.tabId !== state.tabId) return;", deniedStart);
+    const deniedBlock = deniedStart === -1 ? '' : app.slice(deniedStart, deniedEnd === -1 ? deniedStart + 1200 : deniedEnd);
+    const guardsOnCommand = /cmd === null \|\| cmd === 'set_model' \|\| cmd === 'set_thinking_level'/.test(deniedBlock);
+    check('v34 rpc-denied settles the composer only when the refusal names a composer command',
+      guardsOnCommand, 'the handler reverts on any denial (v1.4.4 regression)');
+
+    // both chips must register BEFORE they send
+    const dd = rd(path.join('public', 'dropdowns.js'));
+    const modelCb = dd.slice(dd.indexOf("cb: () => {"), dd.indexOf("openDropdown(document.querySelector('#model-chip')"));
+    const trackBeforeSend = modelCb.indexOf('trackModelSwitch') !== -1 && modelCb.indexOf('trackModelSwitch') < modelCb.indexOf("type: 'set_model'");
+    check('v34 the model chip registers its pending before sending set_model',
+      trackBeforeSend, 'register-then-send ordering broken');
+
+    // exactly one handler may set availableLevels
+    const levelsWriters = (app.match(/state\.availableLevels\s*=/g) || []).length;
+    check('v34 exactly one place consumes get_available_thinking_levels', levelsWriters === 1,
+      `${levelsWriters} writers found — the duplicate handler is back`);
+  }
+
   check('P2-4 the deferred resolves on opened/pi-session-file and rejects on denial',
     app.includes('function settleOpen') && /if \(msg\.type === 'opened'\) \{ resolveOpen\(msg\.tabId\); return; \}/.test(app) && app.includes('rejectOpen(msg.tabId'),
     'deferred settle wiring missing');

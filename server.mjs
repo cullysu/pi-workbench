@@ -247,7 +247,8 @@ function loadRouting() {
   // failure decision, so one bad field took the routing page, the cron provider gate and
   // the failover chain down together. The deep rules now live in lib/schema.mjs, the same
   // module the HTTP write and the backup restore validate against.
-  return normalizeRoutingDoc(readJson(ROUTING_FILE));
+  // v1.4.4: pass a sink so a dropped row is in the server log, not a silent disappearance
+  return normalizeRoutingDoc(readJson(ROUTING_FILE), { onDrop: (why) => logErr('[routing] ' + why) });
 }
 // F08 (v1.3.5 audit): Windows ignores POSIX modes, so the 0600 above is a no-op there
 // and every credential-bearing file kept the inherited (often broad) profile ACL — the
@@ -688,12 +689,16 @@ wss.on('connection', (ws) => {
     } else if (msg.type === 'rpc') {
       const tab = tabs.get(msg.tabId);
       const mine = ownerLive(tab) ? tab.owner === ws : !!(tab && ws.adopted.has(msg.tabId));
-      if (!mine) { try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId })); } catch { /* socket gone */ } return; }
+      // v1.4.4 review: the payload carried only tabId/reason, so the client could not tell
+      // WHICH rpc was refused — it settled every optimistic composer switch on any denial.
+      // `command` names the refused rpc; the client settles only a matching one.
+      const refusedCmd = (msg.data && typeof msg.data === 'object' && typeof msg.data.type === 'string') ? msg.data.type : null;
+      if (!mine) { try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId, command: refusedCmd })); } catch { /* socket gone */ } return; }
       // set_model is an execution entry too — a disabled provider must not be
       // reachable by steering an existing tab's model (audit #10)
       if (msg.data && typeof msg.data === 'object' && msg.data.type === 'set_model' && msg.data.provider
         && loadRouting().providers?.[String(msg.data.provider)]?.enabled === false) {
-        try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId, reason: `供应商 ${msg.data.provider} 已停用` })); } catch { /* socket gone */ }
+        try { ws.send(JSON.stringify({ type: 'rpc-denied', tabId: msg.tabId, command: 'set_model', reason: `供应商 ${msg.data.provider} 已停用` })); } catch { /* socket gone */ }
         return;
       }
       sendToPi(msg.tabId, msg.data);
@@ -1242,19 +1247,48 @@ async function hProvidersKbfill(req, res, u) {
     // while the endpoint answered 500 — a half-applied fill that no retry could reconcile.
     // Same shape as the provider transaction: snapshot both, write both, restore both.
     fs.mkdirSync(path.dirname(PI_MODELS), { recursive: true });
+    // v1.4.4 review: the rollback had two asymmetries that the provider transaction this
+    // copied does not have.
+    //   (a) `catch { modelsPrev = null }` did not distinguish "the file was not there" from
+    //       "the read failed". On a real read error the rollback branch then took the
+    //       modelsPrev===null path and DELETED a models.json that existed — the rollback
+    //       destroyed live config. Only ENOENT may mean absent; anything else fails the
+    //       request before the first write.
+    //   (b) the meta half always called saveModelMeta(metaPrev), so when there was no
+    //       model-meta.json before the call the rollback CREATED one. Absent must stay absent.
+    const metaFile = MODEL_META_FILE;
+    let metaPrevRaw = null;
+    try { metaPrevRaw = fs.readFileSync(metaFile, 'utf8'); } catch (e) {
+      if (!e || e.code !== 'ENOENT') {
+        return json(res, 500, { error: `无法读取 model-meta.json（${(e && e.code) || (e && e.message) || e}）——无法保证回滚正确，本次填充未写入任何文件` });
+      }
+      metaPrevRaw = null; // genuinely absent
+    }
     const metaPrev = loadModelMeta();
     const meta = { ...metaPrev };
     for (const [id, price] of Object.entries(pricing)) meta[`${provider}|${id}`] = price;
     let modelsPrev = null;
-    try { modelsPrev = fs.readFileSync(PI_MODELS, 'utf8'); } catch { modelsPrev = null; }
+    try { modelsPrev = fs.readFileSync(PI_MODELS, 'utf8'); } catch (e) {
+      if (!e || e.code !== 'ENOENT') {
+        return json(res, 500, { error: `无法读取 models.json（${(e && e.code) || (e && e.message) || e}）——无法保证回滚正确，本次填充未写入任何文件` });
+      }
+      modelsPrev = null; // genuinely absent
+    }
     try {
       atomicWrite(PI_MODELS, JSON.stringify(doc, null, 2));
       saveModelMeta(meta);
     } catch (e) {
       const rollback = [];
-      try { if (modelsPrev === null) fs.rmSync(PI_MODELS, { force: true }); else atomicWrite(PI_MODELS, modelsPrev); }
-      catch (re) { rollback.push(`models.json: ${(re && re.message) || re}`); }
-      try { saveModelMeta(metaPrev); } catch (re) { rollback.push(`model-meta.json: ${(re && re.message) || re}`); }
+      // models.json: absent stays absent, present is restored byte-for-byte
+      try {
+        if (modelsPrev === null) fs.rmSync(PI_MODELS, { force: true });
+        else atomicWrite(PI_MODELS, modelsPrev);
+      } catch (re) { rollback.push(`models.json: ${(re && re.message) || re}`); }
+      // model-meta.json: same rule — do not create a file the caller did not have
+      try {
+        if (metaPrevRaw === null) fs.rmSync(metaFile, { force: true });
+        else saveModelMeta(metaPrev);
+      } catch (re) { rollback.push(`model-meta.json: ${(re && re.message) || re}`); }
       return json(res, 500, {
         error: `知识库填充写入失败：${(e && e.message) || e}`,
         ...(rollback.length ? { rollbackFailed: rollback, detail: '两个文件未能同时回滚，磁盘可能处于部分更新状态' } : { detail: '已回滚到填充前的状态' }),
@@ -1713,13 +1747,22 @@ async function hImport(req, res, u, m) {
           return json(res, 413, { error: `会话文件过大（${(st.size / 1048576).toFixed(1)} MB），超过 ${MAX_IMPORT_BYTES / 1048576} MB 导入上限`, size: st.size });
         }
       }
+      // v1.4.4 review: a reader may report its own truncation (opencodeRead stops at its SQL
+      // budget). Both signals must survive to the client — the old `entries.length > 20000`
+      // test could never fire for a list the budget had cut to exactly 20000.
       const all = imp.read(f);
-      const entries = Array.isArray(all) ? all : [];
-      const truncated = entries.length > MAX_IMPORT_ENTRIES;
+      const entries = Array.isArray(all) ? all : (Array.isArray(all?.items) ? all.items : []);
+      const readerTruncated = !Array.isArray(all) && all?.truncated === true;
+      const truncated = readerTruncated || entries.length > MAX_IMPORT_ENTRIES;
       // keep the TAIL — an agent session's most recent turns are the ones worth re-reading
       return json(res, 200, { entries: truncated ? entries.slice(-MAX_IMPORT_ENTRIES) : entries, truncated, total: entries.length });
     }
-    return json(res, 200, { sessions: await imp.list() });
+    // v1.4.4 review: a lister that hit its own file budget returns {items, capped}; the
+    // flag used to be attached to the array itself and was dropped by JSON.stringify.
+    const listed = await imp.list();
+    const sessions = Array.isArray(listed) ? listed : (Array.isArray(listed?.items) ? listed.items : []);
+    const capped = !Array.isArray(listed) && listed?.capped === true;
+    return json(res, 200, { sessions, ...(capped ? { capped: true } : {}) });
 }
 
 async function hGitStatus(req, res, u) {
@@ -1949,11 +1992,26 @@ async function hMcpInstall(req, res, u) {
       fs.rmSync(stage, { recursive: true, force: true });
       return json(res, 500, { ok: false, dest: destDir, error: 'staged extension has no index.js', note: '原有扩展保持不变' });
     }
+    // v1.4.4 review: this used `await import(stage/index.js)` INSIDE the server process, so
+    // one install call executed third-party extension top-level code with the server's full
+    // state in scope — and each staged path is unique, so every install added a module copy
+    // that is never evicted. The staged tree is first-party today, but the boundary belongs
+    // where it was: verify loadability in a CHILD process, so the extension's side effects
+    // land in a throwaway interpreter and nothing accumulates in this one.
     try {
-      await import(pathToFileURL(path.join(stage, 'index.js')).href);
+      const probe = await collectProc(
+        spawn,
+        process.execPath,
+        ['--input-type=module', '-e', `await import(${JSON.stringify(pathToFileURL(path.join(stage, 'index.js')).href)});`],
+        { cwd: stage, timeoutMs: 30000, maxOut: 8000, maxErr: 8000 },
+      );
+      if (probe.code !== 0) {
+        fs.rmSync(stage, { recursive: true, force: true });
+        return json(res, 500, { ok: false, dest: destDir, error: ('staged extension does not load: ' + String(probe.err || probe.out || `exit ${probe.code}`)).slice(0, 400), note: '原有扩展保持不变' });
+      }
     } catch (e) {
       fs.rmSync(stage, { recursive: true, force: true });
-      return json(res, 500, { ok: false, dest: destDir, error: ('staged extension does not load: ' + ((e && e.message) || e)).slice(0, 400), note: '原有扩展保持不变' });
+      return json(res, 500, { ok: false, dest: destDir, error: ('staged extension load check failed: ' + ((e && e.message) || e)).slice(0, 400), note: '原有扩展保持不变' });
     }
     // swap: old → grave, staging → live. A rename failure restores the old tree, so a
     // previously-working extension is never left half-installed (M10).
@@ -1968,7 +2026,10 @@ async function hMcpInstall(req, res, u) {
       if (hadOld) { try { fs.renameSync(grave, destDir); } catch { /* the grave stays for manual recovery */ } }
       return json(res, 500, { ok: false, dest: destDir, error: `安装交换失败（${(e && e.message) || e}）${hadOld ? '，原扩展已恢复' : ''}` });
     }
-    return json(res, 200, { ok: true, dest: destDir, note: hasDepInStage ? 'typebox installed in staging' : 'typebox was bundled' });
+    // v1.4.4 review: `hasDepInStage ? … : …` tested the FUNCTION OBJECT (always truthy), so
+    // the bundled path still reported "installed in staging" — a receipt that contradicts
+    // the fact, which is the exact failure class this project keeps being flagged for.
+    return json(res, 200, { ok: true, dest: destDir, note: hasDepInStage() ? 'typebox installed in staging' : 'typebox was bundled' });
 }
 
 async function hBackupExport(req, res, u) {

@@ -23,7 +23,9 @@ const TAR = (() => {
   }
   return 'tar';
 })();
-const PINS = [['undici', '8.11.2'], ['brace-expansion', '5.0.12']];
+// v1.4.4: GHSA-xjj6-f33q-929c (DoS via unhandled error on excessive content-encodings)
+// covers >=8.0.0 <8.12.2, so the previous pin (8.11.2) was inside it. 8.12.2 clears it.
+const PINS = [['undici', '8.12.2'], ['brace-expansion', '5.0.12']];
 // integrity anchors come from the committed runtime lockfile — a version match alone
 // would accept re-authored content; the tarball hash must equal the lock's integrity
 const lock = JSON.parse(fs.readFileSync(path.resolve('runtime-package-lock.json'), 'utf8'));

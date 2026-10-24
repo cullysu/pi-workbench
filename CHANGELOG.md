@@ -2,6 +2,155 @@
 
 All notable changes. Dates are 2026. Format follows Keep a Changelog loosely.
 
+## 1.4.5 — 2026-10-24
+
+### Security
+
+**electron 44.2.0 → 44.9.3 (SHIPPED shell):** the registry published seven highs covering
+44.0.0-alpha.1 – 44.9.0 while this wave ran (HID/USB permission attribution, SameSite cookie
+restrictions on opened windows, a compromised-intermediate-certificate mitigation, and more).
+electron ships inside every installer, so this was fixed by upgrade, not by baselining —
+`fixAvailable` pointed at 44.9.1+ and the dependency range (^44) takes it without code
+changes.
+
+**undici pin 8.11.2 → 8.12.2 (SHIPPED runtime):** GHSA-xjj6-f33q-929c (DoS via unhandled
+error on excessive content-encodings) covers `>=8.0.0 <8.12.2`, so the previous pin sat
+INSIDE the advisory range. `pin-runtime-deps.mjs` and `assert-sbom-pins.mjs` both moved to
+8.12.2, and the runtime lock now resolves the new tarball with its registry integrity. The
+three remaining dev-tree undici copies (pi 8.9.0, node-gyp 6.28.1, root 7.29.1) are baselined
+with that note — npm re-installs them from upstream trees on every `npm ci`, which is exactly
+the installer-ignores-the-lock behaviour the pin step exists to defeat.
+
+### Fixed (from the v1.4.4 follow-up review — the "main shape closed, sibling still open" set)
+
+**IPv6 was the hole in the local-URL policy (high):** `isLocalUrlHostname` only knew `::1`,
+`::` and `.ipv6-literal.net`, so `[fe80::1]` (link-local), `[fd12::1]` (ULA) and
+`[::ffff:127.0.0.1]` (IPv4-mapped loopback) all classified as PUBLIC and were followed even
+with `PIWB_DISALLOW_LOCAL_URLS=1` — the reviewer executed each one. The predicate is shared
+by the initial URL and every hop, so this one gap was the whole policy. It is now a real
+prefix check (unspecified / loopback / fe80::/10 / fc00::/7 / IPv4-mapped judged by the IPv4
+rules), zone ids stripped, malformed input rejected. And `fetchJsonCapped` polices its OWN
+first hop: the old "same policy at every hop" claim relied on every caller running
+`assertHttpUrl` first — one missed call would have bypassed everything.
+
+**Provider delete still resurrected cooldowns (P1):** the sweep took models, defaultModel,
+routing metadata and chains but not `routing.state.cooldowns` — re-creating a provider under
+the same name silently inherited the DELETED one's cooldown (`<p>#literal`, `<p>#env:<NAME>`,
+`model:<p/m>`) for the rest of its window. Same commit now, receipt says 冷却记录(n).
+
+**The save door could be bypassed by omitting `models` (medium):** `providerRowProblem` ran
+only when `models` happened to be an array, so `save({provider:{apiKey:123}})` — no `models`
+key at all — skipped validation and persisted a shape the other two doors reject. The row
+validator is unconditional now; a refused save writes nothing.
+
+**kbfill's rollback could DELETE the file it was supposed to restore (medium):** the
+pre-image read used `catch { modelsPrev = null }` without distinguishing ENOENT from a real
+read error, so a failed read led the rollback to `rmSync` a live models.json. It also always
+re-wrote model-meta.json, creating a file the caller never had. Both halves now follow the
+same rule the provider transaction uses: ENOENT means absent (rollback removes), anything
+else fails the request before the first write.
+
+**The MCP install load-gate moved a trust boundary into the server (medium):** it used
+`await import(stage/index.js)` IN the server process — one install call executed extension
+top-level code with the server's full state in scope, and every staged path is unique so the
+module table accumulated copies forever. Loadability is now verified in a child process;
+side effects land in a throwaway interpreter. The receipt also stopped lying: it tested the
+`hasDepInStage` FUNCTION (always truthy) and reported "installed in staging" for bundled
+installs too.
+
+**geminiList's "head-only" read was not head-only (medium):** `readFileSync(f).slice(0, N)`
+loads the whole file and cuts the string — a 200MB session still cost 200MB — and the
+`head + '}'` repair almost never makes a truncated JSON parse, so sessions past the cut
+silently lost their preview. It reads off the fd now, and when the head does not parse it
+scans the first user/title string instead of giving up. The truncation markers also travel
+now: `items.capped = true` and `out.truncated = true` hung properties on ARRAYS, which
+`JSON.stringify` drops, and opencode's `> 20000` test could never fire against a list the
+budget had cut to exactly 20000 — a truncated session was presented as complete.
+
+**MCP argv scrubbing missed the compound spellings (medium):** the flag pattern was anchored
+to a bare name, so `--session-token` (AWS CLI's real spelling), `--auth`, `--x-api-key`, the
+`-H=Authorization: …` equals form and bare `API_KEY=abc` env-style argv all passed through.
+The match is now "any flag whose name contains a credential word" plus env assignments.
+
+**The cron enable toggle bypassed the #19 load gate (medium):** the save BUTTON checks
+`cronLoaded` but the toggle posted the whole list anyway — after a failed load, flipping a
+switch wrote back the stale (possibly empty) list. It honours the gate now, and loadCron /
+loadMcp carry request sequence guards (the same race #23 fixed for the file browser: a slow
+older response could repaint the list and re-arm `loaded`).
+
+**Two concurrent exports could steal each other's intermediates (medium):** import had an
+in-flight guard, export did not — the first to finish deleted the fixed
+`*.redacted.json` files while the second was still reading them, producing a "no keys" backup
+that quietly omitted models.json. Exports are serialised now, and prune never runs while an
+import is in flight (its snapshot is the rollback path).
+
+**Schema value-level rules (medium + low):** a blank `priority` passed `Number.isFinite(Number(''))`
+and normalised to 0 — an explicit LOWEST priority where "absent" (default 1) was meant.
+Cooldown values were never validated, so `until: 'soon'` sat in the map as a fail-open
+"not cooled" entry that looked like data. Header values were accepted as any type while
+every consumer silently dropped non-strings. A null provider row was rejected by the routing
+door and waved through by the models door. And `loadRouting` now LOGS every row/chain/cooldown
+it drops — a hand-edited file losing a provider used to be a silent disappearance.
+
+### The composer-state contract, finished (P2/P3)
+
+- ONE registration point, actually one: the config panel used `.set()` directly while the
+  menu went through `trackModelSwitch`.
+- Register-then-send on BOTH chips, in a try/catch: a throw from rpcTo (socket closing) used
+  to leave the optimistic chip with no pending to revert.
+- `rpc-denied` settles precisely: the server now names the refused command in the payload,
+  and the client reverts only a composer command — an unrelated denial used to clear a
+  legitimate in-flight pending, after which the success ack found an empty Map and the chip
+  stayed wrong.
+- The revert takes the FIRST switch's prev (it walked insertion order and landed on the LAST
+  entry's prev — an intermediate model) and honours a null prev ("first model ever chosen"
+  could never revert).
+- Thinking switches keep a per-level Map, matched by the level the ack names — the single
+  slot lost the second of two quick switches (the first ack settled the second's pending, a
+  failure reverted to the wrong level). Exactly one handler consumes
+  `get_available_thinking_levels` now; the duplicate had different success semantics.
+
+### Boot and reload (P4/P5)
+
+- Every API call carries a 20 s deadline: a server that accepts connections and never
+  answers used to hang `loadProjects()` forever at boot's first await — the exact case the
+  #21 catch could not reach.
+- `loadProjects` rejects an `{error}` payload instead of storing it in `state.cfg` (the UI
+  used to degrade silently on a refused /api/config).
+- `__bootErrors` is READ now: it renders into the status line (click to copy the list). Dead
+  telemetry was only true on paper.
+- The boot-failure reload handler is removed on success — after a recovered boot, any later
+  click on the status line used to reload the page and throw away the draft.
+
+### Gates made honest
+
+- **audit-gate:** baseline keys carry the ADVISORY range (npm's impact range and advisory
+  range word their strings differently — a baseline written from one cannot match a key built
+  from the other); one advisory may cover several ranges, so the baseline map holds all
+  variants instead of the last one; a stale entry now FAILS the run (an old "reviewed"
+  conclusion used to silently re-apply when the same advisory returned); and if npm reports
+  high/critical totals but the script collects zero named advisories, the report shape
+  changed and the gate fails instead of going green.
+- **SBOM gate fail-open closed:** a missing lock path used to skip the ENTIRE coverage check
+  silently; both inputs are validated up front with clean failures.
+- **verify-audit-fixes:** four new checks assert the composer contract by RUNNING the
+  extracted functions (two-pendings revert order, null-prev, denial scoping, one levels
+  consumer) instead of finding strings in the file — each proven red on the pre-fix code.
+- **test infra:** the v144 file registers its temp dirs with the shared registry (its own
+  manual rmSync skipped cleanup on assertion failure — the residue #33 exists to prevent);
+  run-tests counts DECLARED CASES and rejects a file with zero of them; a signal exits
+  128+n instead of disguising an interruption as a green run.
+
+### Honest scope
+
+The follow-up review's remaining items are queued, not done here: the verify suite is still
+~45% source-string assertions; the SBOM coverage gate does not yet fail when the CURRENT
+platform's native optional binary (esbuild/rollup) is absent — that proof still lives in
+check-runtime; DNS rebinding (a public name resolving to loopback) is still outside the
+literal-hostname check; the cron `kind` unescaped-interpolation, the god files, the
+synchronous-IO inventory, the electron scheme whitelist drift and the rest of the standing
+architecture list are unchanged from the previous report.
+
 ## 1.4.4 — 2026-10-23
 
 ### Fixed (from the v1.4.3 independent review — 39 findings: 4 high, 9 medium, 4 import/performance, 7 frontend, 13 CI/test/release, 2 architecture; every one verified against `ab5bafb` before it was touched)

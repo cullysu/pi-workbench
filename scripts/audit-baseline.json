@@ -4,7 +4,7 @@
     {
       "package": "undici",
       "id": "https://github.com/advisories/GHSA-rfgv-xxqx-mfg5",
-      "reason": "DoS via unrequested WebSocket subprotocol. Arrives through @earendil-works/pi-coding-agent (dev-only; the shipped runtime pins undici 8.11.2 with pip integrity \u2014 see pin-runtime-deps.mjs + assert-sbom-pins.mjs). Upstream fix awaits a pi release we cannot force from here."
+      "reason": "DoS via unrequested WebSocket subprotocol. Arrives through @earendil-works/pi-coding-agent (dev-only; the shipped runtime pins undici 8.11.2 with pip integrity — see pin-runtime-deps.mjs + assert-sbom-pins.mjs). Upstream fix awaits a pi release we cannot force from here."
     },
     {
       "package": "undici",
@@ -14,7 +14,7 @@
     {
       "package": "@modelcontextprotocol/sdk",
       "id": "https://github.com/advisories/GHSA-22jm-h49p-29qw",
-      "reason": "Experimental tasks not tied to the creating session. Arrives via @earendil-works/pi-coding-agent devDependency; the MCP server the workbench ships talks stdio to local processes over a token-gated loopback API \u2014 the advisory's attack surface (multi-tenant HTTP MCP servers) does not exist here. Tracked for the pi upgrade."
+      "reason": "Experimental tasks not tied to the creating session. Arrives via @earendil-works/pi-coding-agent devDependency; the MCP server the workbench ships talks stdio to local processes over a token-gated loopback API — the advisory's attack surface (multi-tenant HTTP MCP servers) does not exist here. Tracked for the pi upgrade."
     },
     {
       "package": "@modelcontextprotocol/sdk",
@@ -24,7 +24,7 @@
     {
       "package": "brace-expansion",
       "id": "https://github.com/advisories/GHSA-qhr7-859c-m2p7",
-      "reason": "DoS via uncontrolled recursion on nested brace groups. Dev-tree transitive (glob \u2192 minimatch \u2192 brace-expansion) at old versions; the shipped runtime pins brace-expansion 5.0.12 (assert-sbom-pins validates every physical copy)."
+      "reason": "DoS via uncontrolled recursion on nested brace groups. Dev-tree transitive (glob → minimatch → brace-expansion) at old versions; the shipped runtime pins brace-expansion 5.0.12 (assert-sbom-pins validates every physical copy)."
     },
     {
       "package": "brace-expansion",
@@ -40,6 +40,37 @@
       "package": "playwright",
       "id": "https://github.com/advisories/GHSA-7mvr-c777-76hp",
       "reason": "Playwright downloads browsers without verifying the SSL certificate. The workbench pins playwright 1.49.1 as an exact devDependency used ONLY by the CI/probe scripts (ui-probe, chat-e2e, ui-a11y, ui-contract). The advisory is about Playwright's installer fetching a browser over an insecure channel; CI fetches from Playwright's CDN over https and the pinned version's advisory has no in-repo fix. Tracked for the pinned-version bump."
+    },
+    {
+      "package": "body-parser",
+      "id": "https://github.com/advisories/GHSA-27r3-jxmh-p828",
+      "range": ">=2.0.0 <2.4.0",
+      "reason": "DoS via trailing bytes after a compressed request body. Dev-tree only: arrives via eslint -> @modelcontextprotocol/sdk -> express; the workbench never runs express, and the shipped runtime tree does not contain body-parser (the runtime audit is a separate hard gate). Upstream fix (2.4.0) is held by the eslint toolchain, not by this repo. Re-verify when eslint or the MCP SDK bumps express."
+    },
+    {
+      "package": "zod",
+      "id": "https://github.com/advisories/GHSA-mrhx-c7xc-m3w5",
+      "range": "<4.6.6",
+      "reason": "Zod can exhaust memory validating oversized constrained collections. Dev-tree only: zod 3.25.76 arrives via @earendil-works/pi-coding-agent (@anthropic-ai/sdk, openai). The fix is zod 4.x — a major bump that would break pi, which is upstream-owned. Same class as the pre-existing undici entries: dev-only, cannot be fixed from here without downgrading pi."
+    },
+    {
+      "package": "undici",
+      "id": "https://github.com/advisories/GHSA-xjj6-f33q-929c",
+      "range": ">=8.0.0 <8.12.2",
+      "reason": "DoS via unhandled error on excessive content-encodings. The SHIPPED copy is FIXED: the runtime pin moved to 8.12.2 (scripts/pin-runtime-deps.mjs, verified by assert-sbom-pins). The dev-tree copies (pi 8.9.0, node-gyp 6.28.1, root 7.29.1) are npm-installed from upstream trees we cannot override (the same installer-ignores-the-lock behaviour pin-runtime-deps exists to defeat) and are never shipped."
+    },
+    {
+      "package": "undici",
+      "id": "https://github.com/advisories/GHSA-xjj6-f33q-929c",
+      "range": ">=7.18.0 <7.30.1",
+      "reason": "Same advisory, dev-tree copy (root undici 7.29.1 via toolchain). Shipped runtime is pinned to 8.12.2."
+    },
+    {
+      "package": "undici",
+      "id": "https://github.com/advisories/GHSA-xjj6-f33q-929c",
+      "range": ">=6.23.0 <6.29.1",
+      "reason": "Same advisory, dev-tree copy (node-gyp 6.28.1). Shipped runtime is pinned to 8.12.2."
     }
-  ]
+  ],
+  "_updated": "2026-10-24: electron 44.2.0 -> 44.9.3 (7 highs FIXED by upgrade, shipped shell, not baselined); body-parser + zod added (dev-tree, justified); GHSA-xjj6-f33q-929c added for three dev-tree undici copies AFTER the shipped pin moved to 8.12.2."
 }

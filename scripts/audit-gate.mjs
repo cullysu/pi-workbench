@@ -50,26 +50,75 @@ for (const [name, info] of Object.entries(report.vulnerabilities || {})) {
     if (!via || typeof via !== 'object') continue;
     if (!SEV.has(String(via.severity))) continue;
     const id = via.url || `npm:${name}:${via.source ?? 'unknown'}`;
-    found.set(`${name}|${id}`, { package: name, id, title: via.title || '' });
+    // v1.4.4 review: the key was package+advisory only. The same GHSA reaching a DIFFERENT
+    // installed version (or a different physical path) is a different exposure — a broad
+    // key lets an old "dev-only, reviewed" entry silently cover a new arrival. Version and
+    // the dependency range npm reports are part of the identity now.
+    // v1.4.4 note: npm's `vulnerabilities[name].range` is the INSTALLED-impact range
+    // ("2.0.0 - 2.3.0") while `via.range` is the ADVISORY range (">=2.0.0 <2.4.0") — the two
+    // wordings differ, so a baseline written from one cannot match a key built from the
+    // other. Key on the advisory range; the baseline records the same string.
+    const range = String(via.range || '');
+    const key = `${name}|${id}|${range}`;
+    found.set(key, { package: name, id, range, title: via.title || '', severity: String(via.severity) });
   }
 }
 const baseline = fs.existsSync(baselineFile) ? JSON.parse(fs.readFileSync(baselineFile, 'utf8')) : { entries: [] };
-const allowed = new Map((baseline.entries || []).map((e) => [`${e.package}|${e.id}`, e]));
+// a baseline entry may pin the range or leave it open (`range` absent = any range), so an
+// advisory that moves to a new installed range is reported instead of silently covered
+// one advisory can cover several installed RANGES (npm reports one line per major), so a
+// baseline legitimately carries several entries with the same package+id and different
+// ranges — the map must hold ALL of them, keyed package|id -> [entries], not the last one.
+const allowed = new Map();
+for (const e of baseline.entries || []) {
+  const k = `${e.package}|${e.id}`;
+  if (!allowed.has(k)) allowed.set(k, []);
+  allowed.get(k).push(e);
+}
+const matchBaseline = (f) => {
+  const candidates = allowed.get(`${f.package}|${f.id}`) || [];
+  for (const e of candidates) {
+    if (e.range === undefined || e.range === f.range) return e;
+  }
+  return null;
+};
 
-const unexpected = [...found.values()].filter((f) => !allowed.has(`${f.package}|${f.id}`));
-const stale = [...allowed.keys()].filter((k) => !found.has(k));
+const unexpected = [...found.values()].filter((f) => !matchBaseline(f));
+const usedKeys = new Set([...found.values()].map((f) => `${f.package}|${f.id}`));
+const stale = [...allowed.keys()].filter((k) => !usedKeys.has(k));
 
 const counts = report.metadata?.vulnerabilities || {};
+const metaHigh = Number(counts.high || 0) + Number(counts.critical || 0);
 console.log(`audit-gate: ${counts.high || 0} high, ${counts.critical || 0} critical in the full tree; ` +
   `${found.size} high/critical advisories named, ${allowed.size} baselined`);
 
+// v1.4.4 review: the script printed metadata's totals but never compared them with what it
+// had collected, so a change in npm's report SHAPE (via entries becoming strings) would
+// shrink `found` to zero and turn the gate green while the tree was unchanged. If the
+// metadata count and the named count disagree, the report was not understood — fail open
+// is not an option for an audit gate.
+const foundPackages = new Set([...found.values()].map((f) => f.package)).size;
+if (metaHigh > 0 && found.size === 0) {
+  console.error(`audit-gate: FAILED — npm reports ${metaHigh} high/critical but this script collected 0 named advisories.`);
+  console.error('The report shape changed; fix scripts/audit-gate.mjs before trusting this gate.');
+  process.exit(2);
+}
+if (metaHigh > 0 && foundPackages === 0) {
+  console.error('audit-gate: FAILED — high/critical count present but no package attributed');
+  process.exit(2);
+}
+
 if (stale.length) {
-  console.log(`audit-gate: ${stale.length} baseline entr${stale.length === 1 ? 'y is' : 'ies are'} no longer reported — remove from scripts/audit-baseline.json:`);
-  for (const k of stale) console.log('  stale: ' + k);
+  // v1.4.4 review: a stale entry only printed a note, so if the same advisory came back
+  // later the OLD "reviewed" conclusion silently re-applied. Removing the entry is the
+  // reviewer's action; until then the gate must not pass while the baseline over-claims.
+  console.error(`audit-gate: FAILED — ${stale.length} baseline entr${stale.length === 1 ? 'y is' : 'ies are'} no longer reported. Delete from scripts/audit-baseline.json:`);
+  for (const k of stale) console.error('  stale: ' + k);
+  process.exit(1);
 }
 if (unexpected.length) {
   console.error(`audit-gate: FAILED — ${unexpected.length} high/critical advisory(ies) not covered by the baseline:`);
-  for (const f of unexpected) console.error(`  - ${f.package}: ${f.title || ''} ${f.id}`);
+  for (const f of unexpected) console.error(`  - ${f.package}@${f.range || '?'}: ${f.title || ''} ${f.id}`);
   console.error('Fix it, or add a justified entry to scripts/audit-baseline.json.');
   process.exit(1);
 }

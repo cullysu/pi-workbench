@@ -481,3 +481,74 @@ esbuild/rollup 变体都算作"必须存在"，而 npm 只装当前平台适用�
 2. 代码签名 / 公证（#39）需证书账号。
 3. 浏览器探针未在本机跑（无 Chromium），CI 覆盖；`e2e-cross-os` 已首跑通过。
 4. 架构项 1-2（拆 `server.mjs` / `app.js` / `sources.mjs`）入队。
+
+---
+
+## 15. v1.4.4 复审处置（wave 34 · 2026-10-24，v1.4.5）
+
+复审把 wave 33 评为「主形状关了，同类兄弟还开着」并实证了 1 高 + 多项中危。逐条处置：
+
+### 高
+
+- **IPv6 本地范围整类漏检**：`[fe80::1]`/`[fd12::1]`/`[::ffff:127.0.0.1]`（主审逐个实测放行）。
+  重写为真前缀判断（unspecified/loopback/fe80::/10/fc00::/7/IPv4-mapped 走 IPv4 规则，zone id
+  剥离，畸形输入拒绝）；`fetchJsonCapped` 同时自带首跳策略，不再依赖调用方先调 `assertHttpUrl`。
+  红先行：降级谓词 → v34.1 红；删首跳检查 → v34.2 红。
+
+### 复审点名的兄弟项（全部修复）
+
+P1 冷却清扫（三键形 `<p>#literal`/`<p>#env:`/`model:<p/m>`，回执带数量）；save 门省略 `models`
+绕过（校验改无条件，拒绝时零写入）；kbfill 回滚区分 ENOENT 与真读错误 + meta 缺席不回造；
+MCP 安装 load 门改**子进程**验证（原 `await import` 在 server 进程执行扩展顶层代码且模块表只
+增不减）+ 回执 `hasDepInStage()` 漏括号（回执撒谎的微型复发）修正；geminiList 真分段读（fd）+
+解析失败退化为「窄扫描取首条文本」而非空 preview，截断标记改走可序列化形状（数组挂属性被
+JSON.stringify 丢弃 + opencode `>20000` 对恰好 20000 恒假）；mcp-scrub 复合名（`--session-token`、
+`-H=`、env 式 `API_KEY=`）——审者实测漏过的全补；cron 开关补 #19 门禁 + loadCron/loadMcp 序号
+守卫；export 串行化（并发时先结束者会删掉另一者还没读的中间体）+ prune 避让在飞 import；
+schema 的 priority 空串、cooldowns/headers 值校验、null 行两门一致、loadRouting 丢弃记录日志。
+
+### P2/P3 前端契约（复审四点全接）
+
+配置面板改走 `trackModelSwitch`（注册点真正归一）；两个 chip 都先注册后发送且带 try/catch；
+服务端 `rpc-denied` 载荷带上被拒命令，客户端只结算 composer 命令（原「任何 denial 都回滚」会
+清掉在途合法 pending，成功 ack 落空后 chip 停在错误模型）；revert 取**第一条**的 prev 并支持
+null prev（原实现按插入序逐个赋值停在最后一条的中间模型，null prev 被真值条件跳过）；
+thinking 改按 level 分桶的 Map、ack 按 level 匹配（单槽连点两次会错位结算），并删除重复的
+`get_available_thinking_levels` 处理器（旧的查 success+三形状、新的不查 success，规则分叉）。
+
+### P4/P5 boot 与 reload
+
+api.get/post 加 20s AbortSignal（原全文件零超时，后端假死 = 白屏原样保留）；`loadProjects`
+拒绝 `{error}` 载荷（原把错误对象赋给 state.cfg 静默降级）；`__bootErrors` 接渲染点（原是死
+遥测）；boot 失败 reload onclick 成功后清除（原误点任何状态文案都会整页 reload 丢草稿）。
+
+### 门禁修补（复审 P6/P7 + 审计门）
+
+audit-gate：基线键改用 advisory range（npm 的 impact range 与 advisory range 措辞不同，互不匹
+配）、同一 GHSA 多 range 共存（原 map 后写覆盖前写）、stale 条目改失败（原只打印，同编号回归
+会自动复活旧结论）、metadata 计数与采集数为 0 矛盾时失败（防报告格式变化导致假绿）。
+SBOM 门 fail-open 关闭（lock 缺失原来静默跳过整段覆盖检查；两输入前置校验）。
+verify 新增 4 条**运行函数**的行为断言（两条 pending 的 revert 次序、null prev、denial 范围、
+levels 单消费者），全部红先行验证。测试基建：v144 用共享 `_tmp`、run-tests 数声明用例数并拒绝
+空文件、信号退出 128+n。
+
+### 计划外（registry 当天新公布，门禁当场红）
+
+- **electron 44.2.0 → 44.9.3**：七条 high 覆盖 44.0.0-alpha.1–44.9.0，electron 随安装包发布，
+  按出货面修复（升级），不进基线。
+- **undici pin 8.11.2 → 8.12.2**：GHSA-xjj6-f33q-929c 覆盖 `>=8.0.0 <8.12.2`，旧 pin 在范围内；
+  pin 与断言双改，runtime lock 记录新 tarball integrity。dev 树三份拷贝（pi/node-gyp/根）进基线
+  并注明「shipped 已修、dev 树由上游树决定」。
+
+### 门禁（v1.4.5 树，本机实跑）
+
+lint 0/0 · `npm test` **115/115** · verify-audit-fixes **131 PASS / 0 FAIL** · route-sweep
+**51+2/0** · audit-gate **13 条基线内 / 0 条基线外** · assert-version **1.4.5** · SBOM
+**132 必需包全覆盖 / pins undici 8.12.2** · cargo **13/13**
+
+### 仍未做（复审三中点名，如实保留）
+
+verify 字符串断言比例仍 ~45%；SBOM 门仍不校验「当前平台原生可选包在场」（靠 check-runtime 兜）；
+DNS rebinding（公网域名解析到环回）不在字面主机名检查内；cron `kind` 未转义插值、三个上帝文件、
+全同步 IO、electron scheme 白名单漂移、僵尸依赖（highlight.js）、DOMPurify 不在 package.json 等
+第三部分清单**原样未动**，与既往各轮一致按架构队列处理。

@@ -22,9 +22,25 @@ if (!files.length) {
   process.exit(1);
 }
 console.log(`run-tests: ${files.length} files — ${files.map((f) => path.basename(f, '.test.mjs')).join(', ')}`);
+// v1.4.4 review: the count was FILES. Deleting every case inside a file still printed a
+// green run. Count the cases statically as a sanity floor (cheap: a grep is enough to catch
+// "the file is now empty") and print it next to the file count.
+let caseCount = 0;
+const emptyFiles = [];
+for (const f of files) {
+  const body = fs.readFileSync(path.join(root, f), 'utf8');
+  const n = (body.match(/^\s*(?:test|it)\(/gm) || []).length;
+  caseCount += n;
+  if (n === 0) emptyFiles.push(f);
+}
+if (emptyFiles.length) {
+  console.error(`run-tests: these files declare no tests, which is almost certainly a mistake: ${emptyFiles.join(', ')}`);
+  process.exit(1);
+}
+console.log(`run-tests: ${caseCount} declared test cases across ${files.length} files`);
 const args = ['--test', ...process.argv.slice(2), ...files];
 const child = spawn(process.execPath, args, { cwd: root, stdio: 'inherit' });
 child.on('exit', (code, signal) => {
-  if (signal) process.kill(process.pid, signal);
-  else process.exit(code ?? 1);
+  if (signal) { process.kill(process.pid, signal); return; }
+  process.exit(code ?? 1);
 });

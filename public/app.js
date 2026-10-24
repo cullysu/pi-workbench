@@ -64,7 +64,7 @@ const state = {
   modelsAvailable: [],
   importSrc: 'codex',
   thinkLevel: 'medium',
-  pendingThinkLevel: null,   // v1.4.3 review #24: the level awaiting its ack, and what to go back to
+  pendingThinkLevels: null,  // v1.4.4 P3: level -> {prev}; a Map, because two quick switches need two pendings
   turnHadTools: false,      // F22: a tool ran during the current prompt turn
   pendingSetModels: null,   // v1.4.2 review M6: per-MODEL set_model switches awaiting their ack — a failed ack reverts only its own switch
 };
@@ -110,9 +110,15 @@ function applyI18n() {
 // ---------- api ----------
 // token auth: server injects a per-boot random token into the page; every /api
 // request must echo it or the server answers 403 (blocks other local processes)
+// v1.4.4 review P4a: there was no timeout anywhere in the front end (no AbortController /
+// AbortSignal in the whole file). A server that ACCEPTS the connection and never answers
+// left `loadProjects()` unsettled forever — the boot IIFE stopped at its first await and the
+// user got a white shell, which is exactly the failure the #21 catch was supposed to cover.
+// Every request now carries a deadline; a timeout REJECTS (it is an error, not a payload).
+const API_TIMEOUT_MS = 20000;
 const api = {
-  get: (p) => fetch(p, { headers: apiHeaders() }).then((r) => apiOn403(r)).then(apiParse),
-  post: (p, body) => fetch(p, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body || {}) }).then((r) => apiOn403(r)).then(apiParse),
+  get: (p) => fetch(p, { headers: apiHeaders(), signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then((r) => apiOn403(r)).then(apiParse),
+  post: (p, body) => fetch(p, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body || {}), signal: AbortSignal.timeout(API_TIMEOUT_MS) }).then((r) => apiOn403(r)).then(apiParse),
 };
 // non-2xx resolves to {error} instead of a parsed body the caller reads as success —
 // "backend refused" and "backend accepted" must not be indistinguishable (audit #33)
@@ -196,9 +202,14 @@ function wsConnect() {
     if (msg.type === 'rpc-denied') {
       // v1.4.3 review #18: the server refuses set_model for a DISABLED provider (rpc-denied),
       // and the old handler only printed a line — the chip stayed on a model pi never
-      // adopted, and every later error/failover report named the wrong model. A denial is
-      // a definitive "your request did not happen": settle the optimistic state here.
-      revertPendingComposerSwitch();
+      // adopted, and every later error/failover report named the wrong model.
+      // v1.4.4 review P2: it settled EVERY optimistic switch on ANY denial. An unrelated
+      // refused rpc with a legitimate set_model in flight cleared that pending, and the
+      // later success ack then found an empty Map and no-oped — leaving the chip on a model
+      // pi never adopted, i.e. the very bug #18 fixed, through a different door. Settle only
+      // when the refusal names a composer command (the server now says which one).
+      const cmd = typeof msg.command === 'string' ? msg.command : null;
+      if (cmd === null || cmd === 'set_model' || cmd === 'set_thinking_level') revertPendingComposerSwitch();
       $('#statusline').textContent = '请求被拒绝：' + (msg.reason || '会话不属于此连接或已关闭');
       return;
     }
@@ -956,19 +967,30 @@ piEventHandlers.push(function (ev) {
   // F41: a FAILED set_model ack reverts the optimistic chip — the model did not change.
   // v1.4.2 review M6: pendings are keyed by the MODEL that was requested, so an out-of-order
   // ack settles exactly its own switch and can never roll a newer selection back.
-  if (ev.type === 'response' && ev.command === 'get_available_thinking_levels' && Array.isArray(ev.data?.levels)) {
-    state.availableLevels = ev.data.levels.map(String);
-    return;
-  }
   // v1.4.3 review #24: set_thinking_level had NO ack path — the chip was optimistic forever.
-  if (ev.type === 'response' && ev.command === 'set_thinking_level' && state.pendingThinkLevel) {
-    const pend = state.pendingThinkLevel;
-    state.pendingThinkLevel = null;
-    if (ev.success === false) {
-      state.thinkLevel = pend.prev;
-      const chip = document.querySelector('#think-chip');
-      if (chip) chip.textContent = '思考 · ' + (THINK_LABEL[pend.prev] || pend.prev);
-      $('#statusline').textContent = '思考等级切换失败：' + String(ev.error || 'pi 拒绝了该等级') + '——已恢复原等级';
+  // v1.4.4 review P3: a single slot lost the second of two quick switches — the first ack
+  // (success OR failure) settled the second switch's pending, so a failure reverted to the
+  // wrong level and the second failure had nothing left to revert. Keep every pending keyed
+  // by the LEVEL it asked for and settle only the one the ack names.
+  if (ev.type === 'response' && ev.command === 'set_thinking_level' && state.pendingThinkLevels && state.pendingThinkLevels.size) {
+    const ackedLevel = typeof ev.level === 'string' ? ev.level
+      : (ev.data && typeof ev.data.level === 'string' ? ev.data.level : null);
+    // no level in the ack (older pi): settle the OLDEST pending, which is the one a FIFO
+    // engine answers first
+    const key = ackedLevel && state.pendingThinkLevels.has(ackedLevel)
+      ? ackedLevel
+      : state.pendingThinkLevels.keys().next().value;
+    const pend = state.pendingThinkLevels.get(key);
+    state.pendingThinkLevels.delete(key);
+    if (ev.success === false && pend) {
+      // only revert if nothing newer is still pending — a failed older switch must not
+      // clobber a level the user has since chosen
+      if (!state.pendingThinkLevels.size) {
+        state.thinkLevel = pend.prev;
+        const chip = document.querySelector('#think-chip');
+        if (chip) chip.textContent = '思考 · ' + (THINK_LABEL[pend.prev] || pend.prev);
+        $('#statusline').textContent = '思考等级切换失败：' + String(ev.error || 'pi 拒绝了该等级') + '——已恢复原等级';
+      }
     }
     return;
   }
@@ -1300,8 +1322,16 @@ const THINK_LABEL = { off: '关闭', minimal: '极低', low: '低', medium: '中
 function revertPendingComposerSwitch() {
   let reverted = false;
   if (state.pendingSetModels && state.pendingSetModels.size) {
-    for (const [, pend] of state.pendingSetModels) {
-      if (pend && pend.prev && state.selModel !== pend.prev) { state.selModel = pend.prev; reverted = true; }
+    // v1.4.4 review P2: this walked the Map in INSERTION order and assigned each entry's
+    // prev, so with two pendings the final value was the LAST entry's prev (an intermediate
+    // model) instead of the model that was running before the first switch. It also skipped
+    // entries whose prev was null, so "this was the first model ever selected" could never
+    // be reverted. Take the FIRST entry's prev (insertion order = switch order) and treat
+    // null as a legitimate value.
+    const first = state.pendingSetModels.values().next();
+    if (!first.done) {
+      const prev = first.value && first.value.prev !== undefined ? first.value.prev : null;
+      if (state.selModel !== prev) { state.selModel = prev; reverted = true; }
     }
     state.pendingSetModels.clear();
   } else if (state.lastAckedModel && state.selModel !== state.lastAckedModel) {
@@ -1309,12 +1339,14 @@ function revertPendingComposerSwitch() {
     reverted = true;
   }
   if (reverted) updateModelChip();
-  if (state.pendingThinkLevel) {
-    const pend = state.pendingThinkLevel;
-    state.pendingThinkLevel = null;
-    state.thinkLevel = pend.prev;
-    const chip = document.querySelector('#think-chip');
-    if (chip) chip.textContent = '思考 · ' + (THINK_LABEL[pend.prev] || pend.prev);
+  if (state.pendingThinkLevels && state.pendingThinkLevels.size) {
+    const first = state.pendingThinkLevels.values().next();
+    state.pendingThinkLevels.clear();
+    if (!first.done && first.value) {
+      state.thinkLevel = first.value.prev;
+      const chip = document.querySelector('#think-chip');
+      if (chip) chip.textContent = '思考 · ' + (THINK_LABEL[first.value.prev] || first.value.prev);
+    }
   }
 }
 const inputEl = $('#input');
@@ -1754,7 +1786,14 @@ async function renderProjectTree(useCache = false) {
   }
 }
 async function loadProjects() {
-  state.cfg = await api.get('/api/config');
+  // v1.4.4 review P4b: apiParse resolves a non-2xx as {error}, and this assigned that
+  // OBJECT to state.cfg — so a refused /api/config did not enter the boot catch at all, the
+  // UI silently degraded, and every later `state.cfg.projects?.length` read garbage. An
+  // error payload is an error: throw, so the caller's catch can surface it.
+  const cfgDoc = await api.get('/api/config');
+  if (!cfgDoc || cfgDoc.error) throw new Error((cfgDoc && cfgDoc.error) || '/api/config 无响应');
+  if (!Array.isArray(cfgDoc.projects)) throw new Error('/api/config 返回了意外的结构（缺少 projects）');
+  state.cfg = cfgDoc;
   applyI18n(); applyThemeBtns();
   if (!state.project && state.cfg.projects?.length) state.project = state.cfg.projects[0];
   if (state.project && !(state.cfg.projects || []).some((p) => p.path === state.project.path)) {
@@ -2015,15 +2054,15 @@ function renderCurrentCfg() {
       // v1.4.2 review M6: snapshot the model this switch REPLACES *before* overwriting it,
       // so a failed ack can restore exactly what was running when THIS switch was made —
       // even if another switch is already in flight.
+      // v1.4.4 review P2: this path used to `.set()` the Map directly while the composer
+      // menu went through trackModelSwitch — two registration points for one contract, so
+      // the "one place registers a switch" claim was only half true. Register, then send,
+      // in that order (a fast ack must never find an empty Map).
       const prevModelForSetModel = state.selModel;
       state.cfg.defaultModel = key;
       state.selModel = key;
       updateModelChip();
-      // set_model acks are matched by MODEL, not by one shared slot: the old single
-      // `pendingSetModel` let the FIRST ack of two quick switches revert the chip to a
-      // model the second request had already replaced.
-      state.pendingSetModels = state.pendingSetModels || new Map();
-      state.pendingSetModels.set(key, { prev: prevModelForSetModel });
+      trackModelSwitch(key, prevModelForSetModel);
       try { rpcTo({ type: 'set_model', provider: name, modelId: mid }); } catch { /* socket may be closed mid-edit */ }
       renderCurrentCfg();
       if (state.editProv === name) renderProvModels(state.modelsDoc.providers[name] || {});
@@ -2682,15 +2721,21 @@ function updateContextBar(pct) {
 
 let cronJobs = [];
 let cronLoaded = false; // v1.4.3 review #19: saving over an unloaded list deletes every job
+// v1.4.4 review: loadCron/loadMcp had no request sequencing, so a slow older response could
+// land after a newer one and replace the list (and re-arm `loaded`) with stale data — the
+// same race #23 fixed for the file browser.
+let cronLoadSeq = 0;
 async function loadCron() {
   // v1.4.3 review #19: a failed GET resolved to `{jobs: []}` and the next save posted that
   // empty list — one flaky load silently DELETED every scheduled job. A load failure now
   // leaves the current list untouched and disables saving until a reload succeeds.
+  const seq = ++cronLoadSeq;
   let loaded = false;
   try {
     const r = await api.get('/api/cron');
+    if (seq !== cronLoadSeq) return; // a newer load owns the list now
     if (r && !r.error && Array.isArray(r.jobs)) { cronJobs = r.jobs; loaded = true; }
-  } catch { /* network died — keep what we have */ }
+  } catch { if (seq !== cronLoadSeq) return; /* network died — keep what we have */ }
   cronLoaded = loaded;
   const saveBtn = $('#btn-cron-save');
   if (saveBtn) saveBtn.disabled = !loaded;
@@ -2734,6 +2779,14 @@ function renderCronJobs() {
   }).join('');
   box.querySelectorAll('.cron-en-sw').forEach((sw) => {
     sw.onchange = async () => {
+      // v1.4.4 review: the save BUTTON checks cronLoaded (#19) but this toggle posts the
+      // whole list anyway — after a failed load, flipping a switch wrote back the stale,
+      // possibly empty list, which is exactly what #19 closed on the other door.
+      if (!cronLoaded) {
+        sw.checked = sw.checked !== true; // undo the visual toggle
+        $('#cron-status').textContent = '定时任务未加载成功，已阻止保存（否则会覆盖现有任务）';
+        return;
+      }
       const job = cronJobs.find((x) => x.id === sw.dataset.id);
       if (!job) return;
       const prev = job.enabled;
@@ -2858,17 +2911,20 @@ async function loadBackup() {
   $('#backup-status').textContent = '';
 }
 let mcpLoaded = false; // v1.4.3 review #19: saving over an unloaded doc replaces the real config
+let mcpLoadSeq = 0;    // v1.4.4: same sequence guard as loadCron — a stale response must not repaint
 async function loadMcp() {  // v1.4.3 review #19: same shape as cron — a failed load filled the editor with an empty
   // document, and pressing 保存 then REPLACED the real MCP config with `{mcpServers:{}}`.
   // On failure the editor keeps whatever it had and saving stays disabled.
+  const seq = ++mcpLoadSeq;
   let loaded = false;
   try {
     const r = await api.get('/api/mcp/config');
+    if (seq !== mcpLoadSeq) return; // a newer load owns the editor now
     if (r && !r.error && r.mcpServers && typeof r.mcpServers === 'object') {
       $('#mcp-editor').value = JSON.stringify(r, null, 2);
       loaded = true;
     }
-  } catch { /* network died — keep the editor as it is */ }
+  } catch { if (seq !== mcpLoadSeq) return; /* network died — keep the editor as it is */ }
   mcpLoaded = loaded;
   const saveBtn = $('#btn-mcp-save');
   if (saveBtn) saveBtn.disabled = !loaded;
@@ -3181,9 +3237,24 @@ $('#btn-update-check').onclick = async () => {
 };
 
 // ---------- boot ----------
+// v1.4.4 review P4c: this collected errors and NOTHING ever read the array — dead
+// telemetry that made "we record boot errors" true only on paper. It now renders into the
+// status line (click to open the full list) so a user can report what actually broke.
 window.__bootErrors = [];
-window.addEventListener('error', (e) => { window.__bootErrors.push(String(e.message || e).slice(0, 200)); });
-window.addEventListener('unhandledrejection', (e) => { window.__bootErrors.push('rejection: ' + String(e.reason && e.reason.stack || e.reason).slice(0, 200)); });
+function noteBootError(line) {
+  window.__bootErrors.push(line);
+  const el = document.getElementById('statusline');
+  if (!el) return;
+  const n = window.__bootErrors.length;
+  el.textContent = `界面出现 ${n} 个脚本错误（点击查看）`;
+  el.style.cursor = 'pointer';
+  el.onclick = () => {
+    const body = window.__bootErrors.map((x, i) => `${i + 1}. ${x}`).join('\n');
+    window.prompt('启动/运行期脚本错误（可复制反馈）：', body);
+  };
+}
+window.addEventListener('error', (e) => noteBootError(String(e.message || e).slice(0, 200)));
+window.addEventListener('unhandledrejection', (e) => noteBootError('rejection: ' + String(e.reason && e.reason.stack || e.reason).slice(0, 200)));
 // v1.4.3 review #18/#24/#20: ONE registration point for optimistic composer state, exposed
 // on the bridge BEFORE the first await — the old code assigned window.__wb at the END of
 // boot, after `await loadProjects()`, so a click during a slow boot reached `__wb.state`
@@ -3193,22 +3264,29 @@ function trackModelSwitch(key, prev) {
   state.pendingSetModels.set(key, { prev: prev || null });
 }
 function trackThinkingSwitch(level, prev) {
-  state.pendingThinkLevel = { level, prev: prev || 'medium' };
+  state.pendingThinkLevels = state.pendingThinkLevels || new Map();
+  state.pendingThinkLevels.set(level, { prev: prev || 'medium' });
 }
-window.__wb = { get state() { return state; }, rpcTo, updateModelChip, uiRequest: handleUiRequest, trackModelSwitch, trackThinkingSwitch }; // uiRequest is exposed for contract probes (Escape must answer extensions)
+window.__wb = { get state() { return state; }, rpcTo, updateModelChip, uiRequest: handleUiRequest, trackModelSwitch, trackThinkingSwitch, revertComposerSwitch: revertPendingComposerSwitch }; // uiRequest is exposed for contract probes (Escape must answer extensions)
 (async function boot() {
   marked.setOptions({ breaks: true, gfm: true });
   // v1.4.3 review #21: loadProjects had no error handling — one failed /api/config (server
   // briefly restarting, socket hiccup at boot) aborted the whole boot IIFE: no WS, no
   // empty state, no retry affordance, just a static shell. The failure is now surfaced
   // with a retry, and boot continues so the WS and the rest of the shell come up.
+  let bootOk = true;
   try {
     await loadProjects();
   } catch (e) {
+    bootOk = false;
     $('#statusline').textContent = '启动加载失败：' + (e && e.message ? e.message : e) + '——点此重试';
     $('#statusline').style.cursor = 'pointer';
     $('#statusline').onclick = () => location.reload();
   }
+  // v1.4.4 review P5: that reload handler was never removed, so after a RECOVERED boot any
+  // later click on the status line (a stderr line, a model-switch message) reloaded the page
+  // and threw away the draft. It only exists to retry a FAILED boot.
+  if (bootOk) { $('#statusline').onclick = null; $('#statusline').style.cursor = ''; }
   wsConnect();
   api.get('/api/kernel').then((k) => { const el = $('#sb-gw'); if (el && k && k.port) el.textContent = '网关 ' + k.port; }).catch(() => {});
   clearTimeline(true);

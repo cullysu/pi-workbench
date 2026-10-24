@@ -1,0 +1,74 @@
+fix: wave 34 — v1.4.4 follow-up review (1 high, 10 medium/low) + registry-published highs in the shipped shell
+
+The follow-up review scored wave 33 "main shape closed, siblings still open" and proved it:
+the IPv6 half of the local-URL policy had never been reviewed, and every sibling of the
+previous fixes was still open. Everything named below carries a regression lock proven red
+on the pre-fix code (11 locks: 7 via tests/v144-fixes, 4 via verify-audit-fixes running the
+extracted functions).
+
+High: isLocalUrlHostname only knew ::1, :: and .ipv6-literal.net, so [fe80::1], [fd12::1] and
+[::ffff:127.0.0.1] classified as public and were followed with PIWB_DISALLOW_LOCAL_URLS=1
+(the reviewer executed each). Real prefix checks now (unspecified/loopback/fe80::/10/fc00::/7/
+IPv4-mapped judged by the IPv4 rules), zone ids stripped, malformed input rejected; and
+fetchJsonCapped polices its own first hop instead of trusting every caller to run
+assertHttpUrl.
+
+Siblings: provider delete sweeps cooldowns in all three key shapes (P1 — re-creating a
+provider under the same name inherited the deleted one's cooldown); save() validates
+unconditionally so omitting `models` cannot bypass the row rules; kbfill's rollback
+distinguishes ENOENT from a read error (it used to rmSync a live models.json on a failed
+read) and no longer creates a model-meta.json the caller never had; the MCP install load
+gate verifies in a CHILD process (await import ran extension top-level code inside the
+server, and every unique stage path accumulated module copies forever) and the receipt
+stopped testing the hasDepInStage function object; geminiList reads off the fd and falls
+back to a narrow scan instead of silently empty previews, and truncation markers travel
+(items.capped/out.truncated were properties on arrays — dropped by JSON.stringify — and
+opencode's >20000 test could never fire against a list cut to exactly 20000); mcp-scrub
+covers compound flags (--session-token, --auth, --x-api-key), the -H= form and env-style
+argv (API_KEY=abc); the cron enable toggle honours the #19 load gate and loadCron/loadMcp
+carry sequence guards; exports are serialised (two concurrent exports used to steal each
+other's fixed-name redaction intermediates, silently omitting models.json from a keys-free
+backup) and prune defers to an in-flight import; schema validates priority (blank was
+Number('')=0, an explicit lowest priority where "absent" was meant), cooldown values
+(until:'soon' sat as a fail-open "not cooled" entry), header values (consumers silently
+dropped non-strings), and rejects null provider rows on both doors; loadRouting LOGS every
+drop — a hand-edited file losing a provider used to be a silent disappearance.
+
+Composer contract (P2/P3): one registration point for real (the config panel used .set()
+directly); both chips register before sending, guarded; the server names the refused
+command in rpc-denied and the client settles only composer commands (any denial used to
+clear an in-flight pending, after which the success ack no-oped and the chip stayed wrong);
+the revert takes the FIRST switch's prev and honours null prev; thinking switches keep a
+per-level Map matched by the level the ack names, and exactly one handler consumes
+get_available_thinking_levels.
+
+Boot/reload (P4/P5): a 20s deadline on every API call (a hung backend used to park boot at
+its first await forever — the case the #21 catch could not reach); loadProjects rejects an
+{error} payload instead of storing it in state.cfg; __bootErrors renders into the status
+line instead of being dead telemetry; the boot-failure reload handler is removed on success
+(any later status-line click used to reload and throw away the draft).
+
+Gates: audit-gate keys on the ADVISORY range (npm's impact range and advisory range word
+their strings differently — a baseline written from one could not match a key built from
+the other), holds all range variants per advisory instead of the last one, FAILS on stale
+entries (an old "reviewed" conclusion used to silently re-apply), and fails when npm
+reports highs but the script collects zero named advisories; the SBOM gate no longer
+skips its coverage check when the lock path is missing; verify-audit-fixes gained four
+behavioural checks that RUN the extracted composer functions; the v144 tests register temp
+dirs with the shared registry, run-tests counts declared cases and rejects empty files,
+signals exit 128+n.
+
+Planned-for but registry-driven: npm published seven highs for electron
+44.0.0-alpha.1–44.9.0 mid-wave. electron ships in every installer, so it is FIXED by
+upgrade (44.2.0 → 44.9.3), not baselined. GHSA-xjj6-f33q-929c also covers the previous
+undici pin (8.11.2 < 8.12.2), so the shipped pin moved to 8.12.2 with the lock recording
+the new tarball integrity; the three dev-tree undici copies are baselined with that note.
+
+Gates on this tree: lint 0/0, npm test 115/115, verify-audit-fixes 131/0, route-sweep 51+2/0,
+audit-gate 13 baselined / 0 outside, assert-version 1.4.5, SBOM 132 required packages fully
+covered with pins undici 8.12.2, cargo test 13/13. Version 1.4.5.
+
+Queued, stated plainly: verify string-assertion ratio still ~45%; the SBOM gate still does
+not demand the current platform's native optional binary (check-runtime carries that proof);
+DNS rebinding is outside the literal-hostname check; cron kind interpolation, the god files,
+the sync-IO inventory and the rest of the standing architecture list are unchanged.

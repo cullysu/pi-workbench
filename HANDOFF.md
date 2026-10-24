@@ -552,3 +552,34 @@ verify 字符串断言比例仍 ~45%；SBOM 门仍不校验「当前平台原生
 DNS rebinding（公网域名解析到环回）不在字面主机名检查内；cron `kind` 未转义插值、三个上帝文件、
 全同步 IO、electron scheme 白名单漂移、僵尸依赖（highlight.js）、DOMPurify 不在 package.json 等
 第三部分清单**原样未动**，与既往各轮一致按架构队列处理。
+
+---
+
+## 16. v1.4.5 发布终验记录（2026-10-24 10:1x Asia/Taipei）
+
+| 项 | 值 |
+|---|---|
+| 处置提交 | `85c6fc5`（wave 34，24 文件） |
+| tag `v1.4.5` | `85c6fc55257c76a4514102d77caff373ccec1de7`（= HEAD = CI head_sha = release target） |
+| CI run | **40048928275 — 11/11 job success** |
+| Release | <https://github.com/cullysu/pi-workbench/releases/tag/v1.4.5>（id 422456841，latest，7 资产） |
+| SBOM | `pi-workbench-runtime 1.4.5`，139 组件 |
+| exe FileVersion | 两个 Windows 包均 `1.4.5` |
+
+### 发布后回验
+
+重下 `SHA256SUMS.txt`、`sbom-pi-workbench.cdx.json`、`PiWorkbench-1.4.5-Tauri-x64-setup.exe`
+（67.9 MB），对照线上清单 **逐字节 MATCH**。
+
+### 本轮特殊性
+
+处置过程中 registry **当天新公布**了影响出货面的 high：electron 七条（44.0.0-alpha.1–44.9.0，
+壳随安装包发布 → 升级到 44.9.3 修复，不进基线）与 undici GHSA-xjj6-f33q-929c（覆盖旧 pin
+8.11.2 → 出货 pin 移至 8.12.2，lock 记录新 integrity；dev 树三份拷贝进基线）。两条都是
+audit-gate 当场红 → 评估 → 出货面修 / dev 树入基线 的正确回路，门禁第一次以「新增即红」的
+方式抓到真实变化。
+
+### 仍未闭合
+
+与 §15 一致：三平台实机验收、代码签名（需证书账号）、verify 字符串断言比例、SBOM 原生可选包
+在场校验、DNS rebinding、长期架构清单。
